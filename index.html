@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Loop It</title>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Loop It</h1>
+        <div id="progress">0 / 0</div>
+      </header>
+      <div id="boardWrap">
+        <canvas id="canvas"></canvas>
+        <div class="zoomControls">
+          <button id="zoomInBtn">+</button>
+          <button id="zoomOutBtn">–</button>
+          <button id="zoomFitBtn" style="font-size: 0.65rem">Fit</button>
+        </div>
+        <div id="winBanner">Loop complete!</div>
+      </div>
+      <div class="controls">
+        <label
+          >Size
+          <select id="sizeSelect">
+            <option value="3,4">Tiny</option>
+            <option value="4,6">Mini</option>
+            <option value="6,9" selected>Small</option>
+            <option value="8,12">Medium</option>
+            <option value="10,16">Large</option>
+            <option value="14,20">Huge</option>
+          </select>
+        </label>
+        <label
+          >Extra paths
+          <select id="densitySelect">
+            <option value="0.12">Few</option>
+            <option value="0.28" selected>Some</option>
+            <option value="0.45">Lots</option>
+          </select>
+        </label>
+        <button class="secondary" id="resetBtn">Reset</button>
+        <button id="newBtn">New Puzzle</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+
