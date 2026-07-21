@@ -10,7 +10,10 @@
     <div id="app">
       <header>
         <h1>Loop It</h1>
-        <div id="progress">0 / 0</div>
+        <div id="headerInfo">
+          <div id="puzzleLabel"></div>
+          <div id="progress">0 / 0</div>
+        </div>
       </header>
       <div id="boardWrap">
         <canvas id="canvas"></canvas>
@@ -20,32 +23,35 @@
           <button id="zoomFitBtn" style="font-size: 0.65rem">Fit</button>
         </div>
         <div id="winBanner">Loop complete!</div>
+        <div id="reviewBar" class="hidden">
+          <span id="reviewLabel"></span>
+          <button class="secondary" id="exitReviewBtn">Done</button>
+        </div>
       </div>
-      <div class="controls">
+      <div class="controls" id="playControls">
         <label
           >Size
           <select id="sizeSelect">
-            <option value="3,4">Tiny</option>
-            <option value="4,6">Mini</option>
-            <option value="6,9" selected>Small</option>
-            <option value="8,12">Medium</option>
-            <option value="10,16">Large</option>
-            <option value="14,20">Huge</option>
-          </select>
-        </label>
-        <label
-          >Extra paths
-          <select id="densitySelect">
-            <option value="0.12">Few</option>
-            <option value="0.28" selected>Some</option>
-            <option value="0.45">Lots</option>
+            <option value="tiny">Tiny</option>
+            <option value="mini">Mini</option>
+            <option value="small" selected>Small</option>
+            <option value="medium">Medium</option>
+            <option value="large">Large</option>
+            <option value="huge">Huge</option>
           </select>
         </label>
         <button class="secondary" id="resetBtn">Reset</button>
-        <button id="newBtn">New Puzzle</button>
+        <button class="secondary" id="historyBtn">History</button>
+        <button id="nextBtn" disabled>Next Puzzle</button>
       </div>
+    </div>
+    <div id="historyOverlay" class="hidden">
+      <div class="overlayHeader">
+        <h2>Completed Puzzles</h2>
+        <button class="secondary" id="closeHistoryBtn">Close</button>
+      </div>
+      <div id="historyList"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
-

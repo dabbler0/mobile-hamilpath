@@ -1,5 +1,6 @@
 import type { Layout } from './game/geometry';
-import { tryStartPathDrag, updatePathDrag, type DragEnd, type PathState } from './game/pathDrag';
+import type { Cell } from './game/hamiltonianCycle';
+import { findInteriorNodeAt, splitSegmentAtCell, tryStartPathDrag, updatePathDrag, type PathState } from './game/pathDrag';
 import type { Puzzle } from './game/puzzle';
 import { computePan, toCanvasLocal, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -14,6 +15,9 @@ export interface GameInputHost {
   bounds: ViewportBounds;
   wrapEl: HTMLElement;
 }
+
+/** Pointer movement, in client pixels, below which a press-release counts as a tap rather than a pan. */
+const TAP_MOVEMENT_THRESHOLD = 8;
 
 function dist(a: { x: number; y: number }, b: { x: number; y: number }): number {
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -36,16 +40,25 @@ interface PanState {
   lastClientY: number;
 }
 
+interface TapCandidate {
+  segmentIndex: number;
+  cellIndex: number;
+  downClientX: number;
+  downClientY: number;
+}
+
 /**
  * Wires unified pointer handling onto `canvas`: single-finger drags near a
- * path endpoint edit the path, single-finger drags elsewhere pan the board,
- * and two-finger gestures pinch-zoom. Returns a teardown function.
+ * segment endpoint extend/retract/merge it, a tap on a segment's interior
+ * cell splits it in two, single-finger drags elsewhere pan the board, and
+ * two-finger gestures pinch-zoom. Returns a teardown function.
  */
 export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost): () => void {
   const activePointers = new Map<number, { x: number; y: number }>();
   let pinch: PinchState | null = null;
   let panState: PanState | null = null;
-  let dragEnd: DragEnd | null = null;
+  let draggedCell: Cell | null = null;
+  let tapCandidate: TapCandidate | null = null;
 
   function wrapLocal(clientX: number, clientY: number): [number, number] {
     const rect = host.wrapEl.getBoundingClientRect();
@@ -53,8 +66,9 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
   }
 
   function startPinch() {
-    dragEnd = null;
+    draggedCell = null;
     panState = null;
+    tapCandidate = null;
     const pts = [...activePointers.values()];
     const [p1, p2] = pts;
     const [mwx, mwy] = wrapLocal(midpoint(p1, p2).x, midpoint(p1, p2).y);
@@ -82,18 +96,25 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       startPinch();
       return;
     }
-    const { won, path } = host.getPathState();
+    const { won, segments } = host.getPathState();
     if (won) {
       panState = { lastClientX: evt.clientX, lastClientY: evt.clientY };
       return;
     }
     const [wx, wy] = wrapLocal(evt.clientX, evt.clientY);
     const [px, py] = toCanvasLocal(wx, wy, host.getView());
-    const mode = tryStartPathDrag(path, px, py, host.getLayout());
-    if (mode) {
-      dragEnd = mode;
-    } else {
-      panState = { lastClientX: evt.clientX, lastClientY: evt.clientY };
+    const layout = host.getLayout();
+
+    const endpoint = tryStartPathDrag(segments, px, py, layout);
+    if (endpoint) {
+      draggedCell = endpoint;
+      return;
+    }
+
+    panState = { lastClientX: evt.clientX, lastClientY: evt.clientY };
+    const interior = findInteriorNodeAt(segments, px, py, layout);
+    if (interior) {
+      tapCandidate = { ...interior, downClientX: evt.clientX, downClientY: evt.clientY };
     }
   }
 
@@ -115,11 +136,18 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       return;
     }
 
-    if (dragEnd && !host.getPathState().won) {
+    if (draggedCell && !host.getPathState().won) {
+      tapCandidate = null;
       const [wx, wy] = wrapLocal(evt.clientX, evt.clientY);
       const [px, py] = toCanvasLocal(wx, wy, host.getView());
-      const { path, won } = host.getPathState();
-      host.setPathState(updatePathDrag(host.getPuzzle(), path, won, dragEnd, px, py, host.getLayout()));
+      const { segments, won } = host.getPathState();
+      const result = updatePathDrag(host.getPuzzle(), segments, won, draggedCell, px, py, host.getLayout());
+      // A merge that just happened stops the drag here: if we kept tracking the
+      // joined segment's far end, further movement toward the join itself (the
+      // common case — that's where the finger was already headed) would hill-climb
+      // straight back through it, silently un-merging what was just joined.
+      draggedCell = result.segments.length < segments.length ? null : result.draggedCell;
+      host.setPathState({ segments: result.segments, won: result.won });
       return;
     }
 
@@ -152,8 +180,18 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       }
       return;
     }
-    dragEnd = null;
+
+    if (tapCandidate && !draggedCell && !host.getPathState().won) {
+      const moved = dist({ x: evt.clientX, y: evt.clientY }, { x: tapCandidate.downClientX, y: tapCandidate.downClientY });
+      if (moved < TAP_MOVEMENT_THRESHOLD) {
+        const { segments, won } = host.getPathState();
+        host.setPathState({ segments: splitSegmentAtCell(segments, tapCandidate.segmentIndex, tapCandidate.cellIndex), won });
+      }
+    }
+
+    draggedCell = null;
     panState = null;
+    tapCandidate = null;
   }
 
   canvas.addEventListener('pointerdown', onPointerDown as EventListener);

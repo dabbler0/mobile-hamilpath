@@ -1,10 +1,10 @@
 import { toScreen, type Layout } from './game/geometry';
-import type { Cell } from './game/hamiltonianCycle';
+import type { Segment } from './game/pathDrag';
 import { parseKey, type Puzzle } from './game/puzzle';
 
 export interface RenderState {
   puzzle: Puzzle;
-  path: readonly Cell[];
+  segments: readonly Segment[];
   won: boolean;
 }
 
@@ -14,12 +14,11 @@ const COLORS = {
   node: '#45474f',
   pathActive: '#4f7cff',
   pathWon: '#35c46a',
-  endpointHead: '#ffffff',
-  endpointTail: '#8fb0ff',
+  endpoint: '#8fb0ff',
 };
 
 export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, state: RenderState, layout: Layout): void {
-  const { puzzle, path, won } = state;
+  const { puzzle, segments, won } = state;
 
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
   ctx.fillStyle = COLORS.background;
@@ -27,7 +26,7 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
 
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
-  if (path.length > 0) drawPath(ctx, path, won, layout);
+  for (const seg of segments) drawSegment(ctx, seg, won, layout);
 }
 
 function drawEdges(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout): void {
@@ -63,32 +62,32 @@ function drawNodes(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout
   }
 }
 
-function drawPath(ctx: CanvasRenderingContext2D, path: readonly Cell[], won: boolean, layout: Layout): void {
+function drawSegment(ctx: CanvasRenderingContext2D, seg: Segment, won: boolean, layout: Layout): void {
   ctx.strokeStyle = won ? COLORS.pathWon : COLORS.pathActive;
   ctx.lineWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.beginPath();
-  let [sx, sy] = toScreen(path[0], layout);
+  let [sx, sy] = toScreen(seg[0], layout);
   ctx.moveTo(sx, sy);
-  for (let i = 1; i < path.length; i++) {
-    [sx, sy] = toScreen(path[i], layout);
+  for (let i = 1; i < seg.length; i++) {
+    [sx, sy] = toScreen(seg[i], layout);
     ctx.lineTo(sx, sy);
   }
   if (won) {
-    [sx, sy] = toScreen(path[0], layout);
+    [sx, sy] = toScreen(seg[0], layout);
     ctx.lineTo(sx, sy);
   }
   ctx.stroke();
 
   const endpointRadius = Math.max(4, layout.cellSize * 0.26);
-  const drawEndpoint = (cell: Cell, isStart: boolean) => {
-    const [ex, ey] = toScreen(cell, layout);
+  const drawEndpoint = (index: number) => {
+    const [ex, ey] = toScreen(seg[index], layout);
     ctx.beginPath();
     ctx.arc(ex, ey, endpointRadius, 0, Math.PI * 2);
-    ctx.fillStyle = won ? COLORS.pathWon : isStart ? COLORS.endpointHead : COLORS.endpointTail;
+    ctx.fillStyle = won ? COLORS.pathWon : COLORS.endpoint;
     ctx.fill();
   };
-  drawEndpoint(path[0], true);
-  if (path.length > 1) drawEndpoint(path[path.length - 1], false);
+  drawEndpoint(0);
+  if (seg.length > 1) drawEndpoint(seg.length - 1);
 }
