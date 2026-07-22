@@ -14,7 +14,7 @@ import { computeFitView, computeZoomAt, type Viewport, type ViewportBounds } fro
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
 const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
 /** How long each replay frame stays on screen. */
-const REPLAY_FRAME_MS = 180;
+const REPLAY_FRAME_MS = 50;
 /** How long a transient status message (e.g. "undo history unavailable") stays visible. */
 const TOAST_MS = 3200;
 
