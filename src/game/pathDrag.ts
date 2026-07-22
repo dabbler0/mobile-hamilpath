@@ -90,11 +90,69 @@ export function splitSegmentAtCell(segments: readonly Segment[], segmentIndex: n
   return [...segments.slice(0, segmentIndex), before, after, ...segments.slice(segmentIndex + 1)];
 }
 
+/**
+ * A single atomic mutation applied to `segments`/`won`, as produced by one
+ * iteration of `updatePathDrag`'s hill-climbing loop (or a direct split).
+ * This is the compact, replayable unit the game-history feature logs: each
+ * op is O(1) regardless of how long the segments involved are, so a whole
+ * game's move history stays small no matter the board size. `applyPathOp`
+ * is the forward-only inverse of however each op was produced — replaying
+ * a game's recorded ops through it from `createInitialPath` reconstructs
+ * every state the path ever passed through.
+ */
+export type PathOp =
+  | { op: 'extend'; seg: number; end: 'head' | 'tail'; cell: Cell }
+  | { op: 'retract'; seg: number; end: 'head' | 'tail' }
+  | { op: 'merge'; seg: number; end: 'head' | 'tail'; otherSeg: number; otherEnd: 'head' | 'tail' }
+  | { op: 'split'; seg: number; cellIndex: number }
+  | { op: 'win' };
+
+/**
+ * Applies one `PathOp` to `segments`/`won`, mirroring exactly the mutation
+ * `updatePathDrag` (or a direct split call) performed when the op was
+ * recorded. Used to reconstruct intermediate states for the replay
+ * animation and is the one place that logic must stay in sync with
+ * `updatePathDrag`'s own extend/retract/merge/split/win handling below.
+ */
+export function applyPathOp(segments: readonly Segment[], won: boolean, op: PathOp): { segments: Segment[]; won: boolean } {
+  const working: Segment[] = segments.map((seg) => seg.map((c): Cell => [c[0], c[1]]));
+  switch (op.op) {
+    case 'extend': {
+      const seg = working[op.seg];
+      if (op.end === 'head') seg.unshift(op.cell);
+      else seg.push(op.cell);
+      return { segments: working, won };
+    }
+    case 'retract': {
+      const seg = working[op.seg];
+      if (op.end === 'head') seg.shift();
+      else seg.pop();
+      return { segments: working, won };
+    }
+    case 'split':
+      return { segments: splitSegmentAtCell(working, op.seg, op.cellIndex), won };
+    case 'merge': {
+      const seg = working[op.seg];
+      const otherSeg = working[op.otherSeg];
+      const mySide = op.end === 'head' ? [...seg].reverse() : seg;
+      const otherSide = op.otherEnd === 'head' ? otherSeg : [...otherSeg].reverse();
+      const merged = [...mySide, ...otherSide];
+      const filtered = working.filter((_, idx) => idx !== op.seg && idx !== op.otherSeg);
+      filtered.push(merged);
+      return { segments: filtered, won };
+    }
+    case 'win':
+      return { segments: working, won: true };
+  }
+}
+
 export interface DragStepResult {
   segments: Segment[];
   won: boolean;
   /** The cell the caller should keep treating as "the dragged endpoint" on the next pointer move. */
   draggedCell: Cell;
+  /** Every atomic mutation this call performed, in order — see `PathOp`. Empty if the call was a no-op (pointer/target didn't pull the endpoint anywhere new). */
+  ops: PathOp[];
 }
 
 /**
@@ -125,6 +183,7 @@ export function updatePathDrag(
   let dragged = draggedCell;
   let progressed = true;
   let guard = 0;
+  const ops: PathOp[] = [];
 
   while (progressed && guard < 400) {
     progressed = false;
@@ -160,6 +219,7 @@ export function updatePathDrag(
     if (!bestLoc) {
       if (isHead) seg.unshift(bestCell);
       else seg.push(bestCell);
+      ops.push({ op: 'extend', seg: loc.segmentIndex, end: isHead ? 'head' : 'tail', cell: bestCell });
       dragged = bestCell;
       progressed = true;
       continue;
@@ -170,6 +230,7 @@ export function updatePathDrag(
       if (predIdx >= 0 && bestLoc.cellIndex === predIdx) {
         if (isHead) seg.shift();
         else seg.pop();
+        ops.push({ op: 'retract', seg: loc.segmentIndex, end: isHead ? 'head' : 'tail' });
         dragged = isHead ? seg[0] : seg[seg.length - 1];
         progressed = true;
         continue;
@@ -177,6 +238,7 @@ export function updatePathDrag(
       const otherEndIdx = isHead ? seg.length - 1 : 0;
       if (bestLoc.cellIndex === otherEndIdx && seg.length === totalCells(puzzle)) {
         nextWon = true;
+        ops.push({ op: 'win' });
       }
       break;
     }
@@ -191,13 +253,14 @@ export function updatePathDrag(
     const farEnd = otherIsHead ? otherSeg[otherSeg.length - 1] : otherSeg[0];
     const merged = [...mySide, ...otherSide];
 
+    ops.push({ op: 'merge', seg: loc.segmentIndex, end: isHead ? 'head' : 'tail', otherSeg: bestLoc.segmentIndex, otherEnd: otherIsHead ? 'head' : 'tail' });
     workingSegments = workingSegments.filter((_, idx) => idx !== loc.segmentIndex && idx !== bestLoc.segmentIndex);
     workingSegments.push(merged);
     dragged = farEnd;
     break;
   }
 
-  return { segments: workingSegments, won: nextWon, draggedCell: dragged };
+  return { segments: workingSegments, won: nextWon, draggedCell: dragged, ops };
 }
 
 /** A grid direction as (dx, dy); only the four orthogonal directions are meaningful since every puzzle edge connects lattice-adjacent cells. */
@@ -266,6 +329,7 @@ export function runPathEndDirection(
   let merged = false;
   let mergeJoinCell: Cell | null = null;
   let guard = 0;
+  const ops: PathOp[] = [];
 
   while (guard++ < 400) {
     const step = stepPathEndDirection(puzzle, workingSegments, nextWon, dragged, direction, layout);
@@ -279,6 +343,7 @@ export function runPathEndDirection(
     workingSegments = step.segments;
     nextWon = step.won;
     dragged = step.draggedCell;
+    ops.push(...step.ops);
 
     if (didMerge) {
       merged = true;
@@ -292,5 +357,5 @@ export function runPathEndDirection(
     if (degree !== 2) break;
   }
 
-  return { segments: workingSegments, won: nextWon, draggedCell: dragged, merged, mergeJoinCell };
+  return { segments: workingSegments, won: nextWon, draggedCell: dragged, merged, mergeJoinCell, ops };
 }

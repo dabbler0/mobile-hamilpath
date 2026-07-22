@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { createHistory, recordMove, type HistoryState } from '../game/history';
 import { clearAllStoresForTests } from './db';
 import {
   clearInProgress,
@@ -102,6 +103,23 @@ describe('in-progress persistence', () => {
     await clearInProgress(id.day, id.sizeKey);
     expect(await getInProgress(id.day, id.sizeKey)).toBeUndefined();
   });
+
+  it('round-trips an undo/redo history alongside the segments', async () => {
+    const id = { day: '2026-07-10', sizeKey: 'mini', index: 0 };
+    const history: HistoryState = recordMove(createHistory(), { segments: [[[0, 0]]], won: false }, [
+      { op: 'extend', seg: 0, end: 'tail', cell: [1, 0] },
+    ]);
+    await saveInProgress(id, [[[0, 0], [1, 0]]], history);
+    const loaded = await getInProgress(id.day, id.sizeKey);
+    expect(loaded?.history).toEqual(history);
+  });
+
+  it('leaves history undefined for a save that never provided one (older save format)', async () => {
+    const id = { day: '2026-07-10', sizeKey: 'mini', index: 0 };
+    await saveInProgress(id, [[[0, 0]]]);
+    const loaded = await getInProgress(id.day, id.sizeKey);
+    expect(loaded?.history).toBeUndefined();
+  });
 });
 
 describe('completed games', () => {
@@ -132,5 +150,22 @@ describe('completed games', () => {
     for (let i = 1; i < all.length; i++) {
       expect(all[i - 1].completedAt).toBeGreaterThanOrEqual(all[i].completedAt);
     }
+  });
+
+  it('stores the move log for replay when provided', async () => {
+    const id = { day: '2026-07-10', sizeKey: 'mini', index: 0 };
+    const history = recordMove(createHistory(), { segments: [[[0, 0]]], won: false }, [
+      { op: 'extend', seg: 0, end: 'tail', cell: [1, 0] },
+    ]);
+    await recordCompletion(id, [[[0, 0], [1, 0]]], history.moveLog);
+    const completed = await getCompleted(id);
+    expect(completed?.moveLog).toEqual(history.moveLog);
+  });
+
+  it('leaves moveLog undefined for a completion that never provided one (older completion format)', async () => {
+    const id = { day: '2026-07-10', sizeKey: 'mini', index: 0 };
+    await recordCompletion(id, [[[0, 0]]]);
+    const completed = await getCompleted(id);
+    expect(completed?.moveLog).toBeUndefined();
   });
 });

@@ -160,6 +160,91 @@ as a ring (dashed white while free, solid blue while held).
   `updatePathDrag`); `keyboard.ts` reads `mergeJoinCell` for the cursor
   position instead of `draggedCell` whenever a merge happened.
 
+## Undo/redo and replay (game history)
+
+Undo/redo (Undo/Redo buttons, ctrl+z / ctrl+y / ctrl+shift+z) and the
+replay "movie" for a finished puzzle share one recording mechanism, but
+deliberately keep *two different logs* because they have different
+requirements: undoing a move and then making a different move should let
+you redo back into the abandoned branch for a while (classic linear undo
+semantics), but the replay movie should show *everything that really
+happened*, including a move that was later undone — "redo-ing over" a
+move should not erase it from the movie.
+
+- **`src/game/pathDrag.ts`'s `PathOp`** is the atomic, compact unit both
+  logs are built from: `extend`/`retract`/`merge`/`split`/`win`, each O(1)
+  regardless of how long the segments involved are (a `merge` is just two
+  segment indices + which ends touched, not the merged cells). `applyPathOp`
+  is the forward-only replay of one op. `updatePathDrag` (and therefore
+  `stepPathEndDirection`/`runPathEndDirection`) now returns `ops: PathOp[]`
+  alongside its usual result — every mutation the hill-climbing loop made,
+  in order, so one pointer-move or key-press call that resolves into several
+  extend/retract steps still reports each one individually. Split doesn't
+  happen inside `updatePathDrag` (it's a direct tap/keyboard action in
+  `input.ts`/`keyboard.ts`), so those two call sites construct the `split`
+  op by hand right next to their `splitSegmentAtCell` call.
+- **Why ops, not full snapshots**: a naive move log storing the whole
+  `PathState` after every change is O(path length) per entry, so a full
+  solve of the largest board (huge = 1120 cells) would cost O(n²) total —
+  hundreds of KB for one game. Logging ops instead is O(1) per entry, O(n)
+  total for a whole solve, which is what "fairly compact" actually requires
+  here — see `src/game/pathCodec.ts`'s segment encoding (start cell +
+  one direction char per step, e.g. `"3,4:RRDU"`) for the other compactness
+  lever, used for the (bounded-size) undo-stack snapshots below.
+- **`src/game/history.ts`'s `HistoryState { undoStack, redoStack, moveLog }`**:
+  - `undoStack`/`redoStack` are stacks of *full* encoded `PathState`
+    snapshots (via `pathCodec.ts`), capped at `MAX_UNDO_DEPTH` (200) so a
+    very long game's undo stack doesn't grow without bound — this is a
+    normal, expected undo-depth limit, not a bug. `recordMove` pushes the
+    pre-move state onto `undoStack` and clears `redoStack` (standard
+    linear-undo semantics: you can't redo into a branch you've since moved
+    away from). `undo`/`redo` just pop a snapshot and hand it back —
+    no op-inversion needed, which is what keeps this side of the design
+    simple.
+  - `moveLog` is append-only and *never* truncated: a real move appends a
+    compact `{ kind: 'ops', ops }` entry; an undo or redo appends a
+    `{ kind: 'jump', state }` entry (the snapshot it's jumping to, which
+    `undo`/`redo` already have on hand from the stack pop — no extra
+    encoding work). Because undo/redo add entries instead of removing them,
+    doing a move and then undoing it both show up, in the order they
+    actually happened. `decodeMoveLog(initial, moveLog)` expands this back
+    into the full frame-by-frame sequence of states for replay — one frame
+    per atomic op (plus one per jump), which is what makes the replay
+    animate cell-by-cell rather than jumping in big chunks. `initial` is
+    always `createInitialPath(puzzle)`, never itself stored, since it's
+    the same for every game of a given puzzle.
+- **`main.ts` wiring**: `setPathState` (the single funnel every pointer/
+  keyboard edit already went through) is now the one place that calls
+  `recordMove` — it's the only thing that needed to change in `input.ts`/
+  `keyboard.ts` was threading the `ops` their existing calls already
+  compute through to `setPathState`. `performUndo`/`performRedo` call
+  `history.ts`'s `undo`/`redo` and apply the returned state exactly like
+  any other path update. Undo/redo are only ever enabled while
+  `mode === 'playing' && !pathState.won` (`undoRedoAllowed()`) — editing is
+  already blocked everywhere else once a puzzle is won, so there's no
+  "undo the winning move" case to reconcile with `recordCompletion` having
+  already fired. **Reset** (`resetPath`) starts a fresh `history` too —
+  otherwise an eventual win's replay would confusingly interleave an
+  earlier abandoned attempt with the one that actually finished.
+- **Backward compatibility**: `history` on `InProgressRecord` and
+  `moveLog` on `CompletedRecord` (`gameStore.ts`) are both optional.
+  Resuming an old in-progress save with no `history` field falls back to a
+  fresh, empty `HistoryState` (undo/redo simply start unavailable) and
+  shows a one-time toast (`showToast`, `#toast`) explaining why — but only
+  when *resuming* an old save; a brand-new puzzle having no history yet is
+  completely normal and shows nothing. An old completed record with no
+  `moveLog` just disables the Replay button with an explanatory `title`,
+  rather than crashing `decodeMoveLog` on missing data.
+- **Replay UI**: `#reviewBar` swaps between `#reviewIdleControls`
+  (Replay/Done) and `#reviewPlaybackControls` (Play/Pause, a scrubber,
+  Done) rather than being two separate bars, to keep the CSS/layout
+  simple. `reviewWon` (distinct from the hardcoded `won: true` `render()`
+  used before this feature, for the static "view a finished puzzle" case)
+  tracks the *current replay frame's* own `won` flag, since mid-playback
+  frames usually aren't won yet — rendering them with `won` hardcoded true
+  would incorrectly draw the closing loop edge before the path actually
+  covers the board.
+
 ## Daily puzzle sequence
 
 `src/game/dailyPuzzle.ts`: a puzzle is identified by `PuzzleId { day,
@@ -188,17 +273,18 @@ API (db name `loopit`, version 1, three stores — no external library).
 - **`progress`** store, keyed by `day::sizeKey` → `{ unlockedIndex }`. The
   next playable index for that day+size (defaults to 0 via
   `getUnlockedIndex` when no record exists).
-- **`inProgress`** store, keyed by `day::sizeKey` → current segments for
-  whichever puzzle is active. `main.ts` autosaves here on every path change
-  (`saveInProgress`) and reads it back on load/size-switch
-  (`getInProgress`) to resume exactly where you left off. Cleared on win.
+- **`inProgress`** store, keyed by `day::sizeKey` → current segments (plus
+  the undo/redo `history`, see above) for whichever puzzle is active.
+  `main.ts` autosaves here on every path change (`saveInProgress`) and
+  reads it back on load/size-switch (`getInProgress`) to resume exactly
+  where you left off, undo stack included. Cleared on win.
 - **`completed`** store, keyed by `day::sizeKey::index` → the final
-  winning segments + timestamp. `recordCompletion()` is the one function
-  that does all three on a win: records the completed game, clears
-  in-progress, and advances `unlockedIndex` (only if the completed index
-  *was* the currently-unlocked one — a safety check, not normally
-  reachable any other way since the UI only ever lets you play the
-  unlocked index).
+  winning segments + timestamp + the game's `moveLog` (for replay, see
+  above). `recordCompletion()` is the one function that does all three on
+  a win: records the completed game, clears in-progress, and advances
+  `unlockedIndex` (only if the completed index *was* the
+  currently-unlocked one — a safety check, not normally reachable any
+  other way since the UI only ever lets you play the unlocked index).
 
 Puzzles are *not* stored in full — only `PuzzleId` + final segments. The
 puzzle graph is always regenerated on demand via `generateDailyPuzzle(id)`
@@ -216,9 +302,11 @@ re-opening).
 ## `main.ts` orchestration
 
 Holds the mutable app state: `mode: 'playing' | 'reviewing'`,
-`currentPuzzleId`, `puzzle`, `pathState`, plus separate `reviewPuzzle`/
-`reviewSegments` for the read-only history viewer (kept apart from the live
-game so opening a review can't disturb an in-progress puzzle).
+`currentPuzzleId`, `puzzle`, `pathState`, `history` (undo/redo + move log,
+see "Undo/redo and replay" above), plus separate `reviewPuzzle`/
+`reviewSegments`/`reviewWon`/`currentReviewItem` for the read-only history
+viewer (kept apart from the live game so opening a review can't disturb an
+in-progress puzzle).
 `activePuzzle()` / the `GameInputHost` given to `attachPointerHandling`
 both branch on `mode` — reviewing reports `won: true` unconditionally,
 which is what makes the input layer refuse edits and only allow pan/zoom
@@ -244,7 +332,7 @@ calls `enterReview()` which regenerates that puzzle and switches `mode`.
 
 ## Testing notes
 
-78 vitest tests, all in `*.test.ts` files next to their modules. Pure game
+111 vitest tests, all in `*.test.ts` files next to their modules. Pure game
 logic (`src/game/*`), viewport math, and persistence are unit tested.
 `render.ts`, `input.ts`, and `keyboard.ts` are not — they're thin DOM/canvas
 glue verified by hand instead (`keyboard.ts` pushes its actual step/run

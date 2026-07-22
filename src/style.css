@@ -149,6 +149,26 @@ button:disabled {
 #winBanner.show {
   transform: translateX(-50%) translateY(0);
 }
+#toast {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%) translateY(140%);
+  background: #2f3138;
+  color: #e8e8ea;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 999px;
+  max-width: 85%;
+  text-align: center;
+  transition: transform 0.35s cubic-bezier(0.2, 1.4, 0.4, 1);
+  pointer-events: none;
+  z-index: 6;
+}
+#toast.show {
+  transform: translateX(-50%) translateY(0);
+}
 #reviewBar {
   position: absolute;
   top: 0;
@@ -170,6 +190,27 @@ button:disabled {
 #reviewBar button {
   padding: 6px 12px;
   font-size: 0.8rem;
+}
+#reviewIdleControls,
+#reviewPlaybackControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#reviewPlaybackControls {
+  flex: 1;
+  justify-content: flex-end;
+}
+#replayScrubber {
+  flex: 1;
+  max-width: 200px;
+  accent-color: #4f7cff;
+}
+#replayCounter {
+  font-size: 0.75rem;
+  color: #9a9aa4;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 #historyOverlay {
   position: absolute;
