@@ -148,6 +148,17 @@ as a ring (dashed white while free, solid blue while held).
   `draggedCell` unmoved on a winning close (the endpoint conceptually
   stays put once the loop shuts), so checking movement first would
   misread a win as "blocked" and silently drop it.
+- On a merge, the keyboard cursor stays at the join instead of jumping to
+  the merged segment's far end. This differs from a pointer drag on
+  purpose: a mouse drag keeps tracking the far end so a continued drag
+  gesture can carry on past the join (see `updatePathDrag`'s docs above),
+  but a keyboard press is a single, discrete action — the join cell is
+  where the user's key press actually landed, so that's where the cursor
+  should visually stay. `stepPathEndDirection`/`runPathEndDirection` both
+  report this as `mergeJoinCell` (non-null only on a merge), alongside the
+  unchanged `draggedCell` (the far end, kept for consistency with
+  `updatePathDrag`); `keyboard.ts` reads `mergeJoinCell` for the cursor
+  position instead of `draggedCell` whenever a merge happened.
 
 ## Daily puzzle sequence
 

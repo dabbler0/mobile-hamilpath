@@ -408,6 +408,26 @@ describe('stepPathEndDirection', () => {
     const result = stepPathEndDirection(puzzle, segments, false, [1, 0], [-1, 0], LAYOUT);
     expect(result.segments).toEqual([[[0, 0]]]);
     expect(result.draggedCell).toEqual([0, 0]);
+    expect(result.mergeJoinCell).toBeNull();
+  });
+
+  it('reports the join cell (not the far end) when a step merges into another segment', () => {
+    const puzzle = makeRingPuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+      [
+        [2, 1],
+        [1, 1],
+        [0, 1],
+      ],
+    ];
+    const result = stepPathEndDirection(puzzle, segments, false, [2, 0], [0, 1], LAYOUT);
+    expect(result.draggedCell).toEqual([0, 1]);
+    expect(result.mergeJoinCell).toEqual([2, 1]);
   });
 });
 
@@ -431,6 +451,7 @@ describe('runPathEndDirection', () => {
     expect(result.draggedCell).toEqual([2, 0]);
     expect(result.merged).toBe(false);
     expect(result.won).toBe(false);
+    expect(result.mergeJoinCell).toBeNull();
   });
 
   it('runs through plain corridor cells and stops on arrival at a dead end', () => {
@@ -491,6 +512,10 @@ describe('runPathEndDirection', () => {
       ],
     ]);
     expect(result.draggedCell).toEqual([0, 1]);
+    // The join cell (2,1) is where the run actually merged, distinct from the far end
+    // (0,1) reported as `draggedCell` — keyboard controls use this to keep the cursor
+    // at the join instead of jumping it across the segment just merged with.
+    expect(result.mergeJoinCell).toEqual([2, 1]);
   });
 
   it('stops immediately when it wins by closing the loop', () => {

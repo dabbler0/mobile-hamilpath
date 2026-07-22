@@ -203,6 +203,18 @@ export function updatePathDrag(
 /** A grid direction as (dx, dy); only the four orthogonal directions are meaningful since every puzzle edge connects lattice-adjacent cells. */
 export type Direction = readonly [number, number];
 
+export interface DirectionStepResult extends DragStepResult {
+  /**
+   * The other segment's endpoint actually reached, when this step merged
+   * into it — otherwise null. Distinct from `draggedCell`, which (matching
+   * `updatePathDrag`'s convention for continued pointer drags) becomes the
+   * merged segment's *far* end instead. Keyboard controls use this to leave
+   * the cursor sitting at the join rather than jumping it across the
+   * segment it just merged with.
+   */
+  mergeJoinCell: Cell | null;
+}
+
 /**
  * Steps a held endpoint exactly one cell in a fixed grid direction, reusing
  * `updatePathDrag`'s extend/retract/merge/win rules but aimed at one specific
@@ -217,15 +229,19 @@ export function stepPathEndDirection(
   draggedCell: Cell,
   direction: Direction,
   layout: Layout,
-): DragStepResult {
+): DirectionStepResult {
   const target: Cell = [draggedCell[0] + direction[0], draggedCell[1] + direction[1]];
   const [px, py] = toScreen(target, layout);
-  return updatePathDrag(puzzle, segments, won, draggedCell, px, py, layout);
+  const result = updatePathDrag(puzzle, segments, won, draggedCell, px, py, layout);
+  const merged = result.segments.length < segments.length;
+  return { ...result, mergeJoinCell: merged ? target : null };
 }
 
 export interface RunStepResult extends DragStepResult {
   /** Whether the run stopped because it merged into another segment (as opposed to a fork/dead end/no-edge). */
   merged: boolean;
+  /** See `DirectionStepResult.mergeJoinCell` — the join cell reached, if `merged`, else null. */
+  mergeJoinCell: Cell | null;
 }
 
 /**
@@ -248,6 +264,7 @@ export function runPathEndDirection(
   let nextWon = won;
   let dragged = draggedCell;
   let merged = false;
+  let mergeJoinCell: Cell | null = null;
   let guard = 0;
 
   while (guard++ < 400) {
@@ -265,6 +282,7 @@ export function runPathEndDirection(
 
     if (didMerge) {
       merged = true;
+      mergeJoinCell = step.mergeJoinCell;
       break;
     }
     if (justWon) break;
@@ -274,5 +292,5 @@ export function runPathEndDirection(
     if (degree !== 2) break;
   }
 
-  return { segments: workingSegments, won: nextWon, draggedCell: dragged, merged };
+  return { segments: workingSegments, won: nextWon, draggedCell: dragged, merged, mergeJoinCell };
 }
