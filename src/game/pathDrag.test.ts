@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Layout } from './geometry';
 import {
+  applyPathOp,
   createInitialPath,
   findInteriorNodeAt,
   runPathEndDirection,
@@ -9,9 +10,17 @@ import {
   totalVisitedCells,
   tryStartPathDrag,
   updatePathDrag,
+  type PathOp,
   type Segment,
 } from './pathDrag';
 import { key, totalCells, type Puzzle } from './puzzle';
+
+/** Applies a sequence of ops in order, starting from `segments`/`won`, mirroring how the replay/history feature reconstructs states. */
+function replayOps(segments: readonly Segment[], won: boolean, ops: PathOp[]): { segments: Segment[]; won: boolean } {
+  let state = { segments: segments as Segment[], won };
+  for (const op of ops) state = applyPathOp(state.segments, state.won, op);
+  return state;
+}
 
 const LAYOUT: Layout = { cellSize: 10, pad: 0 };
 
@@ -371,6 +380,93 @@ describe('updatePathDrag', () => {
     ];
     const result = updatePathDrag(puzzle, segments, false, [0, 0], 10, 0, LAYOUT);
     expect(result.segments).toEqual(segments);
+    expect(result.won).toBe(false);
+  });
+});
+
+describe('updatePathDrag ops (for compact move-history recording)', () => {
+  it('records one extend op per cell grown', () => {
+    const puzzle = makeSquarePuzzle();
+    const { segments } = createInitialPath(puzzle);
+    const result = updatePathDrag(puzzle, segments, false, [0, 0], 10, 0, LAYOUT);
+    expect(result.ops).toEqual([{ op: 'extend', seg: 0, end: 'tail', cell: [1, 0] }]);
+    expect(replayOps(segments, false, result.ops)).toEqual({ segments: result.segments, won: result.won });
+  });
+
+  it('records a retract op', () => {
+    const puzzle = makeSquarePuzzle();
+    const segments: Segment[] = [[[0, 0], [1, 0]]];
+    const result = updatePathDrag(puzzle, segments, false, [1, 0], 0, 0, LAYOUT);
+    expect(result.ops).toEqual([{ op: 'retract', seg: 0, end: 'tail' }]);
+    expect(replayOps(segments, false, result.ops)).toEqual({ segments: result.segments, won: result.won });
+  });
+
+  it('records a win op without touching segments', () => {
+    const puzzle = makeSquarePuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ],
+    ];
+    const result = updatePathDrag(puzzle, segments, false, [0, 1], 0, 0, LAYOUT);
+    expect(result.ops).toEqual([{ op: 'win' }]);
+    expect(replayOps(segments, false, result.ops)).toEqual({ segments: result.segments, won: result.won });
+  });
+
+  it('records a merge op that replays to the same joined segment', () => {
+    const puzzle = makeRingPuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+      [
+        [2, 1],
+        [1, 1],
+        [0, 1],
+      ],
+    ];
+    const result = updatePathDrag(puzzle, segments, false, [2, 0], 20, 10, LAYOUT);
+    expect(result.ops).toEqual([{ op: 'merge', seg: 0, end: 'tail', otherSeg: 1, otherEnd: 'head' }]);
+    expect(replayOps(segments, false, result.ops)).toEqual({ segments: result.segments, won: result.won });
+  });
+
+  it('accumulates multiple ops across several hill-climb steps within one call', () => {
+    const puzzle = makeForkedLinePuzzle();
+    const segments: Segment[] = [[[0, 0]]];
+    // Pointer aimed far down the corridor: one call should hill-climb through several extends.
+    const [px, py] = [40, 0].map((v) => v * LAYOUT.cellSize + LAYOUT.pad);
+    const result = updatePathDrag(puzzle, segments, false, [0, 0], px, py, LAYOUT);
+    expect(result.ops.length).toBeGreaterThan(1);
+    expect(result.ops.every((o) => o.op === 'extend')).toBe(true);
+    expect(replayOps(segments, false, result.ops)).toEqual({ segments: result.segments, won: result.won });
+  });
+
+  it('records no ops when the pointer does not pull the endpoint anywhere', () => {
+    const puzzle = makeSquarePuzzle();
+    const { segments } = createInitialPath(puzzle);
+    // Every neighbor of (0,0) is in the positive quadrant, so aiming behind it (negative
+    // coordinates) means (0,0) itself stays the closest point to the pointer — no move.
+    const result = updatePathDrag(puzzle, segments, false, [0, 0], -500, -500, LAYOUT);
+    expect(result.ops).toEqual([]);
+  });
+});
+
+describe('applyPathOp', () => {
+  it('applies a split op', () => {
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+    ];
+    const result = applyPathOp(segments, false, { op: 'split', seg: 0, cellIndex: 0 });
+    expect(result.segments).toEqual(splitSegmentAtCell(segments, 0, 0));
     expect(result.won).toBe(false);
   });
 });

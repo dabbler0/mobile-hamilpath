@@ -1,7 +1,8 @@
 import { generateDailyPuzzle, SIZE_OPTIONS, sizeOption, todayKey, type PuzzleId } from './game/dailyPuzzle';
 import { boardPixelSize, type Layout } from './game/geometry';
 import type { Cell } from './game/hamiltonianCycle';
-import { createInitialPath, totalVisitedCells, type PathState, type Segment } from './game/pathDrag';
+import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
+import { createInitialPath, totalVisitedCells, type PathOp, type PathState, type Segment } from './game/pathDrag';
 import { totalCells, type Puzzle } from './game/puzzle';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
@@ -12,6 +13,10 @@ import { computeFitView, computeZoomAt, type Viewport, type ViewportBounds } fro
 
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
 const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
+/** How long each replay frame stays on screen. */
+const REPLAY_FRAME_MS = 180;
+/** How long a transient status message (e.g. "undo history unavailable") stays visible. */
+const TOAST_MS = 3200;
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -29,11 +34,21 @@ const puzzleLabelEl = byId<HTMLDivElement>('puzzleLabel');
 const winBannerEl = byId<HTMLDivElement>('winBanner');
 const sizeSelect = byId<HTMLSelectElement>('sizeSelect');
 const nextBtn = byId<HTMLButtonElement>('nextBtn');
+const undoBtn = byId<HTMLButtonElement>('undoBtn');
+const redoBtn = byId<HTMLButtonElement>('redoBtn');
 const playControlsEl = byId<HTMLDivElement>('playControls');
 const reviewBarEl = byId<HTMLDivElement>('reviewBar');
 const reviewLabelEl = byId<HTMLSpanElement>('reviewLabel');
+const reviewIdleControlsEl = byId<HTMLDivElement>('reviewIdleControls');
+const reviewPlaybackControlsEl = byId<HTMLDivElement>('reviewPlaybackControls');
+const replayBtn = byId<HTMLButtonElement>('replayBtn');
+const replayPlayPauseBtn = byId<HTMLButtonElement>('replayPlayPauseBtn');
+const replayScrubberEl = byId<HTMLInputElement>('replayScrubber');
+const replayCounterEl = byId<HTMLSpanElement>('replayCounter');
+const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
 const historyOverlayEl = byId<HTMLDivElement>('historyOverlay');
 const historyListEl = byId<HTMLDivElement>('historyList');
+const toastEl = byId<HTMLDivElement>('toast');
 
 type Mode = 'playing' | 'reviewing';
 let mode: Mode = 'playing';
@@ -41,8 +56,14 @@ let mode: Mode = 'playing';
 let currentPuzzleId: PuzzleId;
 let puzzle: Puzzle;
 let pathState: PathState;
+/** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed puzzle and on Reset. */
+let history: HistoryState = createHistory();
 let reviewPuzzle: Puzzle | null = null;
 let reviewSegments: Segment[] = [];
+/** The reviewed game's own won-ness, distinct from the hardcoded `true` used for the static "view a finished puzzle" case — during replay playback, intermediate frames aren't won yet. */
+let reviewWon = true;
+/** The completed-game record currently open in the review overlay, so Replay can read its move log and Done/close-replay can restore the final solved view. */
+let currentReviewItem: CompletedRecord | null = null;
 let view: Viewport = { scale: 1, tx: 0, ty: 0 };
 /** Tracks the latest in-flight IndexedDB write so "Next Puzzle" can wait for a completion to land before re-reading the unlock gate. */
 let pendingPersist: Promise<void> = Promise.resolve();
@@ -51,6 +72,11 @@ let activeSegmentIndex: number | null = null;
 let keyboardCursor: Cell | null = null;
 let keyboardCursorHeld = false;
 
+let replayFrames: PathState[] = [];
+let replayIndex = 0;
+let replayTimerId: number | null = null;
+let toastTimerId: number | null = null;
+
 function activePuzzle(): Puzzle {
   return mode === 'reviewing' && reviewPuzzle ? reviewPuzzle : puzzle;
 }
@@ -58,7 +84,7 @@ function activePuzzle(): Puzzle {
 function render(): void {
   const state =
     mode === 'reviewing' && reviewPuzzle
-      ? { puzzle: reviewPuzzle, segments: reviewSegments, won: true }
+      ? { puzzle: reviewPuzzle, segments: reviewSegments, won: reviewWon }
       : {
           puzzle,
           segments: pathState.segments,
@@ -98,18 +124,76 @@ function updateNextButton(): void {
   nextBtn.disabled = !pathState.won;
 }
 
-function setPathState(next: PathState): void {
-  const justWon = next.won && !pathState.won;
+/** Undo/Redo only ever act on the live, not-yet-won game — once a puzzle is won, editing (and so undoing) is already blocked everywhere else (input.ts/keyboard.ts refuse edits when `won`), so there's no "undo the winning move" case to reconcile with `recordCompletion` having already fired. */
+function undoRedoAllowed(): boolean {
+  return mode === 'playing' && !pathState.won;
+}
+
+function updateUndoRedoButtons(): void {
+  undoBtn.disabled = !undoRedoAllowed() || !canUndo(history);
+  redoBtn.disabled = !undoRedoAllowed() || !canRedo(history);
+}
+
+function persistLiveState(): void {
+  if (pathState.won) {
+    pendingPersist = recordCompletion(currentPuzzleId, pathState.segments, history.moveLog).catch((err: unknown) =>
+      console.error('failed to record completion', err),
+    );
+  } else {
+    pendingPersist = saveInProgress(currentPuzzleId, pathState.segments, history).catch((err: unknown) => console.error('failed to save progress', err));
+  }
+}
+
+/** Called by pointer/keyboard input with every path change plus exactly which ops produced it (see `PathOp`), so this is the single funnel point that records undo/redo + replay history — nothing else touches `history` for in-game edits. */
+function setPathState(next: PathState, ops: PathOp[]): void {
+  const prev = pathState;
+  const justWon = next.won && !prev.won;
   pathState = next;
+  history = recordMove(history, prev, ops);
   updateProgress();
   updateNextButton();
+  updateUndoRedoButtons();
   render();
-  if (justWon) {
-    winBannerEl.classList.add('show');
-    pendingPersist = recordCompletion(currentPuzzleId, next.segments).catch((err: unknown) => console.error('failed to record completion', err));
-  } else {
-    pendingPersist = saveInProgress(currentPuzzleId, next.segments).catch((err: unknown) => console.error('failed to save progress', err));
-  }
+  if (justWon) winBannerEl.classList.add('show');
+  persistLiveState();
+}
+
+function performUndo(): void {
+  if (!undoRedoAllowed()) return;
+  const result = undoHistory(history, pathState);
+  if (!result) return;
+  history = result.history;
+  pathState = result.state;
+  activeSegmentIndex = null;
+  updateProgress();
+  updateNextButton();
+  updateUndoRedoButtons();
+  render();
+  persistLiveState();
+}
+
+function performRedo(): void {
+  if (!undoRedoAllowed()) return;
+  const result = redoHistory(history, pathState);
+  if (!result) return;
+  history = result.history;
+  pathState = result.state;
+  activeSegmentIndex = null;
+  updateProgress();
+  updateNextButton();
+  updateUndoRedoButtons();
+  render();
+  persistLiveState();
+}
+
+function showToast(message: string): void {
+  if (toastTimerId !== null) window.clearTimeout(toastTimerId);
+  toastEl.textContent = message;
+  toastEl.classList.add('show');
+  toastTimerId = window.setTimeout(() => {
+    toastEl.classList.remove('show');
+    toastTimerId = null;
+  }, TOAST_MS);
 }
 
 function setView(next: Viewport): void {
@@ -132,13 +216,17 @@ function layout(): void {
 
 function resetPath(): void {
   pathState = createInitialPath(puzzle);
+  // Reset starts a fresh attempt, so its move history starts fresh too — otherwise a
+  // later win's replay would confusingly interleave an earlier abandoned attempt.
+  history = createHistory();
   winBannerEl.classList.remove('show');
   activeSegmentIndex = null;
   keyboardCursor = null;
   keyboardCursorHeld = false;
   updateProgress();
   updateNextButton();
-  pendingPersist = saveInProgress(currentPuzzleId, pathState.segments).catch((err: unknown) => console.error('failed to save progress', err));
+  updateUndoRedoButtons();
+  pendingPersist = saveInProgress(currentPuzzleId, pathState.segments, history).catch((err: unknown) => console.error('failed to save progress', err));
   render();
 }
 
@@ -157,6 +245,17 @@ async function startPuzzleForSize(sizeKey: string): Promise<void> {
   puzzle = generateDailyPuzzle(currentPuzzleId);
   pathState = resuming ? { segments: existing.segments, won: false } : createInitialPath(puzzle);
 
+  if (resuming && existing.history) {
+    history = existing.history;
+  } else {
+    // Graceful fallback for a save written before undo/redo existed (or a fresh puzzle,
+    // which never had history to begin with): start with empty undo/redo/move-log rather
+    // than crashing on the missing field. Only worth telling the player about in the
+    // resumed-old-save case — a brand-new puzzle having no history yet is completely normal.
+    history = createHistory();
+    if (resuming) showToast("This saved game predates undo history, so it isn't available for it.");
+  }
+
   winBannerEl.classList.remove('show');
   activeSegmentIndex = null;
   keyboardCursor = null;
@@ -164,6 +263,7 @@ async function startPuzzleForSize(sizeKey: string): Promise<void> {
   updatePuzzleLabel();
   updateProgress();
   updateNextButton();
+  updateUndoRedoButtons();
   layout();
 }
 
@@ -218,6 +318,8 @@ async function enterReview(item: CompletedRecord): Promise<void> {
   const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, index: item.index };
   reviewPuzzle = generateDailyPuzzle(id);
   reviewSegments = item.segments;
+  reviewWon = true;
+  currentReviewItem = item;
   mode = 'reviewing';
   activeSegmentIndex = null;
   keyboardCursor = null;
@@ -225,6 +327,9 @@ async function enterReview(item: CompletedRecord): Promise<void> {
 
   const opt = sizeOption(item.sizeKey);
   reviewLabelEl.textContent = `${opt.label} #${item.index + 1} · ${item.day}`;
+  const hasReplay = Boolean(item.moveLog && item.moveLog.length > 0);
+  replayBtn.disabled = !hasReplay;
+  replayBtn.title = hasReplay ? '' : "Replay isn't available — this puzzle was solved before replay support was added.";
   reviewBarEl.classList.remove('hidden');
   playControlsEl.classList.add('hidden');
   winBannerEl.classList.remove('show');
@@ -232,14 +337,70 @@ async function enterReview(item: CompletedRecord): Promise<void> {
 }
 
 function exitReview(): void {
+  closeReplay();
   mode = 'playing';
   reviewPuzzle = null;
+  currentReviewItem = null;
   activeSegmentIndex = null;
   keyboardCursor = null;
   keyboardCursorHeld = false;
   reviewBarEl.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
   layout();
+}
+
+function stopReplayTimer(): void {
+  if (replayTimerId !== null) {
+    window.clearInterval(replayTimerId);
+    replayTimerId = null;
+  }
+  replayPlayPauseBtn.textContent = 'Play';
+}
+
+function showReplayFrame(index: number): void {
+  replayIndex = Math.max(0, Math.min(replayFrames.length - 1, index));
+  const frame = replayFrames[replayIndex];
+  reviewSegments = frame.segments;
+  reviewWon = frame.won;
+  replayScrubberEl.value = String(replayIndex);
+  replayCounterEl.textContent = `${replayIndex + 1} / ${replayFrames.length}`;
+  render();
+}
+
+function playReplay(): void {
+  if (replayIndex >= replayFrames.length - 1) showReplayFrame(0);
+  stopReplayTimer();
+  replayPlayPauseBtn.textContent = 'Pause';
+  replayTimerId = window.setInterval(() => {
+    if (replayIndex >= replayFrames.length - 1) {
+      stopReplayTimer();
+      return;
+    }
+    showReplayFrame(replayIndex + 1);
+  }, REPLAY_FRAME_MS);
+}
+
+function startReplay(): void {
+  if (!reviewPuzzle || !currentReviewItem?.moveLog?.length) return;
+  replayFrames = decodeMoveLog(createInitialPath(reviewPuzzle), currentReviewItem.moveLog);
+  reviewIdleControlsEl.classList.add('hidden');
+  reviewPlaybackControlsEl.classList.remove('hidden');
+  replayScrubberEl.min = '0';
+  replayScrubberEl.max = String(Math.max(0, replayFrames.length - 1));
+  showReplayFrame(0);
+  playReplay();
+}
+
+/** Leaves playback (if any) and restores the static, fully-solved view — called on Done and when leaving review entirely. */
+function closeReplay(): void {
+  stopReplayTimer();
+  reviewPlaybackControlsEl.classList.add('hidden');
+  reviewIdleControlsEl.classList.remove('hidden');
+  if (currentReviewItem) {
+    reviewSegments = currentReviewItem.segments;
+    reviewWon = true;
+    render();
+  }
 }
 
 const host: GameInputHost = {
@@ -269,6 +430,8 @@ const keyboardHost: KeyboardInputHost = {
 attachKeyboardHandling(window, keyboardHost);
 
 byId('resetBtn').addEventListener('click', resetPath);
+undoBtn.addEventListener('click', performUndo);
+redoBtn.addEventListener('click', performRedo);
 sizeSelect.addEventListener('change', () => {
   void startPuzzleForSize(sizeSelect.value);
 });
@@ -284,6 +447,36 @@ byId('historyBtn').addEventListener('click', () => {
 });
 byId('closeHistoryBtn').addEventListener('click', closeHistory);
 byId('exitReviewBtn').addEventListener('click', exitReview);
+replayBtn.addEventListener('click', startReplay);
+replayCloseBtn.addEventListener('click', closeReplay);
+replayPlayPauseBtn.addEventListener('click', () => {
+  if (replayTimerId !== null) stopReplayTimer();
+  else playReplay();
+});
+replayScrubberEl.addEventListener('input', () => {
+  stopReplayTimer();
+  showReplayFrame(Number(replayScrubberEl.value));
+});
+
+/** Tag names for controls where ctrl+z/y should keep its native text-editing meaning instead of undo/redo-ing the puzzle. Deliberately narrower than `keyboard.ts`'s equivalent list (which also excludes SELECT/BUTTON, since arrow keys and Enter/Space *do* conflict with those) — ctrl+z has no native behavior on a focused button or select, and excluding BUTTON here would mean clicking Undo/Redo/Reset (which keeps focus on the button afterward) silently breaks the ctrl+z shortcut until focus moves elsewhere. */
+const TEXT_EDITING_TAGS = new Set(['INPUT', 'TEXTAREA']);
+
+window.addEventListener('keydown', (evt) => {
+  if (!(evt.ctrlKey || evt.metaKey)) return;
+  if (mode !== 'playing' || !historyOverlayEl.classList.contains('hidden')) return;
+  const targetTag = (evt.target as HTMLElement | null)?.tagName;
+  if (targetTag && TEXT_EDITING_TAGS.has(targetTag)) return;
+
+  const k = evt.key.toLowerCase();
+  if (k === 'z') {
+    evt.preventDefault();
+    if (evt.shiftKey) performRedo();
+    else performUndo();
+  } else if (k === 'y') {
+    evt.preventDefault();
+    performRedo();
+  }
+});
 
 byId('zoomFitBtn').addEventListener('click', fitView);
 byId('zoomInBtn').addEventListener('click', () => {

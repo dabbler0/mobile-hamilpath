@@ -1,6 +1,6 @@
 import type { Layout } from './game/geometry';
 import type { Cell } from './game/hamiltonianCycle';
-import { findInteriorNodeAt, locateCell, splitSegmentAtCell, tryStartPathDrag, updatePathDrag, type PathState, type Segment } from './game/pathDrag';
+import { findInteriorNodeAt, locateCell, splitSegmentAtCell, tryStartPathDrag, updatePathDrag, type PathOp, type PathState, type Segment } from './game/pathDrag';
 import { key, type Puzzle } from './game/puzzle';
 import { computePan, toCanvasLocal, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -8,7 +8,8 @@ import { computePan, toCanvasLocal, type Viewport, type ViewportBounds } from '.
 export interface GameInputHost {
   getPuzzle(): Puzzle;
   getPathState(): PathState;
-  setPathState(state: PathState): void;
+  /** `ops` records exactly what changed (see `PathOp`), for the undo/redo and replay history — empty for a no-op call. */
+  setPathState(state: PathState, ops: PathOp[]): void;
   getLayout(): Layout;
   getView(): Viewport;
   setView(view: Viewport): void;
@@ -157,7 +158,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       const merged = result.segments.length < segments.length;
       draggedCell = merged ? null : result.draggedCell;
       host.setActiveSegment(merged ? null : segmentIndexOfCell(result.segments, result.draggedCell));
-      host.setPathState({ segments: result.segments, won: result.won });
+      host.setPathState({ segments: result.segments, won: result.won }, result.ops);
       return;
     }
 
@@ -195,7 +196,8 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       const moved = dist({ x: evt.clientX, y: evt.clientY }, { x: tapCandidate.downClientX, y: tapCandidate.downClientY });
       if (moved < TAP_MOVEMENT_THRESHOLD) {
         const { segments, won } = host.getPathState();
-        host.setPathState({ segments: splitSegmentAtCell(segments, tapCandidate.segmentIndex, tapCandidate.cellIndex), won });
+        const { segmentIndex, cellIndex } = tapCandidate;
+        host.setPathState({ segments: splitSegmentAtCell(segments, segmentIndex, cellIndex), won }, [{ op: 'split', seg: segmentIndex, cellIndex }]);
       }
     }
 

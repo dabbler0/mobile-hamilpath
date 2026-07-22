@@ -1,13 +1,14 @@
 import type { Layout } from './game/geometry';
 import type { Cell } from './game/hamiltonianCycle';
-import { locateCell, runPathEndDirection, splitSegmentAtCell, stepPathEndDirection, type Direction, type PathState } from './game/pathDrag';
+import { locateCell, runPathEndDirection, splitSegmentAtCell, stepPathEndDirection, type Direction, type PathOp, type PathState } from './game/pathDrag';
 import { key, type Puzzle } from './game/puzzle';
 
 /** The mutable pieces of game/view state that keyboard interaction needs to read and update. */
 export interface KeyboardInputHost {
   getPuzzle(): Puzzle;
   getPathState(): PathState;
-  setPathState(state: PathState): void;
+  /** `ops` records exactly what changed (see `PathOp`), for the undo/redo and replay history — empty for a no-op call. */
+  setPathState(state: PathState, ops: PathOp[]): void;
   getLayout(): Layout;
   setActiveSegment(index: number | null): void;
   setKeyboardCursor(cursor: Cell | null, held: boolean): void;
@@ -82,14 +83,16 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
       return;
     }
 
-    host.setPathState({ segments: splitSegmentAtCell(segments, loc.segmentIndex, loc.cellIndex), won });
+    host.setPathState({ segments: splitSegmentAtCell(segments, loc.segmentIndex, loc.cellIndex), won }, [
+      { op: 'split', seg: loc.segmentIndex, cellIndex: loc.cellIndex },
+    ]);
   }
 
   function handleHeldStep(direction: Direction): void {
     const { segments, won } = host.getPathState();
     const c = ensureCursor();
     const result = stepPathEndDirection(host.getPuzzle(), segments, won, c, direction, host.getLayout());
-    host.setPathState({ segments: result.segments, won: result.won });
+    host.setPathState({ segments: result.segments, won: result.won }, result.ops);
     const merged = result.mergeJoinCell !== null;
     // Unlike a pointer drag (which keeps tracking the merged segment's far end so a
     // continued drag gesture can keep going), the keyboard cursor should simply stay
@@ -108,7 +111,7 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
     const { segments, won } = host.getPathState();
     const c = ensureCursor();
     const result = runPathEndDirection(host.getPuzzle(), segments, won, c, direction, host.getLayout());
-    host.setPathState({ segments: result.segments, won: result.won });
+    host.setPathState({ segments: result.segments, won: result.won }, result.ops);
     const next: Cell = result.merged ? result.mergeJoinCell! : result.draggedCell;
     cursor = next;
     if (result.merged || result.won) {

@@ -1,4 +1,5 @@
 import type { PuzzleId } from '../game/dailyPuzzle';
+import type { HistoryState, MoveLogEntry } from '../game/history';
 import type { Segment } from '../game/pathDrag';
 import { deleteRecord, getAllRecords, getRecord, putRecord, STORES } from './db';
 
@@ -41,14 +42,16 @@ export interface InProgressRecord {
   sizeKey: string;
   index: number;
   segments: Segment[];
+  /** Undo/redo stacks + move log for this in-progress game. Absent on saves from before this feature existed — callers must fall back to a fresh (empty) history rather than assume this is present. */
+  history?: HistoryState;
 }
 
 export async function getInProgress(day: string, sizeKey: string): Promise<InProgressRecord | undefined> {
   return getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey));
 }
 
-export async function saveInProgress(id: PuzzleId, segments: Segment[]): Promise<void> {
-  const record: InProgressRecord = { id: dayAndSizeId(id.day, id.sizeKey), day: id.day, sizeKey: id.sizeKey, index: id.index, segments };
+export async function saveInProgress(id: PuzzleId, segments: Segment[], history?: HistoryState): Promise<void> {
+  const record: InProgressRecord = { id: dayAndSizeId(id.day, id.sizeKey), day: id.day, sizeKey: id.sizeKey, index: id.index, segments, history };
   await putRecord(STORES.inProgress, record);
 }
 
@@ -63,6 +66,8 @@ export interface CompletedRecord {
   index: number;
   segments: Segment[];
   completedAt: number;
+  /** The move log for this game's whole solve, for the replay animation. Absent on completions recorded before this feature existed — callers must treat replay as unavailable rather than assume this is present. */
+  moveLog?: MoveLogEntry[];
 }
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
@@ -74,8 +79,8 @@ export async function getCompleted(id: PuzzleId): Promise<CompletedRecord | unde
   return getRecord<CompletedRecord>(STORES.completed, puzzleRecordId(id));
 }
 
-/** Records a win: stores the completed puzzle for later review, clears its in-progress record, and — if it was the next in line — advances the unlock gate so the following index becomes playable. */
-export async function recordCompletion(id: PuzzleId, segments: Segment[]): Promise<void> {
+/** Records a win: stores the completed puzzle (plus its move log, for replay) for later review, clears its in-progress record, and — if it was the next in line — advances the unlock gate so the following index becomes playable. */
+export async function recordCompletion(id: PuzzleId, segments: Segment[], moveLog?: MoveLogEntry[]): Promise<void> {
   const record: CompletedRecord = {
     id: puzzleRecordId(id),
     day: id.day,
@@ -83,6 +88,7 @@ export async function recordCompletion(id: PuzzleId, segments: Segment[]): Promi
     index: id.index,
     segments,
     completedAt: Date.now(),
+    moveLog,
   };
   await putRecord(STORES.completed, record);
   await clearInProgress(id.day, id.sizeKey);
