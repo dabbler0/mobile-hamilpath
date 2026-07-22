@@ -90,12 +90,17 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
     const c = ensureCursor();
     const result = stepPathEndDirection(host.getPuzzle(), segments, won, c, direction, host.getLayout());
     host.setPathState({ segments: result.segments, won: result.won });
-    cursor = result.draggedCell;
-    const merged = result.segments.length < segments.length;
+    const merged = result.mergeJoinCell !== null;
+    // Unlike a pointer drag (which keeps tracking the merged segment's far end so a
+    // continued drag gesture can keep going), the keyboard cursor should simply stay
+    // put at the join — the user pressed one direction key, so it should look like
+    // they moved one cell, not teleported across the segment they just merged with.
+    const next: Cell = merged ? result.mergeJoinCell! : result.draggedCell;
+    cursor = next;
     if (merged || result.won) {
       drop();
     } else {
-      host.setActiveSegment(locateCell(result.segments, key(cursor[0], cursor[1]))?.segmentIndex ?? null);
+      host.setActiveSegment(locateCell(result.segments, key(next[0], next[1]))?.segmentIndex ?? null);
     }
   }
 
@@ -104,11 +109,12 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
     const c = ensureCursor();
     const result = runPathEndDirection(host.getPuzzle(), segments, won, c, direction, host.getLayout());
     host.setPathState({ segments: result.segments, won: result.won });
-    cursor = result.draggedCell;
+    const next: Cell = result.merged ? result.mergeJoinCell! : result.draggedCell;
+    cursor = next;
     if (result.merged || result.won) {
       drop();
     } else {
-      host.setActiveSegment(locateCell(result.segments, key(cursor[0], cursor[1]))?.segmentIndex ?? null);
+      host.setActiveSegment(locateCell(result.segments, key(next[0], next[1]))?.segmentIndex ?? null);
     }
   }
 
