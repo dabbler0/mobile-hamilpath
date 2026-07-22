@@ -3,7 +3,9 @@ import type { Layout } from './geometry';
 import {
   createInitialPath,
   findInteriorNodeAt,
+  runPathEndDirection,
   splitSegmentAtCell,
+  stepPathEndDirection,
   totalVisitedCells,
   tryStartPathDrag,
   updatePathDrag,
@@ -53,6 +55,23 @@ function makeRingPuzzle(): Puzzle {
     [0, 1],
   ];
   return { adj: buildAdj(cycle), W: 3, H: 2, startCell: [0, 0] };
+}
+
+/**
+ * A straight corridor (0,0)-(1,0)-(2,0)-(3,0)-(4,0) with a dead-end branch
+ * (2,0)-(2,1), so (2,0) is a fork (degree 3), (0,0)/(4,0)/(2,1) are dead
+ * ends (degree 1), and (1,0)/(3,0) are plain corridor cells (degree 2).
+ */
+function makeForkedLinePuzzle(): Puzzle {
+  const adj = new Map<string, Set<string>>([
+    [key(0, 0), new Set([key(1, 0)])],
+    [key(1, 0), new Set([key(0, 0), key(2, 0)])],
+    [key(2, 0), new Set([key(1, 0), key(3, 0), key(2, 1)])],
+    [key(3, 0), new Set([key(2, 0), key(4, 0)])],
+    [key(4, 0), new Set([key(3, 0)])],
+    [key(2, 1), new Set([key(2, 0)])],
+  ]);
+  return { adj, W: 5, H: 2, startCell: [0, 0] };
 }
 
 describe('createInitialPath', () => {
@@ -353,5 +372,139 @@ describe('updatePathDrag', () => {
     const result = updatePathDrag(puzzle, segments, false, [0, 0], 10, 0, LAYOUT);
     expect(result.segments).toEqual(segments);
     expect(result.won).toBe(false);
+  });
+});
+
+describe('stepPathEndDirection', () => {
+  it('extends exactly one cell in the given direction', () => {
+    const puzzle = makeSquarePuzzle();
+    const { segments } = createInitialPath(puzzle);
+    const result = stepPathEndDirection(puzzle, segments, false, [0, 0], [1, 0], LAYOUT);
+    expect(result.segments).toEqual([
+      [
+        [0, 0],
+        [1, 0],
+      ],
+    ]);
+    expect(result.draggedCell).toEqual([1, 0]);
+  });
+
+  it('does not move when there is no edge in that direction', () => {
+    const puzzle = makeSquarePuzzle();
+    const { segments } = createInitialPath(puzzle);
+    const result = stepPathEndDirection(puzzle, segments, false, [0, 0], [-1, 0], LAYOUT);
+    expect(result.segments).toEqual(segments);
+    expect(result.draggedCell).toEqual([0, 0]);
+  });
+
+  it('retracts when stepped back the way it came', () => {
+    const puzzle = makeSquarePuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+      ],
+    ];
+    const result = stepPathEndDirection(puzzle, segments, false, [1, 0], [-1, 0], LAYOUT);
+    expect(result.segments).toEqual([[[0, 0]]]);
+    expect(result.draggedCell).toEqual([0, 0]);
+  });
+});
+
+describe('runPathEndDirection', () => {
+  it('runs through plain corridor cells and stops on arrival at a fork', () => {
+    const puzzle = makeForkedLinePuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+      ],
+    ];
+    const result = runPathEndDirection(puzzle, segments, false, [1, 0], [1, 0], LAYOUT);
+    expect(result.segments).toEqual([
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+    ]);
+    expect(result.draggedCell).toEqual([2, 0]);
+    expect(result.merged).toBe(false);
+    expect(result.won).toBe(false);
+  });
+
+  it('runs through plain corridor cells and stops on arrival at a dead end', () => {
+    const puzzle = makeForkedLinePuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+    ];
+    const result = runPathEndDirection(puzzle, segments, false, [2, 0], [1, 0], LAYOUT);
+    expect(result.segments).toEqual([
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [3, 0],
+        [4, 0],
+      ],
+    ]);
+    expect(result.draggedCell).toEqual([4, 0]);
+  });
+
+  it('does nothing when there is no edge in that direction at all', () => {
+    const puzzle = makeForkedLinePuzzle();
+    const segments: Segment[] = [[[0, 0]]];
+    const result = runPathEndDirection(puzzle, segments, false, [0, 0], [0, -1], LAYOUT);
+    expect(result.segments).toEqual(segments);
+    expect(result.draggedCell).toEqual([0, 0]);
+    expect(result.merged).toBe(false);
+  });
+
+  it('stops immediately when it merges into another segment', () => {
+    const puzzle = makeRingPuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ],
+      [
+        [2, 1],
+        [1, 1],
+        [0, 1],
+      ],
+    ];
+    const result = runPathEndDirection(puzzle, segments, false, [2, 0], [0, 1], LAYOUT);
+    expect(result.merged).toBe(true);
+    expect(result.segments).toEqual([
+      [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [2, 1],
+        [1, 1],
+        [0, 1],
+      ],
+    ]);
+    expect(result.draggedCell).toEqual([0, 1]);
+  });
+
+  it('stops immediately when it wins by closing the loop', () => {
+    const puzzle = makeSquarePuzzle();
+    const segments: Segment[] = [
+      [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ],
+    ];
+    const result = runPathEndDirection(puzzle, segments, false, [0, 1], [0, -1], LAYOUT);
+    expect(result.won).toBe(true);
+    expect(result.segments).toEqual(segments);
   });
 });

@@ -1,4 +1,4 @@
-import { cellDist2, type Layout } from './geometry';
+import { cellDist2, toScreen, type Layout } from './geometry';
 import type { Cell } from './hamiltonianCycle';
 import { key, parseKey, totalCells, type CellKey, type Puzzle } from './puzzle';
 
@@ -23,7 +23,7 @@ interface CellLocation {
   cellIndex: number;
 }
 
-function locateCell(segments: readonly Segment[], k: CellKey): CellLocation | null {
+export function locateCell(segments: readonly Segment[], k: CellKey): CellLocation | null {
   for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex++) {
     const seg = segments[segmentIndex];
     for (let cellIndex = 0; cellIndex < seg.length; cellIndex++) {
@@ -198,4 +198,81 @@ export function updatePathDrag(
   }
 
   return { segments: workingSegments, won: nextWon, draggedCell: dragged };
+}
+
+/** A grid direction as (dx, dy); only the four orthogonal directions are meaningful since every puzzle edge connects lattice-adjacent cells. */
+export type Direction = readonly [number, number];
+
+/**
+ * Steps a held endpoint exactly one cell in a fixed grid direction, reusing
+ * `updatePathDrag`'s extend/retract/merge/win rules but aimed at one specific
+ * neighbor rather than hill-climbing toward a pointer position. Used by
+ * keyboard controls, where an arrow key press should move by exactly one
+ * cell (or not at all, if there's no edge that way).
+ */
+export function stepPathEndDirection(
+  puzzle: Puzzle,
+  segments: readonly Segment[],
+  won: boolean,
+  draggedCell: Cell,
+  direction: Direction,
+  layout: Layout,
+): DragStepResult {
+  const target: Cell = [draggedCell[0] + direction[0], draggedCell[1] + direction[1]];
+  const [px, py] = toScreen(target, layout);
+  return updatePathDrag(puzzle, segments, won, draggedCell, px, py, layout);
+}
+
+export interface RunStepResult extends DragStepResult {
+  /** Whether the run stopped because it merged into another segment (as opposed to a fork/dead end/no-edge). */
+  merged: boolean;
+}
+
+/**
+ * Repeats `stepPathEndDirection` in a fixed direction, for as long as each
+ * newly-reached cell is a plain 2-degree corridor node, stopping the moment
+ * it reaches a fork (degree > 2), a dead end (degree 1), a merge into
+ * another segment, a win, or simply has no edge to continue. This is the
+ * keyboard "run" behavior: shift+arrow while holding a path end skips ahead
+ * to the next cell that actually requires a decision.
+ */
+export function runPathEndDirection(
+  puzzle: Puzzle,
+  segments: readonly Segment[],
+  won: boolean,
+  draggedCell: Cell,
+  direction: Direction,
+  layout: Layout,
+): RunStepResult {
+  let workingSegments: Segment[] = segments as Segment[];
+  let nextWon = won;
+  let dragged = draggedCell;
+  let merged = false;
+  let guard = 0;
+
+  while (guard++ < 400) {
+    const step = stepPathEndDirection(puzzle, workingSegments, nextWon, dragged, direction, layout);
+    const didMerge = step.segments.length < workingSegments.length;
+    // A winning close doesn't move `draggedCell` (the endpoint conceptually stays put once
+    // the loop is closed), so a win must be detected before falling back to the "didn't
+    // move, so we're blocked" check below.
+    const justWon = step.won && !nextWon;
+    const moved = step.draggedCell[0] !== dragged[0] || step.draggedCell[1] !== dragged[1];
+
+    workingSegments = step.segments;
+    nextWon = step.won;
+    dragged = step.draggedCell;
+
+    if (didMerge) {
+      merged = true;
+      break;
+    }
+    if (justWon) break;
+    if (!moved) break;
+
+    const degree = puzzle.adj.get(key(dragged[0], dragged[1]))?.size ?? 0;
+    if (degree !== 2) break;
+  }
+
+  return { segments: workingSegments, won: nextWon, draggedCell: dragged, merged };
 }
