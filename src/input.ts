@@ -1,7 +1,7 @@
 import type { Layout } from './game/geometry';
 import type { Cell } from './game/hamiltonianCycle';
-import { findInteriorNodeAt, splitSegmentAtCell, tryStartPathDrag, updatePathDrag, type PathState } from './game/pathDrag';
-import type { Puzzle } from './game/puzzle';
+import { findInteriorNodeAt, locateCell, splitSegmentAtCell, tryStartPathDrag, updatePathDrag, type PathState, type Segment } from './game/pathDrag';
+import { key, type Puzzle } from './game/puzzle';
 import { computePan, toCanvasLocal, type Viewport, type ViewportBounds } from './view/viewport';
 
 /** The mutable pieces of game/view state that pointer interaction needs to read and update. */
@@ -12,8 +12,14 @@ export interface GameInputHost {
   getLayout(): Layout;
   getView(): Viewport;
   setView(view: Viewport): void;
+  /** Reports which segment (if any) is currently being dragged, so it can be highlighted while edited. */
+  setActiveSegment(index: number | null): void;
   bounds: ViewportBounds;
   wrapEl: HTMLElement;
+}
+
+function segmentIndexOfCell(segments: readonly Segment[], cell: Cell): number | null {
+  return locateCell(segments, key(cell[0], cell[1]))?.segmentIndex ?? null;
 }
 
 /** Pointer movement, in client pixels, below which a press-release counts as a tap rather than a pan. */
@@ -69,6 +75,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     draggedCell = null;
     panState = null;
     tapCandidate = null;
+    host.setActiveSegment(null);
     const pts = [...activePointers.values()];
     const [p1, p2] = pts;
     const [mwx, mwy] = wrapLocal(midpoint(p1, p2).x, midpoint(p1, p2).y);
@@ -108,6 +115,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     const endpoint = tryStartPathDrag(segments, px, py, layout);
     if (endpoint) {
       draggedCell = endpoint;
+      host.setActiveSegment(segmentIndexOfCell(segments, endpoint));
       return;
     }
 
@@ -146,7 +154,9 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
       // joined segment's far end, further movement toward the join itself (the
       // common case — that's where the finger was already headed) would hill-climb
       // straight back through it, silently un-merging what was just joined.
-      draggedCell = result.segments.length < segments.length ? null : result.draggedCell;
+      const merged = result.segments.length < segments.length;
+      draggedCell = merged ? null : result.draggedCell;
+      host.setActiveSegment(merged ? null : segmentIndexOfCell(result.segments, result.draggedCell));
       host.setPathState({ segments: result.segments, won: result.won });
       return;
     }
@@ -192,6 +202,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     draggedCell = null;
     panState = null;
     tapCandidate = null;
+    host.setActiveSegment(null);
   }
 
   canvas.addEventListener('pointerdown', onPointerDown as EventListener);

@@ -1,8 +1,10 @@
 import { generateDailyPuzzle, SIZE_OPTIONS, sizeOption, todayKey, type PuzzleId } from './game/dailyPuzzle';
 import { boardPixelSize, type Layout } from './game/geometry';
+import type { Cell } from './game/hamiltonianCycle';
 import { createInitialPath, totalVisitedCells, type PathState, type Segment } from './game/pathDrag';
 import { totalCells, type Puzzle } from './game/puzzle';
 import { attachPointerHandling, type GameInputHost } from './input';
+import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
 import { draw } from './render';
 import './style.css';
@@ -44,6 +46,10 @@ let reviewSegments: Segment[] = [];
 let view: Viewport = { scale: 1, tx: 0, ty: 0 };
 /** Tracks the latest in-flight IndexedDB write so "Next Puzzle" can wait for a completion to land before re-reading the unlock gate. */
 let pendingPersist: Promise<void> = Promise.resolve();
+/** Index of whichever segment is currently being edited (pointer-dragged or keyboard-held), for highlighting. Reset on any mode/puzzle change. */
+let activeSegmentIndex: number | null = null;
+let keyboardCursor: Cell | null = null;
+let keyboardCursorHeld = false;
 
 function activePuzzle(): Puzzle {
   return mode === 'reviewing' && reviewPuzzle ? reviewPuzzle : puzzle;
@@ -53,8 +59,26 @@ function render(): void {
   const state =
     mode === 'reviewing' && reviewPuzzle
       ? { puzzle: reviewPuzzle, segments: reviewSegments, won: true }
-      : { puzzle, segments: pathState.segments, won: pathState.won };
+      : {
+          puzzle,
+          segments: pathState.segments,
+          won: pathState.won,
+          activeSegmentIndex,
+          keyboardCursor,
+          keyboardCursorHeld,
+        };
   draw(ctx, canvas.width, canvas.height, state, LAYOUT);
+}
+
+function setActiveSegment(index: number | null): void {
+  activeSegmentIndex = index;
+  render();
+}
+
+function setKeyboardCursor(cursor: Cell | null, held: boolean): void {
+  keyboardCursor = cursor;
+  keyboardCursorHeld = held;
+  render();
 }
 
 function applyTransform(): void {
@@ -109,6 +133,9 @@ function layout(): void {
 function resetPath(): void {
   pathState = createInitialPath(puzzle);
   winBannerEl.classList.remove('show');
+  activeSegmentIndex = null;
+  keyboardCursor = null;
+  keyboardCursorHeld = false;
   updateProgress();
   updateNextButton();
   pendingPersist = saveInProgress(currentPuzzleId, pathState.segments).catch((err: unknown) => console.error('failed to save progress', err));
@@ -131,6 +158,9 @@ async function startPuzzleForSize(sizeKey: string): Promise<void> {
   pathState = resuming ? { segments: existing.segments, won: false } : createInitialPath(puzzle);
 
   winBannerEl.classList.remove('show');
+  activeSegmentIndex = null;
+  keyboardCursor = null;
+  keyboardCursorHeld = false;
   updatePuzzleLabel();
   updateProgress();
   updateNextButton();
@@ -189,6 +219,9 @@ async function enterReview(item: CompletedRecord): Promise<void> {
   reviewPuzzle = generateDailyPuzzle(id);
   reviewSegments = item.segments;
   mode = 'reviewing';
+  activeSegmentIndex = null;
+  keyboardCursor = null;
+  keyboardCursorHeld = false;
 
   const opt = sizeOption(item.sizeKey);
   reviewLabelEl.textContent = `${opt.label} #${item.index + 1} · ${item.day}`;
@@ -201,6 +234,9 @@ async function enterReview(item: CompletedRecord): Promise<void> {
 function exitReview(): void {
   mode = 'playing';
   reviewPuzzle = null;
+  activeSegmentIndex = null;
+  keyboardCursor = null;
+  keyboardCursorHeld = false;
   reviewBarEl.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
   layout();
@@ -213,11 +249,24 @@ const host: GameInputHost = {
   getLayout: () => LAYOUT,
   getView: () => view,
   setView,
+  setActiveSegment,
   bounds: VIEW_BOUNDS,
   wrapEl,
 };
 
 attachPointerHandling(canvas, host);
+
+const keyboardHost: KeyboardInputHost = {
+  getPuzzle: () => activePuzzle(),
+  getPathState: () => (mode === 'reviewing' ? { segments: reviewSegments, won: true } : pathState),
+  setPathState,
+  getLayout: () => LAYOUT,
+  setActiveSegment,
+  setKeyboardCursor,
+  isEnabled: () => mode === 'playing' && historyOverlayEl.classList.contains('hidden'),
+};
+
+attachKeyboardHandling(window, keyboardHost);
 
 byId('resetBtn').addEventListener('click', resetPath);
 sizeSelect.addEventListener('change', () => {

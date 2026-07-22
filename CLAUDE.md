@@ -108,6 +108,47 @@ it has no direct dependency on `main.ts`.
 has the pure pan/zoom math (fit-to-view, zoom-at-point, pan) shared by
 touch, mouse wheel, and the +/-/Fit buttons.
 
+Whichever segment is actively being edited — dragged by a pointer, or held
+by the keyboard cursor (below) — is reported up to `main.ts` via
+`GameInputHost.setActiveSegment`/`KeyboardInputHost.setActiveSegment` and
+drawn in a distinct color (`render.ts`'s `RenderState.activeSegmentIndex`),
+so mid-edit it's visually clear which segment will move next.
+
+### Keyboard controls
+
+`src/keyboard.ts` (`attachKeyboardHandling`) is the keyboard-only path
+editor, wired onto `window` (not the canvas — no `tabindex` juggling
+needed) and gated off while a native form control has focus or the
+history overlay is open. It never touches the DOM/canvas itself: it holds
+a `cursor: Cell | null` and a `held: boolean`, and reports both back to
+`main.ts` via `KeyboardInputHost.setKeyboardCursor` for `render.ts` to draw
+as a ring (dashed white while free, solid blue while held).
+
+- Arrow keys move the cursor freely around the full `W x H` lattice when
+  nothing is held (clamped to the board, not constrained to graph edges).
+- The action key (Enter or Space) on a segment endpoint "picks it up"
+  (`held = true`); pressing it again drops it. On an *interior* cell it
+  splits the segment there instead (same `splitSegmentAtCell` the tap
+  gesture uses), without picking anything up.
+- While held, arrow keys move that endpoint exactly one cell in the
+  pressed direction, replaying the same extend/retract/merge/win rules as
+  a pointer drag: `src/game/pathDrag.ts`'s `stepPathEndDirection` builds a
+  target position for the immediate neighbor cell and hands it to
+  `updatePathDrag`, so a single key press yields exactly one step (`updatePathDrag`
+  hill-climbs toward whatever pixel target it's given; aiming precisely at
+  one neighbor's cell — distance zero once reached — means it can't
+  overshoot further in the same call).
+- Shift+arrow jumps: 5 cells at once for the free cursor, or (while held)
+  runs via `runPathEndDirection` — repeated single steps in the same fixed
+  direction — until the endpoint reaches a fork (a node with graph degree
+  > 2), a dead end (degree 1), merges into another segment, or wins,
+  stopping right there rather than requiring a key press per cell.
+  Winning is checked before the "did we move" check inside
+  `runPathEndDirection`: `updatePathDrag` deliberately leaves
+  `draggedCell` unmoved on a winning close (the endpoint conceptually
+  stays put once the loop shuts), so checking movement first would
+  misread a win as "blocked" and silently drop it.
+
 ## Daily puzzle sequence
 
 `src/game/dailyPuzzle.ts`: a puzzle is identified by `PuzzleId { day,
@@ -192,10 +233,12 @@ calls `enterReview()` which regenerates that puzzle and switches `mode`.
 
 ## Testing notes
 
-70 vitest tests, all in `*.test.ts` files next to their modules. Pure game
+78 vitest tests, all in `*.test.ts` files next to their modules. Pure game
 logic (`src/game/*`), viewport math, and persistence are unit tested.
-`render.ts` and `input.ts` are not — they're thin DOM/canvas glue verified
-by hand instead. When changing pointer interaction, the fastest way to
+`render.ts`, `input.ts`, and `keyboard.ts` are not — they're thin DOM/canvas
+glue verified by hand instead (`keyboard.ts` pushes its actual step/run
+logic down into `pathDrag.ts`'s pure, tested functions for exactly this
+reason). When changing pointer or keyboard interaction, the fastest way to
 sanity-check is a throwaway Playwright script against `npm run dev`
 (pre-installed Chromium at `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`
 in this environment) rather than trying to unit test DOM event sequencing.
