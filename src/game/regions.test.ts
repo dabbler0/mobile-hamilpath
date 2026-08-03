@@ -1,8 +1,44 @@
 import { describe, expect, it } from 'vitest';
-import { computeRegions, edgeKey, regionAt } from './regions';
+import { computeRegions, edgeKey, regionAt, type EdgeKey } from './regions';
 import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
-import { KLEIN_BOTTLE, PROJECTIVE_PLANE } from './topology';
+import { KLEIN_BOTTLE, PROJECTIVE_PLANE, topologyFor, type TopologyKind } from './topology';
+
+/**
+ * A wraparound board with *every* possible unit-step edge present except
+ * `omit` — i.e. every face is walled off from every other, so no two faces
+ * ever fuse "the long way around" (which is otherwise expected and correct
+ * — see the tests above). This isolates exactly one adjacency at a time,
+ * which is what the diagonal-corner regression tests below need: with a
+ * highly-connected wraparound board, blocking only *one* wall still leaves
+ * every other path around the torus/Klein bottle/projective plane intact,
+ * so two faces can fuse into the same region despite a real wall directly
+ * between them — that's correct behavior, not a bug, but it makes "does
+ * this one wall separate these two faces" untestable without removing
+ * every alternate path first.
+ */
+function fullyWalledWrappedPuzzle(W: number, H: number, topologyKind: TopologyKind, omit?: EdgeKey): Puzzle {
+  const topology = topologyFor(topologyKind);
+  const adj = new Map<string, Set<string>>();
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+  }
+  const addEdge = (ax: number, ay: number, bx: number, by: number) => {
+    const ek = edgeKey([ax, ay], [bx, by]);
+    if (ek === omit) return;
+    adj.get(key(ax, ay))!.add(key(bx, by));
+    adj.get(key(bx, by))!.add(key(ax, ay));
+  };
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) {
+      const right = x + 1 < W ? { x: x + 1, y } : topology.wrapX(x + 1, y, W, H);
+      addEdge(x, y, right.x, right.y);
+      const down = y + 1 < H ? { x, y: y + 1 } : topology.wrapY(x, y + 1, W, H);
+      addEdge(x, y, down.x, down.y);
+    }
+  }
+  return { adj, W, H, startCell: [0, 0], topology: topologyKind };
+}
 
 function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
   const adj = new Map<string, Set<string>>();
@@ -201,6 +237,75 @@ describe('computeRegions', () => {
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
     expect(region.boundary).toEqual([edgeKey([3, 1], [0, 2])]);
+  });
+});
+
+describe('computeRegions at the diagonal-wrap corner (regression: face-adjacency used to break down where both axes wrap at once)', () => {
+  // Computing the corner face (3,3)'s right- and below-neighbors requires
+  // the vertex diagonally across from it, (4,4), which needs *both* axes
+  // wrapped at once — every other face's adjacency only ever needs one
+  // axis wrapped. On a highly-connected wraparound board, blocking just
+  // *one* wall isn't enough to test this in isolation (there's always a
+  // path the long way around — see the tests above, where that's the
+  // correct, intended behavior) — so these use `fullyWalledWrappedPuzzle`
+  // to wall off every adjacency except one at a time, isolating exactly
+  // the corner's own right- and below-neighbor checks.
+  const rightEdge: Record<TopologyKind, EdgeKey> = {
+    torus: edgeKey([0, 3], [0, 0]),
+    klein: edgeKey([0, 3], [3, 0]),
+    projective: edgeKey([0, 0], [3, 3]),
+  };
+  const belowEdge: Record<TopologyKind, EdgeKey> = {
+    torus: edgeKey([3, 0], [0, 0]),
+    klein: edgeKey([0, 0], [3, 0]),
+    projective: edgeKey([0, 0], [3, 3]),
+  };
+  const rightFace: Record<TopologyKind, string> = { torus: '0,3', klein: '0,3', projective: '0,3' };
+  const belowFace: Record<TopologyKind, string> = { torus: '3,0', klein: '3,0', projective: '3,0' };
+
+  it.each(['torus', 'klein', 'projective'] as const)('a fully-walled %s board keeps every face — including the corner — its own singleton region', (topology) => {
+    const puzzle = fullyWalledWrappedPuzzle(4, 4, topology);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(16);
+    expect(regions).toHaveLength(16);
+    for (const region of regions) expect(region.faces).toHaveLength(1);
+  });
+
+  it.each(['torus', 'klein'] as const)('omitting just the corner face\'s right-wall lets it (only) fuse with its true right-neighbor on a %s board', (topology) => {
+    const puzzle = fullyWalledWrappedPuzzle(4, 4, topology, rightEdge[topology]);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.get('3,3')).toBe(faceToRegion.get(rightFace[topology]));
+    const region = regions[faceToRegion.get('3,3')!];
+    expect(region.faces).toHaveLength(2);
+    expect(regions).toHaveLength(15);
+  });
+
+  it.each(['torus', 'klein'] as const)('omitting just the corner face\'s below-wall lets it (only) fuse with its true below-neighbor on a %s board', (topology) => {
+    const puzzle = fullyWalledWrappedPuzzle(4, 4, topology, belowEdge[topology]);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.get('3,3')).toBe(faceToRegion.get(belowFace[topology]));
+    const region = regions[faceToRegion.get('3,3')!];
+    expect(region.faces).toHaveLength(2);
+    expect(regions).toHaveLength(15);
+  });
+
+  it('on a projective plane board, the corner face\'s (0,0)-(3,3) wall is shared by four face-adjacency checks at once', () => {
+    // PROJECTIVE_PLANE's antipodal-style gluing means vertex (3,3) is the
+    // wall-check vertex for more than just the corner face's own right/below
+    // neighbors: rightOf(3,3), belowOf(3,3), rightOf(2,3), and belowOf(3,2)
+    // all reduce to this exact same vertex pair, (0,0)-(3,3) — unlike
+    // torus/klein, where the corner's right-wall and below-wall are two
+    // distinct edges. So omitting this one edge fuses all five faces these
+    // four checks touch — (3,3), (0,3), (3,0), (2,3), (3,2) — into a single
+    // region, not just the corner with one neighbor.
+    expect(rightEdge.projective).toBe(belowEdge.projective);
+    const puzzle = fullyWalledWrappedPuzzle(4, 4, 'projective', rightEdge.projective);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.get('3,3')).toBe(faceToRegion.get(rightFace.projective));
+    expect(faceToRegion.get('3,3')).toBe(faceToRegion.get(belowFace.projective));
+    const region = regions[faceToRegion.get('3,3')!];
+    expect(new Set(region.faces.map(([x, y]) => key(x, y)))).toEqual(new Set(['3,3', '0,3', '3,0', '2,3', '3,2']));
+    expect(regions).toHaveLength(12);
   });
 });
 
