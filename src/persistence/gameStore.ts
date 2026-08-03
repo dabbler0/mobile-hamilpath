@@ -1,6 +1,6 @@
 import type { PuzzleId } from '../game/dailyPuzzle';
 import type { HistoryState, MoveLogEntry } from '../game/history';
-import type { Segment } from '../game/pathDrag';
+import type { EdgeKey } from '../game/regions';
 import { deleteRecord, getAllRecords, getRecord, putRecord, STORES } from './db';
 
 function dayAndSizeId(day: string, sizeKey: string): string {
@@ -41,17 +41,28 @@ export interface InProgressRecord {
   day: string;
   sizeKey: string;
   index: number;
-  segments: Segment[];
+  edges: EdgeKey[];
   /** Undo/redo stacks + move log for this in-progress game. Absent on saves from before this feature existed — callers must fall back to a fresh (empty) history rather than assume this is present. */
   history?: HistoryState;
 }
 
-export async function getInProgress(day: string, sizeKey: string): Promise<InProgressRecord | undefined> {
-  return getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey));
+/**
+ * A record saved before the region-toggle rewrite has `segments` instead of
+ * `edges` — structurally incompatible with the new edge-set path model, so
+ * (per this project's existing policy for breaking storage-format changes)
+ * it's simply treated as unusable rather than migrated.
+ */
+function hasEdges(record: { edges?: unknown }): boolean {
+  return Array.isArray(record.edges);
 }
 
-export async function saveInProgress(id: PuzzleId, segments: Segment[], history?: HistoryState): Promise<void> {
-  const record: InProgressRecord = { id: dayAndSizeId(id.day, id.sizeKey), day: id.day, sizeKey: id.sizeKey, index: id.index, segments, history };
+export async function getInProgress(day: string, sizeKey: string): Promise<InProgressRecord | undefined> {
+  const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey));
+  return record && hasEdges(record) ? record : undefined;
+}
+
+export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: HistoryState): Promise<void> {
+  const record: InProgressRecord = { id: dayAndSizeId(id.day, id.sizeKey), day: id.day, sizeKey: id.sizeKey, index: id.index, edges, history };
   await putRecord(STORES.inProgress, record);
 }
 
@@ -64,7 +75,7 @@ export interface CompletedRecord {
   day: string;
   sizeKey: string;
   index: number;
-  segments: Segment[];
+  edges: EdgeKey[];
   completedAt: number;
   /** The move log for this game's whole solve, for the replay animation. Absent on completions recorded before this feature existed — callers must treat replay as unavailable rather than assume this is present. */
   moveLog?: MoveLogEntry[];
@@ -72,21 +83,22 @@ export interface CompletedRecord {
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
   const all = await getAllRecords<CompletedRecord>(STORES.completed);
-  return all.sort((a, b) => b.completedAt - a.completedAt);
+  return all.filter(hasEdges).sort((a, b) => b.completedAt - a.completedAt);
 }
 
 export async function getCompleted(id: PuzzleId): Promise<CompletedRecord | undefined> {
-  return getRecord<CompletedRecord>(STORES.completed, puzzleRecordId(id));
+  const record = await getRecord<CompletedRecord>(STORES.completed, puzzleRecordId(id));
+  return record && hasEdges(record) ? record : undefined;
 }
 
 /** Records a win: stores the completed puzzle (plus its move log, for replay) for later review, clears its in-progress record, and — if it was the next in line — advances the unlock gate so the following index becomes playable. */
-export async function recordCompletion(id: PuzzleId, segments: Segment[], moveLog?: MoveLogEntry[]): Promise<void> {
+export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?: MoveLogEntry[]): Promise<void> {
   const record: CompletedRecord = {
     id: puzzleRecordId(id),
     day: id.day,
     sizeKey: id.sizeKey,
     index: id.index,
-    segments,
+    edges,
     completedAt: Date.now(),
     moveLog,
   };

@@ -2,8 +2,9 @@ import { generateDailyPuzzle, SIZE_OPTIONS, sizeOption, todayKey, type PuzzleId 
 import { boardPixelSize, type Layout } from './game/geometry';
 import type { Cell } from './game/hamiltonianCycle';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
-import { createInitialPath, totalVisitedCells, type PathOp, type PathState, type Segment } from './game/pathDrag';
+import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
 import { totalCells, type Puzzle } from './game/puzzle';
+import { computeRegions, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
@@ -55,11 +56,13 @@ let mode: Mode = 'playing';
 
 let currentPuzzleId: PuzzleId;
 let puzzle: Puzzle;
+let regionMap: RegionMap;
 let pathState: PathState;
 /** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed puzzle and on Reset. */
 let history: HistoryState = createHistory();
 let reviewPuzzle: Puzzle | null = null;
-let reviewSegments: Segment[] = [];
+let reviewRegionMap: RegionMap | null = null;
+let reviewEdges: PathState['edges'] = new Set();
 /** The reviewed game's own won-ness, distinct from the hardcoded `true` used for the static "view a finished puzzle" case — during replay playback, intermediate frames aren't won yet. */
 let reviewWon = true;
 /** The completed-game record currently open in the review overlay, so Replay can read its move log and Done/close-replay can restore the final solved view. */
@@ -67,10 +70,9 @@ let currentReviewItem: CompletedRecord | null = null;
 let view: Viewport = { scale: 1, tx: 0, ty: 0 };
 /** Tracks the latest in-flight IndexedDB write so "Next Puzzle" can wait for a completion to land before re-reading the unlock gate. */
 let pendingPersist: Promise<void> = Promise.resolve();
-/** Index of whichever segment is currently being edited (pointer-dragged or keyboard-held), for highlighting. Reset on any mode/puzzle change. */
-let activeSegmentIndex: number | null = null;
+/** Id of whichever region is currently focused (press-candidate under a pointer, or the keyboard cursor's region), for highlighting. Reset on any mode/puzzle change. */
+let focusedRegionId: number | null = null;
 let keyboardCursor: Cell | null = null;
-let keyboardCursorHeld = false;
 
 let replayFrames: PathState[] = [];
 let replayIndex = 0;
@@ -81,29 +83,31 @@ function activePuzzle(): Puzzle {
   return mode === 'reviewing' && reviewPuzzle ? reviewPuzzle : puzzle;
 }
 
+function activeRegionMap(): RegionMap {
+  return mode === 'reviewing' && reviewRegionMap ? reviewRegionMap : regionMap;
+}
+
 function render(): void {
   const state =
     mode === 'reviewing' && reviewPuzzle
-      ? { puzzle: reviewPuzzle, segments: reviewSegments, won: reviewWon }
+      ? { puzzle: reviewPuzzle, edges: reviewEdges, won: reviewWon, focusedRegion: null, keyboardCursor: null }
       : {
           puzzle,
-          segments: pathState.segments,
+          edges: pathState.edges,
           won: pathState.won,
-          activeSegmentIndex,
+          focusedRegion: focusedRegionId !== null ? regionMap.regions[focusedRegionId] : null,
           keyboardCursor,
-          keyboardCursorHeld,
         };
   draw(ctx, canvas.width, canvas.height, state, LAYOUT);
 }
 
-function setActiveSegment(index: number | null): void {
-  activeSegmentIndex = index;
+function setFocusedRegion(id: number | null): void {
+  focusedRegionId = id;
   render();
 }
 
-function setKeyboardCursor(cursor: Cell | null, held: boolean): void {
+function setKeyboardCursor(cursor: Cell | null): void {
   keyboardCursor = cursor;
-  keyboardCursorHeld = held;
   render();
 }
 
@@ -112,7 +116,7 @@ function applyTransform(): void {
 }
 
 function updateProgress(): void {
-  progressEl.textContent = `${totalVisitedCells(pathState)} / ${totalCells(puzzle)}`;
+  progressEl.textContent = `${pathState.edges.size} / ${totalCells(puzzle)}`;
 }
 
 function updatePuzzleLabel(): void {
@@ -135,12 +139,11 @@ function updateUndoRedoButtons(): void {
 }
 
 function persistLiveState(): void {
+  const edges = [...pathState.edges];
   if (pathState.won) {
-    pendingPersist = recordCompletion(currentPuzzleId, pathState.segments, history.moveLog).catch((err: unknown) =>
-      console.error('failed to record completion', err),
-    );
+    pendingPersist = recordCompletion(currentPuzzleId, edges, history.moveLog).catch((err: unknown) => console.error('failed to record completion', err));
   } else {
-    pendingPersist = saveInProgress(currentPuzzleId, pathState.segments, history).catch((err: unknown) => console.error('failed to save progress', err));
+    pendingPersist = saveInProgress(currentPuzzleId, edges, history).catch((err: unknown) => console.error('failed to save progress', err));
   }
 }
 
@@ -164,7 +167,7 @@ function performUndo(): void {
   if (!result) return;
   history = result.history;
   pathState = result.state;
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   updateProgress();
   updateNextButton();
   updateUndoRedoButtons();
@@ -178,7 +181,7 @@ function performRedo(): void {
   if (!result) return;
   history = result.history;
   pathState = result.state;
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   updateProgress();
   updateNextButton();
   updateUndoRedoButtons();
@@ -215,18 +218,17 @@ function layout(): void {
 }
 
 function resetPath(): void {
-  pathState = createInitialPath(puzzle);
+  pathState = createInitialPath();
   // Reset starts a fresh attempt, so its move history starts fresh too — otherwise a
   // later win's replay would confusingly interleave an earlier abandoned attempt.
   history = createHistory();
   winBannerEl.classList.remove('show');
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   keyboardCursor = null;
-  keyboardCursorHeld = false;
   updateProgress();
   updateNextButton();
   updateUndoRedoButtons();
-  pendingPersist = saveInProgress(currentPuzzleId, pathState.segments, history).catch((err: unknown) => console.error('failed to save progress', err));
+  pendingPersist = saveInProgress(currentPuzzleId, [...pathState.edges], history).catch((err: unknown) => console.error('failed to save progress', err));
   render();
 }
 
@@ -243,7 +245,8 @@ async function startPuzzleForSize(sizeKey: string): Promise<void> {
 
   currentPuzzleId = { day, sizeKey, index };
   puzzle = generateDailyPuzzle(currentPuzzleId);
-  pathState = resuming ? { segments: existing.segments, won: false } : createInitialPath(puzzle);
+  regionMap = computeRegions(puzzle);
+  pathState = resuming ? { edges: new Set(existing.edges), won: false } : createInitialPath();
 
   if (resuming && existing.history) {
     history = existing.history;
@@ -257,9 +260,8 @@ async function startPuzzleForSize(sizeKey: string): Promise<void> {
   }
 
   winBannerEl.classList.remove('show');
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   keyboardCursor = null;
-  keyboardCursorHeld = false;
   updatePuzzleLabel();
   updateProgress();
   updateNextButton();
@@ -317,13 +319,13 @@ async function enterReview(item: CompletedRecord): Promise<void> {
   closeHistory();
   const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, index: item.index };
   reviewPuzzle = generateDailyPuzzle(id);
-  reviewSegments = item.segments;
+  reviewRegionMap = computeRegions(reviewPuzzle);
+  reviewEdges = new Set(item.edges);
   reviewWon = true;
   currentReviewItem = item;
   mode = 'reviewing';
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   keyboardCursor = null;
-  keyboardCursorHeld = false;
 
   const opt = sizeOption(item.sizeKey);
   reviewLabelEl.textContent = `${opt.label} #${item.index + 1} · ${item.day}`;
@@ -340,10 +342,10 @@ function exitReview(): void {
   closeReplay();
   mode = 'playing';
   reviewPuzzle = null;
+  reviewRegionMap = null;
   currentReviewItem = null;
-  activeSegmentIndex = null;
+  focusedRegionId = null;
   keyboardCursor = null;
-  keyboardCursorHeld = false;
   reviewBarEl.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
   layout();
@@ -360,7 +362,7 @@ function stopReplayTimer(): void {
 function showReplayFrame(index: number): void {
   replayIndex = Math.max(0, Math.min(replayFrames.length - 1, index));
   const frame = replayFrames[replayIndex];
-  reviewSegments = frame.segments;
+  reviewEdges = frame.edges;
   reviewWon = frame.won;
   replayScrubberEl.value = String(replayIndex);
   replayCounterEl.textContent = `${replayIndex + 1} / ${replayFrames.length}`;
@@ -382,7 +384,7 @@ function playReplay(): void {
 
 function startReplay(): void {
   if (!reviewPuzzle || !currentReviewItem?.moveLog?.length) return;
-  replayFrames = decodeMoveLog(createInitialPath(reviewPuzzle), currentReviewItem.moveLog);
+  replayFrames = decodeMoveLog(reviewPuzzle, createInitialPath(), currentReviewItem.moveLog);
   reviewIdleControlsEl.classList.add('hidden');
   reviewPlaybackControlsEl.classList.remove('hidden');
   replayScrubberEl.min = '0';
@@ -397,7 +399,7 @@ function closeReplay(): void {
   reviewPlaybackControlsEl.classList.add('hidden');
   reviewIdleControlsEl.classList.remove('hidden');
   if (currentReviewItem) {
-    reviewSegments = currentReviewItem.segments;
+    reviewEdges = new Set(currentReviewItem.edges);
     reviewWon = true;
     render();
   }
@@ -405,12 +407,13 @@ function closeReplay(): void {
 
 const host: GameInputHost = {
   getPuzzle: () => activePuzzle(),
-  getPathState: () => (mode === 'reviewing' ? { segments: reviewSegments, won: true } : pathState),
+  getRegionMap: () => activeRegionMap(),
+  getPathState: () => (mode === 'reviewing' ? { edges: reviewEdges, won: true } : pathState),
   setPathState,
   getLayout: () => LAYOUT,
   getView: () => view,
   setView,
-  setActiveSegment,
+  setFocusedRegion,
   bounds: VIEW_BOUNDS,
   wrapEl,
 };
@@ -419,10 +422,10 @@ attachPointerHandling(canvas, host);
 
 const keyboardHost: KeyboardInputHost = {
   getPuzzle: () => activePuzzle(),
-  getPathState: () => (mode === 'reviewing' ? { segments: reviewSegments, won: true } : pathState),
+  getRegionMap: () => activeRegionMap(),
+  getPathState: () => (mode === 'reviewing' ? { edges: reviewEdges, won: true } : pathState),
   setPathState,
-  getLayout: () => LAYOUT,
-  setActiveSegment,
+  setFocusedRegion,
   setKeyboardCursor,
   isEnabled: () => mode === 'playing' && historyOverlayEl.classList.contains('hidden'),
 };

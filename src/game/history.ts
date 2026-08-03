@@ -1,5 +1,6 @@
 import { decodePathState, encodePathState, type EncodedPathState } from './pathCodec';
-import { applyPathOp, type PathOp, type PathState } from './pathDrag';
+import { applyPathOp, type PathOp, type PathState } from './pathEdit';
+import type { Puzzle } from './puzzle';
 
 /** How many steps back Undo can go. Bounds the undo/redo stacks' storage to a fixed size regardless of how long a single game runs — the (unbounded but O(1)-per-entry) move log below is what stays complete for the whole game. */
 const MAX_UNDO_DEPTH = 200;
@@ -86,7 +87,7 @@ export function redo(history: HistoryState, current: PathState): HistoryStepResu
  * reconstructible and the same for every game of a given puzzle). Drives
  * the replay animation frame-by-frame.
  */
-export function decodeMoveLog(initial: PathState, moveLog: readonly MoveLogEntry[]): PathState[] {
+export function decodeMoveLog(puzzle: Puzzle, initial: PathState, moveLog: readonly MoveLogEntry[]): PathState[] {
   const frames: PathState[] = [initial];
   let current = initial;
   for (const entry of moveLog) {
@@ -96,8 +97,7 @@ export function decodeMoveLog(initial: PathState, moveLog: readonly MoveLogEntry
       continue;
     }
     for (const op of entry.ops) {
-      const applied = applyPathOp(current.segments, current.won, op);
-      current = { segments: applied.segments, won: applied.won };
+      current = applyPathOp(current, puzzle, op);
       frames.push(current);
     }
   }

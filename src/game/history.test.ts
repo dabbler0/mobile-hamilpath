@@ -1,17 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo, undo, type HistoryState } from './history';
-import type { PathOp, PathState, Segment } from './pathDrag';
+import { applyPathOp, createInitialPath, type PathOp, type PathState } from './pathEdit';
+import type { Puzzle } from './puzzle';
 
-const START: PathState = { segments: [[[0, 0]]], won: false };
+/** A 2-cell, 1-edge puzzle — enough to exercise toggling without ever satisfying `computeWin`. */
+const PUZZLE: Puzzle = {
+  adj: new Map([
+    ['0,0', new Set(['1,0'])],
+    ['1,0', new Set(['0,0'])],
+  ]),
+  W: 2,
+  H: 1,
+  startCell: [0, 0],
+};
 
-function extend(seg: number, cell: [number, number]): PathOp {
-  return { op: 'extend', seg, end: 'tail', cell };
+const START: PathState = createInitialPath();
+
+function toggle(edges: string[]): PathOp {
+  return { op: 'toggleRegion', region: 0, edges };
 }
 
-function afterExtend(prev: PathState, cell: [number, number]): PathState {
-  const segments: Segment[] = prev.segments.map((s) => s.map((c) => [...c] as [number, number]));
-  segments[0].push(cell);
-  return { segments, won: false };
+function afterToggle(prev: PathState, op: PathOp): PathState {
+  return applyPathOp(prev, PUZZLE, op);
 }
 
 describe('recordMove', () => {
@@ -21,18 +31,21 @@ describe('recordMove', () => {
   });
 
   it('pushes prev onto the undo stack and appends ops to the move log', () => {
-    const history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const history = recordMove(createHistory(), START, [op]);
     expect(canUndo(history)).toBe(true);
     expect(canRedo(history)).toBe(false);
-    expect(history.moveLog).toEqual([{ kind: 'ops', ops: [extend(0, [1, 0])] }]);
+    expect(history.moveLog).toEqual([{ kind: 'ops', ops: [op] }]);
   });
 
   it('caps the undo stack depth', () => {
     let history = createHistory();
     let state = START;
     for (let i = 0; i < 250; i++) {
-      const next = afterExtend(state, [i + 1, 0]);
-      history = recordMove(history, state, [extend(0, [i + 1, 0])]);
+      // Toggling the same single edge back and forth is enough to generate 250 distinct moves.
+      const op = toggle(['0,0|1,0']);
+      const next = afterToggle(state, op);
+      history = recordMove(history, state, [op]);
       state = next;
     }
     expect(history.undoStack.length).toBe(200);
@@ -49,8 +62,9 @@ describe('undo / redo', () => {
   });
 
   it('undo restores the previous state and enables redo', () => {
-    const afterMove = afterExtend(START, [1, 0]);
-    const history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    const history = recordMove(createHistory(), START, [op]);
 
     const result = undo(history, afterMove);
     expect(result).not.toBeNull();
@@ -60,8 +74,9 @@ describe('undo / redo', () => {
   });
 
   it('redo restores the state that was just undone', () => {
-    const afterMove = afterExtend(START, [1, 0]);
-    let history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
     const undone = undo(history, afterMove)!;
     history = undone.history;
 
@@ -73,13 +88,14 @@ describe('undo / redo', () => {
   });
 
   it('a fresh move after an undo clears the redo stack', () => {
-    const afterMove = afterExtend(START, [1, 0]);
-    let history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
     const undone = undo(history, afterMove)!;
     history = undone.history;
     expect(canRedo(history)).toBe(true);
 
-    history = recordMove(history, undone.state, [extend(0, [0, 1])]);
+    history = recordMove(history, undone.state, [op]);
     expect(canRedo(history)).toBe(false);
   });
 });
@@ -87,35 +103,40 @@ describe('undo / redo', () => {
 describe('decodeMoveLog', () => {
   it('reconstructs every state a straightforward sequence of moves passed through', () => {
     let history = createHistory();
-    const afterFirst = afterExtend(START, [1, 0]);
-    const afterSecond = afterExtend(afterFirst, [2, 0]);
-    history = recordMove(history, START, [extend(0, [1, 0])]);
-    history = recordMove(history, afterFirst, [extend(0, [2, 0])]);
+    const opOn = toggle(['0,0|1,0']);
+    const opOff = toggle(['0,0|1,0']);
+    const afterFirst = afterToggle(START, opOn);
+    const afterSecond = afterToggle(afterFirst, opOff);
+    history = recordMove(history, START, [opOn]);
+    history = recordMove(history, afterFirst, [opOff]);
 
-    const frames = decodeMoveLog(START, history.moveLog);
+    const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
     expect(frames).toEqual([START, afterFirst, afterSecond]);
   });
 
   it('shows an undo as its own frame, not as if the move never happened', () => {
-    const afterMove = afterExtend(START, [1, 0]);
-    let history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
     const undone = undo(history, afterMove)!;
     history = undone.history;
 
-    const frames = decodeMoveLog(START, history.moveLog);
-    // The movie shows the extend happening, then the undo jumping back — both are present.
+    const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
+    // The movie shows the toggle happening, then the undo jumping back — both are present.
     expect(frames).toEqual([START, afterMove, START]);
   });
 
   it('shows an undo followed by a new diverging move, in that real order', () => {
-    const afterMove = afterExtend(START, [1, 0]);
-    const diverged = afterExtend(START, [0, 1]);
-    let history = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
     const undone = undo(history, afterMove)!;
     history = undone.history;
-    history = recordMove(history, undone.state, [{ op: 'extend', seg: 0, end: 'tail', cell: [0, 1] }]);
+    // Diverges by toggling the same op again (only edge this fixture has) — still a distinct move from the undo.
+    const diverged = afterToggle(undone.state, op);
+    history = recordMove(history, undone.state, [op]);
 
-    const frames = decodeMoveLog(START, history.moveLog);
+    const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
     // The movie shows the first move, the undo back to the start, and then the different move actually taken.
     expect(frames).toEqual([START, afterMove, START, diverged]);
   });
@@ -123,7 +144,8 @@ describe('decodeMoveLog', () => {
 
 describe('HistoryState shape is storage-friendly', () => {
   it('round-trips through JSON (a stand-in for IndexedDB structured clone)', () => {
-    let history: HistoryState = recordMove(createHistory(), START, [extend(0, [1, 0])]);
+    const op = toggle(['0,0|1,0']);
+    let history: HistoryState = recordMove(createHistory(), START, [op]);
     const roundTripped = JSON.parse(JSON.stringify(history)) as HistoryState;
     expect(roundTripped).toEqual(history);
   });
