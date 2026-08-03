@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { computeRegions, edgeKey, regionAt } from './regions';
-import { key, type Puzzle } from './puzzle';
+import { buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
+import { mulberry32 } from './rng';
 
 function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
   const adj = new Map<string, Set<string>>();
@@ -90,5 +91,85 @@ describe('computeRegions', () => {
     const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);
     expect(totalFaces).toBe(2); // (3-1) x (2-1)
     expect(faceToRegion.size).toBe(2);
+  });
+
+  it('skips faces that do not exist on a shaped (non-rectangular) board — any of their 4 corners missing', () => {
+    // 4x4 vertex grid with vertex (2,2) entirely absent (as if that cell were
+    // outside the board's shape). The 4 faces that would need (2,2) as a
+    // corner — (1,1), (2,1), (1,2), (2,2) — don't exist; the other 5 do.
+    const W = 4;
+    const H = 4;
+    const adj = new Map<string, Set<string>>();
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H; y++) {
+        if (x === 2 && y === 2) continue;
+        adj.set(key(x, y), new Set());
+      }
+    }
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0] };
+    const { faceToRegion, regions } = computeRegions(puzzle);
+
+    const missing: [number, number][] = [
+      [1, 1],
+      [2, 1],
+      [1, 2],
+      [2, 2],
+    ];
+    for (const [fx, fy] of missing) expect(faceToRegion.has(key(fx, fy))).toBe(false);
+
+    const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);
+    expect(totalFaces).toBe(9 - 4); // (4-1) x (4-1) faces, minus the 4 touching the hole
+    expect(faceToRegion.size).toBe(5);
+  });
+
+  it('wraps face adjacency across the seam on a toroidal board', () => {
+    // 4x4 toroidal board: the only real edge is a wraparound one, between
+    // (0,0) and (0,3) — connecting row 3 back to row 0. Every other
+    // adjacent face pair (including other wraps) has no candidate edge, so
+    // they all fuse into one region the long way around the torus — same
+    // shape as the rectangular "boundary edge listed once" test above.
+    const W = 4;
+    const H = 4;
+    const adj = new Map<string, Set<string>>();
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+    }
+    adj.get(key(0, 0))!.add(key(0, 3));
+    adj.get(key(0, 3))!.add(key(0, 0));
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], toroidal: true };
+
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    // Toroidal: every face in the full W x H grid exists.
+    expect(faceToRegion.size).toBe(W * H);
+
+    const regionIds = new Set(faceToRegion.values());
+    expect(regionIds.size).toBe(1);
+    const region = regions[[...regionIds][0]!];
+    expect(region.faces).toHaveLength(W * H);
+    expect(region.boundary).toEqual([edgeKey([0, 0], [0, 3])]);
+  });
+});
+
+describe('computeRegions on real generated puzzles', () => {
+  it('covers every existing face on a random-shape puzzle, none of them phantom', () => {
+    const puzzle = buildRandomShapePuzzle(6, 9, 0.3, mulberry32(7));
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    for (const region of regions) {
+      for (const [fx, fy] of region.faces) {
+        expect(puzzle.adj.has(key(fx, fy))).toBe(true);
+        expect(puzzle.adj.has(key(fx + 1, fy))).toBe(true);
+        expect(puzzle.adj.has(key(fx, fy + 1))).toBe(true);
+        expect(puzzle.adj.has(key(fx + 1, fy + 1))).toBe(true);
+      }
+    }
+    expect(faceToRegion.size).toBeGreaterThan(0);
+  });
+
+  it('covers the full W x H face grid on a toroidal puzzle', () => {
+    const puzzle = buildToroidalPuzzle(5, 4, 0.3, mulberry32(3));
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(puzzle.W * puzzle.H);
+    const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);
+    expect(totalFaces).toBe(puzzle.W * puzzle.H);
   });
 });

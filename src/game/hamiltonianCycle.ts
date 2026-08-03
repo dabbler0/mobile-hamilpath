@@ -1,11 +1,13 @@
 import type { Rng } from './rng';
+import { hasBlock, shapeBoundingBox, type Shape } from './shape';
 import { randSpanningTree, type TreeEdges } from './spanningTree';
 
 export type Cell = readonly [number, number];
 
 export interface HamiltonianCycle {
-  /** Cells of the cycle in visiting order, on a (2m x 2n) doubled grid. Does not repeat the start cell at the end. */
+  /** Cells of the cycle in visiting order, on the shape's doubled cell grid. Does not repeat the start cell at the end. */
   cells: Cell[];
+  /** Bounding box of the doubled cell grid actually used (the shape's block bounding box, doubled). */
   W: number;
   H: number;
 }
@@ -37,19 +39,24 @@ function blockConnected(x1: number, y1: number, x2: number, y2: number, treeEdge
 }
 
 /**
- * Traces a Hamiltonian cycle over a 2m x 2n grid derived from a random spanning
- * tree on the m x n block grid: walking around the tree with a "wall follower"
- * (prefer turning right, then straight, then left, then reverse) traces every
- * cell of the doubled grid exactly once and returns to the start.
+ * Traces a Hamiltonian cycle over an arbitrary shape's doubled cell grid,
+ * derived from a random spanning tree on the shape's blocks: walking around
+ * the tree with a "wall follower" (prefer turning right, then straight, then
+ * left, then reverse) traces every cell of the doubled grid exactly once and
+ * returns to the start.
  */
-export function generateHamiltonianCycle(m: number, n: number, rng: Rng): HamiltonianCycle {
-  const tree = randSpanningTree(m, n, rng);
-  const W = 2 * m;
-  const H = 2 * n;
-  let cur: Cell = [0, 0];
+export function generateHamiltonianCycle(shape: Shape, rng: Rng): HamiltonianCycle {
+  const tree = randSpanningTree(shape, rng);
+  const totalCells = shape.blocks.size * 4;
+  const start: Cell = [2 * shape.start[0], 2 * shape.start[1]];
+
+  /** Whether a doubled-grid cell belongs to the shape (its parent block is part of it). */
+  const inShape = (x: number, y: number) => hasBlock(shape, x >> 1, y >> 1);
+
+  let cur: Cell = start;
   let dir = CW[1];
-  const cells: Cell[] = [[0, 0]];
-  const maxSteps = W * H + 5;
+  const cells: Cell[] = [start];
+  const maxSteps = totalCells + 5;
   let steps = 0;
 
   do {
@@ -62,7 +69,7 @@ export function generateHamiltonianCycle(m: number, n: number, rng: Rng): Hamilt
       const [dx, dy] = CW[cIdx];
       const nx = cur[0] + dx;
       const ny = cur[1] + dy;
-      if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+      if (!inShape(nx, ny)) continue;
       if (!blockConnected(cur[0], cur[1], nx, ny, tree)) continue;
       next = cIdx;
       break;
@@ -71,8 +78,43 @@ export function generateHamiltonianCycle(m: number, n: number, rng: Rng): Hamilt
     dir = CW[next];
     cur = [cur[0] + dir[0], cur[1] + dir[1]];
     cells.push(cur);
-  } while (!(cur[0] === 0 && cur[1] === 0));
+  } while (!(cur[0] === start[0] && cur[1] === start[1]));
 
   cells.pop(); // last entry duplicates the start cell
-  return { cells, W, H };
+
+  // For a full rectangle this can never happen (proven by exhaustive tests),
+  // but an irregular polyomino can have a "notch" where the right-turn-first
+  // wall follower closes a small sub-loop without ever reaching the rest of
+  // the shape — the classic thickened-spanning-tree construction assumes a
+  // topology this rare configuration violates. Rather than silently
+  // returning a broken (non-Hamiltonian, multi-component) result, fail
+  // loudly so a caller building a random shape can just regenerate a
+  // different one (see `puzzle.ts`'s retry loop).
+  if (cells.length !== totalCells) {
+    throw new Error(`generateHamiltonianCycle: incomplete cycle (${cells.length} of ${totalCells} cells) — shape has a notch the wall-follower can't trace`);
+  }
+
+  const { m, n } = shapeBoundingBox(shape);
+  return { cells, W: 2 * m, H: 2 * n };
+}
+
+/**
+ * Builds a shape (via `makeShape`) and traces a Hamiltonian cycle on it,
+ * retrying with a freshly-generated shape (still deterministic — it just
+ * consumes more of the same `rng` stream) if the shape turns out to have a
+ * notch the wall-follower can't trace. Rectangles never need this (they
+ * never fail); it exists for `randomShape`/`randomToroidalShape` callers,
+ * where an unlucky shape is rare but possible, especially at small sizes.
+ */
+export function generateShapeAndCycle(makeShape: (rng: Rng) => Shape, rng: Rng, maxAttempts = 50): { shape: Shape; cycle: HamiltonianCycle } {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const shape = makeShape(rng);
+    try {
+      return { shape, cycle: generateHamiltonianCycle(shape, rng) };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw new Error(`generateShapeAndCycle: no valid shape found after ${maxAttempts} attempts (${String(lastErr)})`);
 }

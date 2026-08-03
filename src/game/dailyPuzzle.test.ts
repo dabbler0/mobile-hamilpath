@@ -4,10 +4,13 @@ import {
   generateDailyPuzzle,
   puzzleIdKey,
   puzzleSeed,
+  SHAPE_MODE_OPTIONS,
+  shapeModeOption,
   SIZE_OPTIONS,
   sizeOption,
   todayKey,
   type PuzzleId,
+  type ShapeMode,
 } from './dailyPuzzle';
 import { totalCells } from './puzzle';
 
@@ -34,28 +37,43 @@ describe('sizeOption', () => {
   });
 });
 
+describe('shapeModeOption', () => {
+  it('finds every declared shape mode by key', () => {
+    for (const opt of SHAPE_MODE_OPTIONS) {
+      expect(shapeModeOption(opt.key)).toEqual(opt);
+    }
+  });
+
+  it('throws for an unknown key', () => {
+    expect(() => shapeModeOption('nonexistent')).toThrow();
+  });
+});
+
 describe('puzzleSeed / puzzleIdKey', () => {
   it('is deterministic for the same id', () => {
-    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', index: 5 };
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'rect', index: 5 };
     expect(puzzleSeed(id)).toBe(puzzleSeed({ ...id }));
     expect(puzzleIdKey(id)).toBe(puzzleIdKey({ ...id }));
   });
 
-  it('differs when the day, size, or index differs', () => {
-    const base: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', index: 5 };
+  it('differs when the day, size, shape mode, or index differs', () => {
+    const base: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'rect', index: 5 };
     const seeds = new Set([
       puzzleSeed(base),
       puzzleSeed({ ...base, day: '2026-07-11' }),
       puzzleSeed({ ...base, sizeKey: 'small' }),
+      puzzleSeed({ ...base, shapeMode: 'random' }),
       puzzleSeed({ ...base, index: 6 }),
     ]);
-    expect(seeds.size).toBe(4);
+    expect(seeds.size).toBe(5);
   });
 });
 
 describe('generateDailyPuzzle', () => {
-  it('is fully deterministic: the same (day, size, index) always yields the same puzzle', () => {
-    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'tiny', index: 4 };
+  const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+
+  it.each(shapeModes)('is fully deterministic for shape mode %s: the same (day, size, shape, index) always yields the same puzzle', (shapeMode) => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 4 };
     const a = generateDailyPuzzle(id);
     const b = generateDailyPuzzle(id);
     expect(a.W).toBe(b.W);
@@ -64,8 +82,8 @@ describe('generateDailyPuzzle', () => {
     expect([...a.adj.entries()].map(([k, v]) => [k, [...v].sort()])).toEqual([...b.adj.entries()].map(([k, v]) => [k, [...v].sort()]));
   });
 
-  it('produces a valid, fully-connected puzzle at the declared size', () => {
-    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', index: 0 };
+  it('produces a valid, fully-connected puzzle at the declared size (rect)', () => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'rect', index: 0 };
     const puzzle = generateDailyPuzzle(id);
     const { m, n } = sizeOption('mini');
     expect(puzzle.W).toBe(2 * m);
@@ -73,16 +91,26 @@ describe('generateDailyPuzzle', () => {
     expect(puzzle.adj.size).toBe(totalCells(puzzle));
   });
 
+  it('produces a toroidal puzzle that fills the whole rectangle', () => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'toroidal', index: 0 };
+    const puzzle = generateDailyPuzzle(id);
+    const { m, n } = sizeOption('mini');
+    expect(puzzle.toroidal).toBe(true);
+    expect(puzzle.W).toBe(2 * m);
+    expect(puzzle.H).toBe(2 * n);
+    expect(totalCells(puzzle)).toBe(puzzle.W * puzzle.H);
+  });
+
   it('uses the fixed daily density, not a user-chosen one', () => {
     expect(DAILY_PUZZLE_DENSITY).toBeGreaterThan(0);
     expect(DAILY_PUZZLE_DENSITY).toBeLessThan(1);
   });
 
-  it('gives consecutive indices of the same day/size different puzzles', () => {
+  it.each(shapeModes)('gives consecutive indices of the same day/size/shape different puzzles (%s)', (shapeMode) => {
     const serialize = (p: ReturnType<typeof generateDailyPuzzle>) =>
       JSON.stringify([...p.adj.entries()].map(([k, v]) => [k, [...v].sort()]));
-    const a = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', index: 0 });
-    const b = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', index: 1 });
+    const a = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 0 });
+    const b = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 1 });
     expect(serialize(a)).not.toBe(serialize(b));
   });
 });

@@ -107,7 +107,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     const [px, py] = toCanvasLocal(wx, wy, host.getView());
     const puzzle = host.getPuzzle();
     const layout = host.getLayout();
-    const face = faceAt(px, py, layout, puzzle.W, puzzle.H);
+    const face = faceAt(px, py, layout, puzzle.W, puzzle.H, puzzle.toroidal);
     const regionId = regionAt(host.getRegionMap(), face);
     if (regionId !== null) {
       tapCandidate = { regionId, downClientX: evt.clientX, downClientY: evt.clientY };

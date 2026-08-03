@@ -1,3 +1,4 @@
+import { wrapIndex } from './game/geometry';
 import { toggleRegion, type PathOp, type PathState } from './game/pathEdit';
 import { regionAt, type Face, type RegionMap } from './game/regions';
 import type { Puzzle } from './game/puzzle';
@@ -31,8 +32,15 @@ const DIRECTIONS: Record<string, Direction> = {
 /** Tag names for controls that should keep their own native keyboard behavior (form navigation, button activation). */
 const NATIVE_CONTROL_TAGS = new Set(['SELECT', 'INPUT', 'TEXTAREA', 'BUTTON']);
 
-/** Clamps a face position to the (W-1) x (H-1) face grid — one less than the vertex grid in each dimension, since a face needs a vertex on every side of it. */
+/**
+ * Keeps a face position on the board: clamped to the (W-1) x (H-1) face grid
+ * for an ordinary board (one less than the vertex grid in each dimension,
+ * since a face needs a vertex on every side of it), or wrapped over the
+ * full W x H face grid for a toroidal one, where moving the cursor past an
+ * edge should carry it around to the other side instead of stopping.
+ */
 function clampToFaceBoard(face: Face, puzzle: Puzzle): Face {
+  if (puzzle.toroidal) return [wrapIndex(face[0], puzzle.W), wrapIndex(face[1], puzzle.H)];
   return [Math.max(0, Math.min(puzzle.W - 2, face[0])), Math.max(0, Math.min(puzzle.H - 2, face[1]))];
 }
 
