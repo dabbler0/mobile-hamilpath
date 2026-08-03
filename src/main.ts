@@ -1,5 +1,5 @@
-import { generateDailyPuzzle, SIZE_OPTIONS, sizeOption, todayKey, type PuzzleId } from './game/dailyPuzzle';
-import { boardPixelSize, type Layout } from './game/geometry';
+import { generateDailyPuzzle, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
+import { boardPixelSize, toroidalCanvasPixelSize, toroidalPrimaryTileOrigin, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
 import { totalCells, type Puzzle } from './game/puzzle';
@@ -12,7 +12,9 @@ import './style.css';
 import { computeFitView, computeZoomAt, type Viewport, type ViewportBounds } from './view/viewport';
 
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
-const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
+/** The absolute floor for zooming out on an ordinary (non-toroidal) board. A toroidal board tightens `VIEW_BOUNDS.minScale` to its own fit scale instead (see `fitView`), since panning past the pre-rendered tile halo would show blank canvas. */
+const BASE_MIN_SCALE = 0.12;
+const VIEW_BOUNDS: ViewportBounds = { minScale: BASE_MIN_SCALE, maxScale: 3 };
 /** How long each replay frame stays on screen. */
 const REPLAY_FRAME_MS = 50;
 /** How long a transient status message (e.g. "undo history unavailable") stays visible. */
@@ -33,6 +35,7 @@ const progressEl = byId<HTMLDivElement>('progress');
 const puzzleLabelEl = byId<HTMLDivElement>('puzzleLabel');
 const winBannerEl = byId<HTMLDivElement>('winBanner');
 const sizeSelect = byId<HTMLSelectElement>('sizeSelect');
+const shapeSelect = byId<HTMLSelectElement>('shapeSelect');
 const nextBtn = byId<HTMLButtonElement>('nextBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
@@ -120,7 +123,9 @@ function updateProgress(): void {
 
 function updatePuzzleLabel(): void {
   const opt = sizeOption(currentPuzzleId.sizeKey);
-  puzzleLabelEl.textContent = `${opt.label} #${currentPuzzleId.index + 1}`;
+  const shapeOpt = shapeModeOption(currentPuzzleId.shapeMode);
+  const shapeSuffix = currentPuzzleId.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
+  puzzleLabelEl.textContent = `${opt.label}${shapeSuffix} #${currentPuzzleId.index + 1}`;
 }
 
 function updateNextButton(): void {
@@ -203,13 +208,37 @@ function setView(next: Viewport): void {
   applyTransform();
 }
 
+/**
+ * A toroidal board renders as a haloed grid of repeated tile copies (see
+ * `render.ts`), so "fit to view" means fitting just the one primary tile's
+ * span — not the whole (much larger) haloed canvas — then shifting the
+ * resulting pan so that specific tile (not the canvas origin) lands
+ * centered. Zooming out further than this fit is disallowed (tightening
+ * `VIEW_BOUNDS.minScale` to the fit scale itself), since panning past the
+ * pre-rendered halo would just show blank canvas.
+ */
+function fitToroidalView(puzzle: Puzzle): Viewport {
+  const { w, h } = boardPixelSize(puzzle, LAYOUT);
+  const fit = computeFitView(w, h, wrapEl.clientWidth, wrapEl.clientHeight, { minScale: BASE_MIN_SCALE, maxScale: VIEW_BOUNDS.maxScale });
+  const origin = toroidalPrimaryTileOrigin(puzzle, LAYOUT);
+  VIEW_BOUNDS.minScale = fit.scale;
+  return { scale: fit.scale, tx: fit.tx - origin.x * fit.scale, ty: fit.ty - origin.y * fit.scale };
+}
+
 function fitView(): void {
-  const { w, h } = boardPixelSize(activePuzzle(), LAYOUT);
+  const puzzle = activePuzzle();
+  if (puzzle.toroidal) {
+    setView(fitToroidalView(puzzle));
+    return;
+  }
+  VIEW_BOUNDS.minScale = BASE_MIN_SCALE;
+  const { w, h } = boardPixelSize(puzzle, LAYOUT);
   setView(computeFitView(w, h, wrapEl.clientWidth, wrapEl.clientHeight, VIEW_BOUNDS));
 }
 
 function layout(): void {
-  const { w, h } = boardPixelSize(activePuzzle(), LAYOUT);
+  const puzzle = activePuzzle();
+  const { w, h } = puzzle.toroidal ? toroidalCanvasPixelSize(puzzle, LAYOUT) : boardPixelSize(puzzle, LAYOUT);
   canvas.width = w;
   canvas.height = h;
   fitView();
@@ -232,17 +261,19 @@ function resetPath(): void {
 }
 
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
+const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
 
-/** Loads whichever puzzle is current for this size today: a resumed in-progress game, or the next unlocked one. */
-async function startPuzzleForSize(sizeKey: string): Promise<void> {
+/** Loads whichever puzzle is current for this size+shape today: a resumed in-progress game, or the next unlocked one. */
+async function startPuzzle(sizeKey: string, shapeMode: ShapeMode): Promise<void> {
   localStorage.setItem(LAST_SIZE_STORAGE_KEY, sizeKey);
+  localStorage.setItem(LAST_SHAPE_STORAGE_KEY, shapeMode);
   const day = todayKey();
-  const unlockedIndex = await getUnlockedIndex(day, sizeKey);
-  const existing = await getInProgress(day, sizeKey);
+  const unlockedIndex = await getUnlockedIndex(day, sizeKey, shapeMode);
+  const existing = await getInProgress(day, sizeKey, shapeMode);
   const resuming = existing && existing.index === unlockedIndex;
   const index = resuming ? existing.index : unlockedIndex;
 
-  currentPuzzleId = { day, sizeKey, index };
+  currentPuzzleId = { day, sizeKey, shapeMode, index };
   puzzle = generateDailyPuzzle(currentPuzzleId);
   regionMap = computeRegions(puzzle);
   pathState = resuming ? { edges: new Set(existing.edges), won: false } : createInitialPath();
@@ -274,13 +305,15 @@ function formatCompletedAt(ts: number): string {
 
 function renderHistoryItem(item: CompletedRecord): HTMLButtonElement {
   const opt = sizeOption(item.sizeKey);
+  const shapeOpt = shapeModeOption(item.shapeMode);
+  const shapeSuffix = item.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
   const btn = document.createElement('button');
   btn.className = 'historyItem';
 
   const info = document.createElement('span');
   const title = document.createElement('span');
   title.className = 'historyItemTitle';
-  title.textContent = `${opt.label} #${item.index + 1}`;
+  title.textContent = `${opt.label}${shapeSuffix} #${item.index + 1}`;
   const dateEl = document.createElement('span');
   dateEl.className = 'historyItemDate';
   dateEl.textContent = `${item.day} · ${formatCompletedAt(item.completedAt)}`;
@@ -316,7 +349,7 @@ function closeHistory(): void {
 
 async function enterReview(item: CompletedRecord): Promise<void> {
   closeHistory();
-  const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, index: item.index };
+  const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index };
   reviewPuzzle = generateDailyPuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
   reviewEdges = new Set(item.edges);
@@ -327,7 +360,9 @@ async function enterReview(item: CompletedRecord): Promise<void> {
   keyboardCursor = null;
 
   const opt = sizeOption(item.sizeKey);
-  reviewLabelEl.textContent = `${opt.label} #${item.index + 1} · ${item.day}`;
+  const shapeOpt = shapeModeOption(item.shapeMode);
+  const shapeSuffix = item.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
+  reviewLabelEl.textContent = `${opt.label}${shapeSuffix} #${item.index + 1} · ${item.day}`;
   const hasReplay = Boolean(item.moveLog && item.moveLog.length > 0);
   replayBtn.disabled = !hasReplay;
   replayBtn.title = hasReplay ? '' : "Replay isn't available — this puzzle was solved before replay support was added.";
@@ -435,13 +470,16 @@ byId('resetBtn').addEventListener('click', resetPath);
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 sizeSelect.addEventListener('change', () => {
-  void startPuzzleForSize(sizeSelect.value);
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+});
+shapeSelect.addEventListener('change', () => {
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
 });
 nextBtn.addEventListener('click', () => {
   if (!pathState.won) return;
   void (async () => {
     await pendingPersist;
-    await startPuzzleForSize(currentPuzzleId.sizeKey);
+    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode);
   })();
 });
 byId('historyBtn').addEventListener('click', () => {
@@ -508,4 +546,8 @@ const lastSize = localStorage.getItem(LAST_SIZE_STORAGE_KEY);
 if (lastSize && SIZE_OPTIONS.some((opt) => opt.key === lastSize)) {
   sizeSelect.value = lastSize;
 }
-void startPuzzleForSize(sizeSelect.value);
+const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
+if (lastShape && SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
+  shapeSelect.value = lastShape;
+}
+void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);

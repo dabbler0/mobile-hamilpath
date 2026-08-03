@@ -1,5 +1,5 @@
 import { computeEdgeComponents } from './game/edgeComponents';
-import { faceToScreen, toScreen, type Layout } from './game/geometry';
+import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, TOROIDAL_TILE_COPIES, type Layout } from './game/geometry';
 import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { parseKey, type Puzzle } from './game/puzzle';
 
@@ -38,12 +38,21 @@ function segmentColor(component: number): string {
 }
 
 export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, state: RenderState, layout: Layout): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
+  const { puzzle } = state;
 
   ctx.clearRect(0, 0, canvasWidth, canvasHeight);
   ctx.fillStyle = COLORS.background;
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
 
+  if (puzzle.toroidal) {
+    drawToroidal(ctx, state, layout);
+  } else {
+    drawSingleTile(ctx, state, layout);
+  }
+}
+
+function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
+  const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
@@ -123,4 +132,107 @@ function drawCursor(ctx: CanvasRenderingContext2D, face: Face, layout: Layout): 
   ctx.arc(sx, sy, r, 0, Math.PI * 2);
   ctx.stroke();
   ctx.setLineDash([]);
+}
+
+/**
+ * A toroidal board is rendered as `TOROIDAL_TILE_COPIES` x
+ * `TOROIDAL_TILE_COPIES` repeated copies of the same content (see
+ * `geometry.ts`), so panning past an edge reveals the seamless continuation
+ * instead of a hard boundary. The tricky part is edges: an edge between two
+ * cells that are graph-adjacent via the wraparound (e.g. column W-1 to
+ * column 0) would draw as one long line straight across the tile if drawn
+ * from each cell's own position in the *same* tile copy — `wrapDelta` finds
+ * the small (usually ±1) on-screen offset that makes it look like ordinary
+ * local adjacency in every repeated copy instead.
+ */
+function wrapDelta(v1: number, v2: number, period: number): number {
+  let d = ((v2 - v1) % period) + period;
+  d %= period;
+  if (d > period / 2) d -= period;
+  return d;
+}
+
+function drawToroidal(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
+  const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
+  const { W, H } = puzzle;
+
+  const edgeDeltas: Array<{ x1: number; y1: number; dx: number; dy: number }> = [];
+  const seen = new Set<string>();
+  for (const [k, neighbors] of puzzle.adj) {
+    const [x1, y1] = parseKey(k);
+    for (const nk of neighbors) {
+      const dedupeKey = k < nk ? `${k}|${nk}` : `${nk}|${k}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      const [x2, y2] = parseKey(nk);
+      edgeDeltas.push({ x1, y1, dx: wrapDelta(x1, x2, W), dy: wrapDelta(y1, y2, H) });
+    }
+  }
+
+  const markedEdgeDeltas: Array<{ a: readonly [number, number]; dx: number; dy: number; color: string }> = [];
+  const components = won ? null : computeEdgeComponents(edges);
+  for (const ek of edges) {
+    const [a, b] = parseEdgeKey(ek);
+    markedEdgeDeltas.push({
+      a,
+      dx: wrapDelta(a[0], b[0], W),
+      dy: wrapDelta(a[1], b[1], H),
+      color: components ? segmentColor(components.get(ek)!) : COLORS.markedWon,
+    });
+  }
+
+  for (let tileY = 0; tileY < TOROIDAL_TILE_COPIES; tileY++) {
+    for (let tileX = 0; tileX < TOROIDAL_TILE_COPIES; tileX++) {
+      if (focusedRegion) {
+        ctx.fillStyle = COLORS.regionFocus;
+        for (const face of focusedRegion.faces) {
+          const [sx, sy] = toScreenTiled(face, layout, tileX, tileY, W, H);
+          ctx.fillRect(sx, sy, layout.cellSize, layout.cellSize);
+        }
+      }
+
+      ctx.strokeStyle = COLORS.edge;
+      ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.09);
+      ctx.lineCap = 'round';
+      for (const { x1, y1, dx, dy } of edgeDeltas) {
+        const [sx1, sy1] = toScreenTiled([x1, y1], layout, tileX, tileY, W, H);
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx1 + dx * layout.cellSize, sy1 + dy * layout.cellSize);
+        ctx.stroke();
+      }
+
+      const r = Math.max(1.5, layout.cellSize * 0.11);
+      ctx.fillStyle = COLORS.node;
+      for (const k of puzzle.adj.keys()) {
+        const [sx, sy] = toScreenTiled(parseKey(k), layout, tileX, tileY, W, H);
+        ctx.beginPath();
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.lineWidth = Math.max(3, layout.cellSize * 0.32);
+      ctx.lineCap = 'round';
+      for (const { a, dx, dy, color } of markedEdgeDeltas) {
+        const [sx1, sy1] = toScreenTiled(a, layout, tileX, tileY, W, H);
+        ctx.strokeStyle = color;
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx1 + dx * layout.cellSize, sy1 + dy * layout.cellSize);
+        ctx.stroke();
+      }
+
+      if (keyboardCursor) {
+        const [sx, sy] = faceToScreenTiled(keyboardCursor, layout, tileX, tileY, W, H);
+        const cr = Math.max(6, layout.cellSize * 0.44);
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = Math.max(2, layout.cellSize * 0.09);
+        ctx.strokeStyle = COLORS.cursor;
+        ctx.arc(sx, sy, cr, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+    }
+  }
 }

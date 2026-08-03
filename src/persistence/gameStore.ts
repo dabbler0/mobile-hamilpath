@@ -1,38 +1,39 @@
-import type { PuzzleId } from '../game/dailyPuzzle';
+import type { PuzzleId, ShapeMode } from '../game/dailyPuzzle';
 import type { HistoryState, MoveLogEntry } from '../game/history';
 import type { EdgeKey } from '../game/regions';
 import { deleteRecord, getAllRecords, getRecord, putRecord, STORES } from './db';
 
-function dayAndSizeId(day: string, sizeKey: string): string {
-  return `${day}::${sizeKey}`;
+function dayAndSizeId(day: string, sizeKey: string, shapeMode: ShapeMode): string {
+  return `${day}::${sizeKey}::${shapeMode}`;
 }
 
 function puzzleRecordId(id: PuzzleId): string {
-  return `${id.day}::${id.sizeKey}::${id.index}`;
+  return `${id.day}::${id.sizeKey}::${id.shapeMode}::${id.index}`;
 }
 
 export interface ProgressRecord {
   id: string;
   day: string;
   sizeKey: string;
-  /** The next puzzle index of this day+size the player is allowed to start. */
+  shapeMode: ShapeMode;
+  /** The next puzzle index of this day+size+shape the player is allowed to start. */
   unlockedIndex: number;
 }
 
-export async function getProgress(day: string, sizeKey: string): Promise<ProgressRecord | undefined> {
-  return getRecord<ProgressRecord>(STORES.progress, dayAndSizeId(day, sizeKey));
+export async function getProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<ProgressRecord | undefined> {
+  return getRecord<ProgressRecord>(STORES.progress, dayAndSizeId(day, sizeKey, shapeMode));
 }
 
-/** The next playable index for this day+size — 0 if no puzzles of that size have been completed yet today. */
-export async function getUnlockedIndex(day: string, sizeKey: string): Promise<number> {
-  const record = await getProgress(day, sizeKey);
+/** The next playable index for this day+size+shape — 0 if no puzzles of that size/shape have been completed yet today. */
+export async function getUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<number> {
+  const record = await getProgress(day, sizeKey, shapeMode);
   return record?.unlockedIndex ?? 0;
 }
 
-async function advanceUnlockedIndex(day: string, sizeKey: string, completedIndex: number): Promise<void> {
-  const current = await getUnlockedIndex(day, sizeKey);
+async function advanceUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode, completedIndex: number): Promise<void> {
+  const current = await getUnlockedIndex(day, sizeKey, shapeMode);
   if (completedIndex !== current) return; // only forward, in-order completion advances the gate
-  const record: ProgressRecord = { id: dayAndSizeId(day, sizeKey), day, sizeKey, unlockedIndex: completedIndex + 1 };
+  const record: ProgressRecord = { id: dayAndSizeId(day, sizeKey, shapeMode), day, sizeKey, shapeMode, unlockedIndex: completedIndex + 1 };
   await putRecord(STORES.progress, record);
 }
 
@@ -40,6 +41,7 @@ export interface InProgressRecord {
   id: string;
   day: string;
   sizeKey: string;
+  shapeMode: ShapeMode;
   index: number;
   edges: EdgeKey[];
   /** Undo/redo stacks + move log for this in-progress game. Absent on saves from before this feature existed — callers must fall back to a fresh (empty) history rather than assume this is present. */
@@ -56,24 +58,33 @@ function hasEdges(record: { edges?: unknown }): boolean {
   return Array.isArray(record.edges);
 }
 
-export async function getInProgress(day: string, sizeKey: string): Promise<InProgressRecord | undefined> {
-  const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey));
+export async function getInProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<InProgressRecord | undefined> {
+  const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode));
   return record && hasEdges(record) ? record : undefined;
 }
 
 export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: HistoryState): Promise<void> {
-  const record: InProgressRecord = { id: dayAndSizeId(id.day, id.sizeKey), day: id.day, sizeKey: id.sizeKey, index: id.index, edges, history };
+  const record: InProgressRecord = {
+    id: dayAndSizeId(id.day, id.sizeKey, id.shapeMode),
+    day: id.day,
+    sizeKey: id.sizeKey,
+    shapeMode: id.shapeMode,
+    index: id.index,
+    edges,
+    history,
+  };
   await putRecord(STORES.inProgress, record);
 }
 
-export async function clearInProgress(day: string, sizeKey: string): Promise<void> {
-  await deleteRecord(STORES.inProgress, dayAndSizeId(day, sizeKey));
+export async function clearInProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<void> {
+  await deleteRecord(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode));
 }
 
 export interface CompletedRecord {
   id: string;
   day: string;
   sizeKey: string;
+  shapeMode: ShapeMode;
   index: number;
   edges: EdgeKey[];
   completedAt: number;
@@ -97,12 +108,13 @@ export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?:
     id: puzzleRecordId(id),
     day: id.day,
     sizeKey: id.sizeKey,
+    shapeMode: id.shapeMode,
     index: id.index,
     edges,
     completedAt: Date.now(),
     moveLog,
   };
   await putRecord(STORES.completed, record);
-  await clearInProgress(id.day, id.sizeKey);
-  await advanceUnlockedIndex(id.day, id.sizeKey, id.index);
+  await clearInProgress(id.day, id.sizeKey, id.shapeMode);
+  await advanceUnlockedIndex(id.day, id.sizeKey, id.shapeMode, id.index);
 }

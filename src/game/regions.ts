@@ -20,8 +20,11 @@ export function parseEdgeKey(k: EdgeKey): [Cell, Cell] {
  * (fx,fy)-(fx+1,fy)-(fx,fy+1)-(fx+1,fy+1). This is what a player actually
  * taps — the everyday sense of "cell" (a grid square), as opposed to a
  * graph vertex (`Cell` elsewhere in this codebase, which the path visits).
- * Valid range: fx in [0, W-2], fy in [0, H-2] — one less than the vertex
- * grid in each dimension, since a face needs a vertex on every side of it.
+ * Valid range: fx in [0, W-2], fy in [0, H-2] for an ordinary board — one
+ * less than the vertex grid in each dimension, since a face needs a vertex
+ * on every side of it. For a toroidal board every fx/fy in [0, W) x [0, H)
+ * is valid too: the last column/row's face wraps its right/bottom side back
+ * to column/row 0.
  */
 export type Face = readonly [number, number];
 type FaceKey = string;
@@ -56,13 +59,35 @@ export interface RegionMap {
  * does *not* hold for a partition of graph vertices instead of faces (an
  * earlier, incorrect version of this function did that, and regions came
  * out badly fragmented with no combination able to reach the cycle).
+ *
+ * Two generalizations beyond a plain rectangle:
+ *  - A non-rectangular shaped board simply has some faces that don't exist
+ *    at all (any of their 4 corners is a cell outside the shape, so it's not
+ *    a graph vertex) — those faces are skipped entirely, never assigned a
+ *    region.
+ *  - A toroidal board (`puzzle.toroidal`) wraps: every face in the full
+ *    W x H grid exists (there's no "last column/row" edge to stop at), and
+ *    a face's right/bottom neighbor (and the vertex edges bordering it)
+ *    wrap back to column/row 0.
  */
 export function computeRegions(puzzle: Puzzle): RegionMap {
-  const { W, H, adj } = puzzle;
-  const FW = W - 1;
-  const FH = H - 1;
+  const { W, H, adj, toroidal } = puzzle;
+  const FW = toroidal ? W : W - 1;
+  const FH = toroidal ? H : H - 1;
   const nFaces = FW * FH;
   const faceId = (fx: number, fy: number) => fy * FW + fx;
+  const wrapX = (x: number) => ((x % W) + W) % W;
+  const wrapY = (y: number) => ((y % H) + H) % H;
+
+  function hasEdge(x1: number, y1: number, x2: number, y2: number): boolean {
+    return adj.get(key(x1, y1))?.has(key(x2, y2)) ?? false;
+  }
+
+  /** Whether a face exists at all — for a toroidal board, always (it fills the whole rectangle); otherwise all 4 corners must be real graph vertices. */
+  function faceExists(fx: number, fy: number): boolean {
+    if (toroidal) return true;
+    return adj.has(key(fx, fy)) && adj.has(key(fx + 1, fy)) && adj.has(key(fx, fy + 1)) && adj.has(key(fx + 1, fy + 1));
+  }
 
   const parent = new Int32Array(nFaces);
   for (let i = 0; i < nFaces; i++) parent[i] = i;
@@ -79,16 +104,29 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     if (ra !== rb) parent[ra] = rb;
   }
 
-  function hasEdge(x1: number, y1: number, x2: number, y2: number): boolean {
-    return adj.get(key(x1, y1))?.has(key(x2, y2)) ?? false;
-  }
-
   for (let fx = 0; fx < FW; fx++) {
     for (let fy = 0; fy < FH; fy++) {
-      // Right neighbor face shares the vertical edge (fx+1,fy)-(fx+1,fy+1).
-      if (fx + 1 < FW && !hasEdge(fx + 1, fy, fx + 1, fy + 1)) union(faceId(fx, fy), faceId(fx + 1, fy));
-      // Below neighbor face shares the horizontal edge (fx,fy+1)-(fx+1,fy+1).
-      if (fy + 1 < FH && !hasEdge(fx, fy + 1, fx + 1, fy + 1)) union(faceId(fx, fy), faceId(fx, fy + 1));
+      if (!faceExists(fx, fy)) continue;
+
+      const hasRightNeighbor = toroidal || fx + 1 < FW;
+      if (hasRightNeighbor) {
+        const nfx = toroidal ? wrapX(fx + 1) : fx + 1;
+        if (faceExists(nfx, fy)) {
+          const vx = fx + 1 === W ? 0 : fx + 1;
+          const vy2 = fy + 1 === H ? 0 : fy + 1;
+          if (!hasEdge(vx, fy, vx, vy2)) union(faceId(fx, fy), faceId(nfx, fy));
+        }
+      }
+
+      const hasBelowNeighbor = toroidal || fy + 1 < FH;
+      if (hasBelowNeighbor) {
+        const nfy = toroidal ? wrapY(fy + 1) : fy + 1;
+        if (faceExists(fx, nfy)) {
+          const vy = fy + 1 === H ? 0 : fy + 1;
+          const vx2 = fx + 1 === W ? 0 : fx + 1;
+          if (!hasEdge(fx, vy, vx2, vy)) union(faceId(fx, fy), faceId(fx, nfy));
+        }
+      }
     }
   }
 
@@ -98,6 +136,7 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
 
   for (let fx = 0; fx < FW; fx++) {
     for (let fy = 0; fy < FH; fy++) {
+      if (!faceExists(fx, fy)) continue;
       const root = find(faceId(fx, fy));
       let regionId = rootToRegionId.get(root);
       if (regionId === undefined) {
@@ -110,21 +149,28 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     }
   }
 
-  /** The face(s) (0, 1, or 2 of them) that have this vertex-pair as one of their four sides. Takes the pair in either order — normalizes internally. */
+  /**
+   * The face(s) (0, 1, or 2 of them) that have this vertex-pair as one of
+   * their four sides. Takes the pair in either order — normalizes
+   * internally. For a toroidal board, a pair that isn't literally adjacent
+   * (e.g. column W-1 to column 0) is the wraparound seam edge, bordering
+   * face column W-1 (whose "right" side wraps to column 0) rather than
+   * column 0 — so a plain min(ax,bx) would pick the wrong face.
+   */
   function facesBordering(ax: number, ay: number, bx: number, by: number): Face[] {
     const faces: Face[] = [];
     if (ay === by) {
-      // Horizontal edge (x,y)-(x+1,y): the top side of face (x,y), the bottom side of face (x,y-1).
-      const x = Math.min(ax, bx);
+      const x = Math.abs(ax - bx) === 1 ? Math.min(ax, bx) : Math.max(ax, bx);
       const y = ay;
-      if (y < FH) faces.push([x, y]);
-      if (y - 1 >= 0) faces.push([x, y - 1]);
+      if (faceExists(x, y)) faces.push([x, y]);
+      const yAbove = toroidal ? wrapY(y - 1) : y - 1;
+      if (faceExists(x, yAbove)) faces.push([x, yAbove]);
     } else {
-      // Vertical edge (x,y)-(x,y+1): the left side of face (x,y), the right side of face (x-1,y).
+      const y = Math.abs(ay - by) === 1 ? Math.min(ay, by) : Math.max(ay, by);
       const x = ax;
-      const y = Math.min(ay, by);
-      if (x < FW) faces.push([x, y]);
-      if (x - 1 >= 0) faces.push([x - 1, y]);
+      if (faceExists(x, y)) faces.push([x, y]);
+      const xLeft = toroidal ? wrapX(x - 1) : x - 1;
+      if (faceExists(xLeft, y)) faces.push([xLeft, y]);
     }
     return faces;
   }

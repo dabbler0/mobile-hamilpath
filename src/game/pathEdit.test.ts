@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { applyPathOp, computeWin, createInitialPath, toggleRegion, type PathState } from './pathEdit';
 import { computeRegions, regionAt } from './regions';
-import { buildPuzzle, key, type Puzzle } from './puzzle';
+import { buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
+import { rectShape } from './shape';
 
 function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
   const adj = new Map<string, Set<string>>();
@@ -91,7 +92,7 @@ describe('toggleRegion reachability (multi-region)', () => {
     // actually exercises combining multiple region toggles — this is the
     // property that was broken before regions were redefined as faces
     // (grid squares) instead of graph vertices.
-    const puzzle = buildPuzzle(3, 4, 0, mulberry32(12345));
+    const puzzle = buildPuzzle(rectShape(3, 4), 0, mulberry32(12345));
     const regionMap = computeRegions(puzzle);
     const R = regionMap.regions.length;
     expect(R).toBeGreaterThan(1);
@@ -105,6 +106,32 @@ describe('toggleRegion reachability (multi-region)', () => {
       if (state.won) winningState = state;
     }
     expect(winningState).not.toBeNull();
+  });
+
+  function assertSomeToggleCombinationWins(puzzle: Puzzle): void {
+    const regionMap = computeRegions(puzzle);
+    const R = regionMap.regions.length;
+    let winningState: PathState | null = null;
+    for (let mask = 1; mask < 1 << R && !winningState; mask++) {
+      let state = createInitialPath();
+      for (let i = 0; i < R; i++) {
+        if (mask & (1 << i)) state = toggleRegion(puzzle, regionMap, state, i).state;
+      }
+      if (state.won) winningState = state;
+    }
+    expect(winningState).not.toBeNull();
+  }
+
+  it('some combination of region toggles reaches a win on a random-shape puzzle', () => {
+    for (const seed of [1, 2, 3]) {
+      assertSomeToggleCombinationWins(buildRandomShapePuzzle(3, 4, 0, mulberry32(seed)));
+    }
+  });
+
+  it('some combination of region toggles reaches a win on a toroidal puzzle', () => {
+    for (const seed of [1, 2, 3]) {
+      assertSomeToggleCombinationWins(buildToroidalPuzzle(3, 4, 0, mulberry32(seed)));
+    }
   });
 });
 

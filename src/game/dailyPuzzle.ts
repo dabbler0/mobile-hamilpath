@@ -1,5 +1,6 @@
-import { buildPuzzle, type Puzzle } from './puzzle';
+import { buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
+import { rectShape } from './shape';
 
 export interface SizeOption {
   /** Stable identifier used in storage keys and puzzle-id hashing — never rename once puzzles have been played. */
@@ -25,14 +26,41 @@ export function sizeOption(sizeKey: string): SizeOption {
   return found;
 }
 
-/** Fixed so a puzzle is fully identified by (day, size, index) alone, with no separate user-facing setting. */
+/**
+ * The board's shape, orthogonal to its size: a plain m x n rectangle (the
+ * original board), a random connected polyomino of the same area (see
+ * `randomShape`), or a toroidal-wraparound board (see `buildToroidalPuzzle`).
+ * Stable identifiers, like `SizeOption.key` — never rename once puzzles have
+ * been played.
+ */
+export type ShapeMode = 'rect' | 'random' | 'toroidal';
+
+export interface ShapeModeOption {
+  key: ShapeMode;
+  label: string;
+}
+
+export const SHAPE_MODE_OPTIONS: readonly ShapeModeOption[] = [
+  { key: 'rect', label: 'Rectangle' },
+  { key: 'random', label: 'Random shape' },
+  { key: 'toroidal', label: 'Toroidal' },
+];
+
+export function shapeModeOption(shapeModeKey: string): ShapeModeOption {
+  const found = SHAPE_MODE_OPTIONS.find((s) => s.key === shapeModeKey);
+  if (!found) throw new Error(`unknown shape mode: ${shapeModeKey}`);
+  return found;
+}
+
+/** Fixed so a puzzle is fully identified by (day, size, shape mode, index) alone, with no separate user-facing setting. */
 export const DAILY_PUZZLE_DENSITY = 0.28;
 
 export interface PuzzleId {
   /** Local calendar day, "YYYY-MM-DD". */
   day: string;
   sizeKey: string;
-  /** 0-based position in that day+size's infinite sequence. */
+  shapeMode: ShapeMode;
+  /** 0-based position in that day+size+shape's infinite sequence. */
   index: number;
 }
 
@@ -45,7 +73,7 @@ export function todayKey(now: Date = new Date()): string {
 }
 
 export function puzzleIdKey(id: PuzzleId): string {
-  return `${id.day}::${id.sizeKey}::${id.index}`;
+  return `${id.day}::${id.sizeKey}::${id.shapeMode}::${id.index}`;
 }
 
 /** FNV-1a: a small, deterministic string hash, used to turn a puzzle id into a mulberry32 seed. */
@@ -65,5 +93,12 @@ export function puzzleSeed(id: PuzzleId): number {
 export function generateDailyPuzzle(id: PuzzleId): Puzzle {
   const { m, n } = sizeOption(id.sizeKey);
   const rng = mulberry32(puzzleSeed(id));
-  return buildPuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+  switch (id.shapeMode) {
+    case 'rect':
+      return buildPuzzle(rectShape(m, n), DAILY_PUZZLE_DENSITY, rng);
+    case 'random':
+      return buildRandomShapePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+    case 'toroidal':
+      return buildToroidalPuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+  }
 }
