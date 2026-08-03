@@ -1,7 +1,7 @@
-import { wrapIndex } from './game/geometry';
 import { toggleRegion, type PathOp, type PathState } from './game/pathEdit';
 import { regionAt, type Face, type RegionMap } from './game/regions';
 import type { Puzzle } from './game/puzzle';
+import { topologyFor } from './game/topology';
 
 /** The mutable pieces of game/view state that keyboard interaction needs to read and update. */
 export interface KeyboardInputHost {
@@ -36,12 +36,26 @@ const NATIVE_CONTROL_TAGS = new Set(['SELECT', 'INPUT', 'TEXTAREA', 'BUTTON']);
  * Keeps a face position on the board: clamped to the (W-1) x (H-1) face grid
  * for an ordinary board (one less than the vertex grid in each dimension,
  * since a face needs a vertex on every side of it), or wrapped over the
- * full W x H face grid for a toroidal one, where moving the cursor past an
- * edge should carry it around to the other side instead of stopping.
+ * full W x H face grid for a wraparound one, where moving the cursor past
+ * an edge should carry it around to the other side (with a coordinate flip
+ * for klein/projective, via `topology.wrapX`/`wrapY`) instead of stopping.
+ * Safe to call with any single-axis delta up to `JUMP` in magnitude — both
+ * are always well under a board's minimum dimension, so a jump can cross a
+ * wraparound seam at most once.
  */
 function clampToFaceBoard(face: Face, puzzle: Puzzle): Face {
-  if (puzzle.toroidal) return [wrapIndex(face[0], puzzle.W), wrapIndex(face[1], puzzle.H)];
-  return [Math.max(0, Math.min(puzzle.W - 2, face[0])), Math.max(0, Math.min(puzzle.H - 2, face[1]))];
+  if (!puzzle.topology) return [Math.max(0, Math.min(puzzle.W - 2, face[0])), Math.max(0, Math.min(puzzle.H - 2, face[1]))];
+  const topology = topologyFor(puzzle.topology);
+  const [x, y] = face;
+  if (x < 0 || x >= puzzle.W) {
+    const r = topology.wrapX(x, y, puzzle.W, puzzle.H);
+    return [r.x, r.y];
+  }
+  if (y < 0 || y >= puzzle.H) {
+    const r = topology.wrapY(x, y, puzzle.W, puzzle.H);
+    return [r.x, r.y];
+  }
+  return [x, y];
 }
 
 /**

@@ -1,5 +1,5 @@
 import { generateDailyPuzzle, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
-import { boardPixelSize, toroidalCanvasPixelSize, toroidalPrimaryTileOrigin, type Layout } from './game/geometry';
+import { boardPixelSize, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
 import { totalCells, type Puzzle } from './game/puzzle';
@@ -12,9 +12,7 @@ import './style.css';
 import { computeFitView, computeZoomAt, type Viewport, type ViewportBounds } from './view/viewport';
 
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
-/** The absolute floor for zooming out on an ordinary (non-toroidal) board. A toroidal board tightens `VIEW_BOUNDS.minScale` to its own fit scale instead (see `fitView`), since panning past the pre-rendered tile halo would show blank canvas. */
-const BASE_MIN_SCALE = 0.12;
-const VIEW_BOUNDS: ViewportBounds = { minScale: BASE_MIN_SCALE, maxScale: 3 };
+const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
 /** How long each replay frame stays on screen. */
 const REPLAY_FRAME_MS = 50;
 /** How long a transient status message (e.g. "undo history unavailable") stays visible. */
@@ -100,7 +98,7 @@ function render(): void {
           focusedRegion: focusedRegionId !== null ? regionMap.regions[focusedRegionId] : null,
           keyboardCursor,
         };
-  draw(ctx, canvas.width, canvas.height, state, LAYOUT);
+  draw(ctx, canvas.width, canvas.height, state, LAYOUT, view);
 }
 
 function setFocusedRegion(id: number | null): void {
@@ -113,8 +111,14 @@ function setKeyboardCursor(cursor: Face | null): void {
   render();
 }
 
+/** An ordinary board's pan/zoom is a cheap CSS transform on the whole canvas element. A wraparound board instead bakes pan/zoom into the canvas drawing itself (see `render.ts`'s `drawWrapped`), since the board tiles genuinely infinitely — there's no fixed-size bitmap a CSS transform could pan across — so it keeps the canvas untransformed and re-renders on every view change instead. */
 function applyTransform(): void {
-  canvas.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
+  if (activePuzzle().topology) {
+    canvas.style.transform = '';
+    render();
+  } else {
+    canvas.style.transform = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
+  }
 }
 
 function updateProgress(): void {
@@ -209,38 +213,36 @@ function setView(next: Viewport): void {
 }
 
 /**
- * A toroidal board renders as a haloed grid of repeated tile copies (see
- * `render.ts`), so "fit to view" means fitting just the one primary tile's
- * span — not the whole (much larger) haloed canvas — then shifting the
- * resulting pan so that specific tile (not the canvas origin) lands
- * centered. Zooming out further than this fit is disallowed (tightening
- * `VIEW_BOUNDS.minScale` to the fit scale itself), since panning past the
- * pre-rendered halo would just show blank canvas.
+ * "Fit to view" always means fitting one board-tile's span within the wrap
+ * element — for a wraparound board this is exactly the same computation as
+ * an ordinary board, since the primary tile sits at the canvas's own local
+ * origin (see `render.ts`'s `drawWrapped`); there's no separate halo origin
+ * to shift around anymore now that the tiling is computed fresh each draw
+ * from the current view instead of pre-rendered.
  */
-function fitToroidalView(puzzle: Puzzle): Viewport {
-  const { w, h } = boardPixelSize(puzzle, LAYOUT);
-  const fit = computeFitView(w, h, wrapEl.clientWidth, wrapEl.clientHeight, { minScale: BASE_MIN_SCALE, maxScale: VIEW_BOUNDS.maxScale });
-  const origin = toroidalPrimaryTileOrigin(puzzle, LAYOUT);
-  VIEW_BOUNDS.minScale = fit.scale;
-  return { scale: fit.scale, tx: fit.tx - origin.x * fit.scale, ty: fit.ty - origin.y * fit.scale };
-}
-
 function fitView(): void {
-  const puzzle = activePuzzle();
-  if (puzzle.toroidal) {
-    setView(fitToroidalView(puzzle));
-    return;
-  }
-  VIEW_BOUNDS.minScale = BASE_MIN_SCALE;
-  const { w, h } = boardPixelSize(puzzle, LAYOUT);
+  const { w, h } = boardPixelSize(activePuzzle(), LAYOUT);
   setView(computeFitView(w, h, wrapEl.clientWidth, wrapEl.clientHeight, VIEW_BOUNDS));
 }
 
+/**
+ * A wraparound board's canvas is sized to the visible viewport itself
+ * (content is drawn fresh each frame relative to the current pan/zoom, see
+ * `render.ts`), rather than to a fixed board-derived size — so it has to be
+ * kept in sync with the wrap element's size, including on window resize
+ * (unlike an ordinary board, whose canvas size never changes after the
+ * initial layout).
+ */
 function layout(): void {
   const puzzle = activePuzzle();
-  const { w, h } = puzzle.toroidal ? toroidalCanvasPixelSize(puzzle, LAYOUT) : boardPixelSize(puzzle, LAYOUT);
-  canvas.width = w;
-  canvas.height = h;
+  if (puzzle.topology) {
+    canvas.width = wrapEl.clientWidth;
+    canvas.height = wrapEl.clientHeight;
+  } else {
+    const { w, h } = boardPixelSize(puzzle, LAYOUT);
+    canvas.width = w;
+    canvas.height = h;
+  }
   fitView();
   render();
 }
@@ -526,7 +528,7 @@ byId('zoomOutBtn').addEventListener('click', () => {
   setView(computeZoomAt(view, wrapEl.clientWidth / 2, wrapEl.clientHeight / 2, view.scale / 1.4, VIEW_BOUNDS));
 });
 window.addEventListener('resize', () => {
-  if (puzzle) fitView();
+  if (puzzle) layout();
 });
 
 wrapEl.addEventListener(

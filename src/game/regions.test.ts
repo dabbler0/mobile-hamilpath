@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { computeRegions, edgeKey, regionAt } from './regions';
-import { buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
+import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
+import { KLEIN_BOTTLE, PROJECTIVE_PLANE } from './topology';
 
 function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
   const adj = new Map<string, Set<string>>();
@@ -136,7 +137,7 @@ describe('computeRegions', () => {
     }
     adj.get(key(0, 0))!.add(key(0, 3));
     adj.get(key(0, 3))!.add(key(0, 0));
-    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], toroidal: true };
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], topology: 'torus' };
 
     const { faceToRegion, regions } = computeRegions(puzzle);
     // Toroidal: every face in the full W x H grid exists.
@@ -147,6 +148,59 @@ describe('computeRegions', () => {
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
     expect(region.boundary).toEqual([edgeKey([0, 0], [0, 3])]);
+  });
+
+  it('wraps face adjacency across a flip seam on a Klein bottle board', () => {
+    // 4x4 Klein bottle board: klein wraps x straight but y with an x-flip.
+    // The only real edge is the wraparound one crossing the y-seam: (1,3)
+    // steps down to KLEIN_BOTTLE.wrapY(1, 4, 4, 4) = (4-1-1, 0) = (2,0).
+    // Every other adjacent face pair (including other wraps) has no
+    // candidate edge, so — same shape as the torus test above — they all
+    // fuse into one region the long way around.
+    const W = 4;
+    const H = 4;
+    const adj = new Map<string, Set<string>>();
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+    }
+    adj.get(key(1, 3))!.add(key(2, 0));
+    adj.get(key(2, 0))!.add(key(1, 3));
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], topology: 'klein' };
+
+    expect(KLEIN_BOTTLE.wrapY(1, 4, 4, 4)).toEqual({ x: 2, y: 0, flip: { flipX: true, flipY: false } });
+
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(W * H);
+    const regionIds = new Set(faceToRegion.values());
+    expect(regionIds.size).toBe(1);
+    const region = regions[[...regionIds][0]!];
+    expect(region.faces).toHaveLength(W * H);
+    expect(region.boundary).toEqual([edgeKey([1, 3], [2, 0])]);
+  });
+
+  it('wraps face adjacency across a flip seam on a projective plane board', () => {
+    // 4x4 projective plane board: both directions flip. The only real edge
+    // crosses the x-seam: (3,1) steps right to
+    // PROJECTIVE_PLANE.wrapX(4, 1, 4, 4) = (0, 4-1-1) = (0,2).
+    const W = 4;
+    const H = 4;
+    const adj = new Map<string, Set<string>>();
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+    }
+    adj.get(key(3, 1))!.add(key(0, 2));
+    adj.get(key(0, 2))!.add(key(3, 1));
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], topology: 'projective' };
+
+    expect(PROJECTIVE_PLANE.wrapX(4, 1, 4, 4)).toEqual({ x: 0, y: 2, flip: { flipX: false, flipY: true } });
+
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(W * H);
+    const regionIds = new Set(faceToRegion.values());
+    expect(regionIds.size).toBe(1);
+    const region = regions[[...regionIds][0]!];
+    expect(region.faces).toHaveLength(W * H);
+    expect(region.boundary).toEqual([edgeKey([3, 1], [0, 2])]);
   });
 });
 
@@ -167,6 +221,22 @@ describe('computeRegions on real generated puzzles', () => {
 
   it('covers the full W x H face grid on a toroidal puzzle', () => {
     const puzzle = buildToroidalPuzzle(5, 4, 0.3, mulberry32(3));
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(puzzle.W * puzzle.H);
+    const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);
+    expect(totalFaces).toBe(puzzle.W * puzzle.H);
+  });
+
+  it('covers the full W x H face grid on a Klein bottle puzzle', () => {
+    const puzzle = buildKleinBottlePuzzle(5, 4, 0.3, mulberry32(3));
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.size).toBe(puzzle.W * puzzle.H);
+    const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);
+    expect(totalFaces).toBe(puzzle.W * puzzle.H);
+  });
+
+  it('covers the full W x H face grid on a projective plane puzzle', () => {
+    const puzzle = buildProjectivePlanePuzzle(5, 4, 0.3, mulberry32(3));
     const { faceToRegion, regions } = computeRegions(puzzle);
     expect(faceToRegion.size).toBe(puzzle.W * puzzle.H);
     const totalFaces = regions.reduce((sum, r) => sum + r.faces.length, 0);

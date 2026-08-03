@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { mulberry32 } from './rng';
 import { rectShape, randomShape, randomToroidalShape } from './shape';
-import { buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, parseKey, totalCells } from './puzzle';
+import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, parseKey, totalCells } from './puzzle';
+import { KLEIN_BOTTLE, PROJECTIVE_PLANE, type Topology } from './topology';
 
 function manhattan(a: readonly [number, number], b: readonly [number, number]): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
@@ -12,6 +13,30 @@ function toroidalManhattan(a: readonly [number, number], b: readonly [number, nu
   const dx = Math.min(Math.abs(a[0] - b[0]), W - Math.abs(a[0] - b[0]));
   const dy = Math.min(Math.abs(a[1] - b[1]), H - Math.abs(a[1] - b[1]));
   return dx + dy;
+}
+
+/** Whether `b` is reachable from `a` by a single step in one of the 4 directions, wrapping (with any flip) per `topology`. */
+function isValidWrapStep(a: readonly [number, number], b: readonly [number, number], topology: Topology, W: number, H: number): boolean {
+  for (const [dx, dy] of [
+    [1, 0],
+    [-1, 0],
+    [0, 1],
+    [0, -1],
+  ] as const) {
+    let nx = a[0] + dx;
+    let ny = a[1] + dy;
+    if (nx < 0 || nx >= W) {
+      const r = topology.wrapX(nx, ny, W, H);
+      nx = r.x;
+      ny = r.y;
+    } else if (ny < 0 || ny >= H) {
+      const r = topology.wrapY(nx, ny, W, H);
+      nx = r.x;
+      ny = r.y;
+    }
+    if (nx === b[0] && ny === b[1]) return true;
+  }
+  return false;
 }
 
 describe('key / parseKey', () => {
@@ -93,7 +118,7 @@ describe('buildRandomShapePuzzle', () => {
 describe('buildToroidalPuzzle', () => {
   it('fills the whole m x n rectangle exactly (every canonical cell exists)', () => {
     const puzzle = buildToroidalPuzzle(5, 4, 0, mulberry32(1));
-    expect(puzzle.toroidal).toBe(true);
+    expect(puzzle.topology).toBe('torus');
     expect(totalCells(puzzle)).toBe(puzzle.W * puzzle.H);
     expect(puzzle.W).toBe(10);
     expect(puzzle.H).toBe(8);
@@ -128,6 +153,73 @@ describe('buildToroidalPuzzle', () => {
     const puzzle = buildToroidalPuzzle(5, 4, 0, mulberry32(1));
     for (const neighbors of puzzle.adj.values()) {
       expect(neighbors.size).toBe(2);
+    }
+  });
+});
+
+describe.each([
+  ['buildKleinBottlePuzzle', buildKleinBottlePuzzle, KLEIN_BOTTLE] as const,
+  ['buildProjectivePlanePuzzle', buildProjectivePlanePuzzle, PROJECTIVE_PLANE] as const,
+])('%s', (_name, build, topology) => {
+  it('fills the whole m x n rectangle exactly (every canonical cell exists)', () => {
+    const puzzle = build(5, 4, 0, mulberry32(1));
+    expect(puzzle.topology).toBe(topology.kind);
+    expect(totalCells(puzzle)).toBe(puzzle.W * puzzle.H);
+    expect(puzzle.W).toBe(10);
+    expect(puzzle.H).toBe(8);
+  });
+
+  it('every edge is a wraparound-aware (flip-aware) orthogonal step', () => {
+    const puzzle = build(6, 5, 0.35, mulberry32(2));
+    for (const [k, neighbors] of puzzle.adj) {
+      const a = parseKey(k);
+      for (const nk of neighbors) {
+        expect(isValidWrapStep(a, parseKey(nk), topology, puzzle.W, puzzle.H)).toBe(true);
+      }
+    }
+  });
+
+  it('includes at least one distractor edge that crosses the wraparound at high density', () => {
+    let sawWrap = false;
+    for (let seed = 0; seed < 10 && !sawWrap; seed++) {
+      const puzzle = build(5, 4, 0.9, mulberry32(seed));
+      for (const [k, neighbors] of puzzle.adj) {
+        const [x, y] = parseKey(k);
+        for (const nk of neighbors) {
+          const [x2, y2] = parseKey(nk);
+          if (Math.abs(x - x2) > 1 || Math.abs(y - y2) > 1) sawWrap = true;
+        }
+      }
+    }
+    expect(sawWrap).toBe(true);
+  });
+
+  it('with zero density, forms a pure cycle: every node has degree exactly 2', () => {
+    const puzzle = build(5, 4, 0, mulberry32(1));
+    for (const neighbors of puzzle.adj.values()) {
+      expect(neighbors.size).toBe(2);
+    }
+  });
+
+  it('adjacency is symmetric', () => {
+    const puzzle = build(6, 5, 0.4, mulberry32(3));
+    for (const [k, neighbors] of puzzle.adj) {
+      for (const nk of neighbors) {
+        expect(puzzle.adj.get(nk)?.has(k)).toBe(true);
+      }
+    }
+  });
+
+  it('succeeds across many seeds and sizes without ever throwing', () => {
+    for (const [m, n] of [
+      [3, 4],
+      [4, 6],
+      [6, 9],
+      [8, 12],
+    ] as const) {
+      for (let seed = 0; seed < 20; seed++) {
+        expect(() => build(m, n, 0.28, mulberry32(seed))).not.toThrow();
+      }
     }
   });
 });
