@@ -96,19 +96,34 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     return adj.has(key(fx, fy)) && adj.has(key(fx + 1, fy)) && adj.has(key(fx, fy + 1)) && adj.has(key(fx + 1, fy + 1));
   }
 
-  /** Resolves a vertex that may be out of [0,W) x [0,H) via `topology`'s wrap rule; a no-op for an in-range vertex or an unwrapped board. */
+  /**
+   * Resolves a vertex that may be out of [0,W) x [0,H) via `topology`'s wrap
+   * rule; a no-op for an in-range vertex or an unwrapped board.
+   *
+   * Deliberately does *not* delegate to `topology.wrapX`/`wrapY` directly:
+   * those assume only one axis is ever out of range at a time (true for a
+   * single unit step, which is all `wrappedNeighbor` ever needs). But
+   * `rightOf`/`belowOf`/`leftOf`/`aboveOf` below each need a face's diagonal
+   * corner vertex (e.g. `vertexAt(fx+1, fy+1)`), and at the one face where
+   * both fx and fy are already at the board's far edge, that corner is out
+   * of range on *both* axes simultaneously. Calling `wrapX` alone there
+   * silently leaves the other coordinate unwrapped (e.g. `(0, H)` instead of
+   * the correct `(0, 0)`), which breaks wall detection and can even name the
+   * wrong neighbor face entirely (this was a real bug: it let a board's
+   * corner face silently fuse with a distant, unrelated face). Using the
+   * same tile-index + `tileOrientation` math `geometry.ts`'s `cellAt` uses
+   * — already proven correct for arbitrary (including negative) tile
+   * offsets in `topology.test.ts` — handles any offset uniformly, including
+   * both axes wrapping at once.
+   */
   function vertexAt(x: number, y: number): Cell {
-    if (wrapped) {
-      if (x < 0 || x >= W) {
-        const r = topology!.wrapX(x, y, W, H);
-        return [r.x, r.y];
-      }
-      if (y < 0 || y >= H) {
-        const r = topology!.wrapY(x, y, W, H);
-        return [r.x, r.y];
-      }
-    }
-    return [x, y];
+    if (!wrapped) return [x, y];
+    const tileX = Math.floor(x / W);
+    const tileY = Math.floor(y / H);
+    const localX = x - tileX * W;
+    const localY = y - tileY * H;
+    const o = topology!.tileOrientation(tileX, tileY);
+    return [o.flipX ? W - 1 - localX : localX, o.flipY ? H - 1 - localY : localY];
   }
 
   interface Neighbor {
@@ -117,40 +132,65 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     v2: Cell;
   }
 
+  function wrapIndex(v: number, size: number): number {
+    return ((v % size) + size) % size;
+  }
+
+  /**
+   * The face one step (dx, dy) away from (fx, fy) — exactly one of dx/dy is
+   * ±1, the other 0 — wrapping via `topology` if that step falls outside
+   * [0,W) x [0,H).
+   *
+   * Deliberately *not* computed by wrapping (fx+dx, fy+dy) the same way
+   * `vertexAt` wraps a vertex: a face's index identifies a unit-width span
+   * (fx to fx+1), not a point, so once mirrored by an orientation-reversing
+   * seam, its correct image is an *interval* reflection (`W - 2 - local`),
+   * one less than the point reflection (`W - 1 - local`) a vertex uses. Confirmed
+   * by inverting `render.ts`/`geometry.ts`'s own `faceToScreenTiled` formula
+   * (a face's rendered pixel center is at `local + 0.5`, mirrored to
+   * `W - 1 - (local + 0.5)` — solving that back to an index lands on
+   * `W - 2 - local`, not `W - 1 - local`). Using the vertex-style point
+   * reflection here was the second half of a real bug: it made a board's
+   * corner face's computed neighbor land on the wrong face (as far as the
+   * diagonally-opposite corner, in one case), silently welding unrelated
+   * regions together.
+   */
+  function faceNeighbor(fx: number, fy: number, dx: number, dy: number): Face {
+    if (!wrapped) return [fx + dx, fy + dy];
+    const rawX = fx + dx;
+    const rawY = fy + dy;
+    const tileX = Math.floor(rawX / W);
+    const tileY = Math.floor(rawY / H);
+    const localX = rawX - tileX * W;
+    const localY = rawY - tileY * H;
+    const o = topology!.tileOrientation(tileX, tileY);
+    const gx = o.flipX ? wrapIndex(W - 2 - localX, W) : localX;
+    const gy = o.flipY ? wrapIndex(H - 2 - localY, H) : localY;
+    return [gx, gy];
+  }
+
   /** The face to the right of (fx,fy) and the two vertices of their shared (vertical) edge — or null if there's no such face (the true, unwrapped board edge). */
   function rightOf(fx: number, fy: number): Neighbor | null {
     if (!wrapped && fx + 1 >= FW) return null;
-    const v1 = vertexAt(fx + 1, fy);
-    const v2 = vertexAt(fx + 1, fy + 1);
-    const nfy = Math.min(v1[1], v2[1]);
-    return { face: [v1[0], nfy], v1, v2 };
+    return { face: faceNeighbor(fx, fy, 1, 0), v1: vertexAt(fx + 1, fy), v2: vertexAt(fx + 1, fy + 1) };
   }
 
   /** The face below (fx,fy) and the two vertices of their shared (horizontal) edge — or null if there's no such face. */
   function belowOf(fx: number, fy: number): Neighbor | null {
     if (!wrapped && fy + 1 >= FH) return null;
-    const v1 = vertexAt(fx, fy + 1);
-    const v2 = vertexAt(fx + 1, fy + 1);
-    const nfx = Math.min(v1[0], v2[0]);
-    return { face: [nfx, v1[1]], v1, v2 };
+    return { face: faceNeighbor(fx, fy, 0, 1), v1: vertexAt(fx, fy + 1), v2: vertexAt(fx + 1, fy + 1) };
   }
 
   /** The face to the left of (fx,fy) and the two vertices of their shared (vertical) edge — or null if there's no such face. */
   function leftOf(fx: number, fy: number): Neighbor | null {
     if (!wrapped && fx - 1 < 0) return null;
-    const v1 = vertexAt(fx - 1, fy);
-    const v2 = vertexAt(fx - 1, fy + 1);
-    const nfy = Math.min(v1[1], v2[1]);
-    return { face: [v1[0], nfy], v1, v2 };
+    return { face: faceNeighbor(fx, fy, -1, 0), v1: vertexAt(fx - 1, fy), v2: vertexAt(fx - 1, fy + 1) };
   }
 
   /** The face above (fx,fy) and the two vertices of their shared (horizontal) edge — or null if there's no such face. */
   function aboveOf(fx: number, fy: number): Neighbor | null {
     if (!wrapped && fy - 1 < 0) return null;
-    const v1 = vertexAt(fx, fy - 1);
-    const v2 = vertexAt(fx + 1, fy - 1);
-    const nfx = Math.min(v1[0], v2[0]);
-    return { face: [nfx, v1[1]], v1, v2 };
+    return { face: faceNeighbor(fx, fy, 0, -1), v1: vertexAt(fx, fy - 1), v2: vertexAt(fx + 1, fy - 1) };
   }
 
   const parent = new Int32Array(nFaces);
