@@ -1,3 +1,4 @@
+import { computeEdgeComponents } from './game/edgeComponents';
 import { faceToScreen, toScreen, type Layout } from './game/geometry';
 import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { parseKey, type Puzzle } from './game/puzzle';
@@ -16,11 +17,25 @@ const COLORS = {
   background: '#14151a',
   edge: '#33353e',
   node: '#45474f',
-  markedActive: '#4f7cff',
   markedWon: '#35c46a',
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
 };
+
+/**
+ * One color per connected component of marked edges, so it's easy to tell
+ * how many separate segments/cycles are on the board and which edges belong
+ * to which — a categorical palette (CVD- and contrast-validated against
+ * `COLORS.background`), cycling if there are ever more segments than colors.
+ * Segments are transient (they merge/split as the player edits), so unlike a
+ * data-viz legend this doesn't need per-identity color stability across
+ * redraws — a segment can change color when it merges with another.
+ */
+const SEGMENT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
+
+function segmentColor(component: number): string {
+  return SEGMENT_COLORS[component % SEGMENT_COLORS.length];
+}
 
 export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, state: RenderState, layout: Layout): void {
   const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
@@ -78,10 +93,16 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
 }
 
 function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout): void {
-  ctx.strokeStyle = won ? COLORS.markedWon : COLORS.markedActive;
   ctx.lineWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineCap = 'round';
+
+  // A win is exactly one component covering every cell, so there's nothing to
+  // tell apart — keep the single "solved" color instead of an arbitrary one
+  // from the segment palette.
+  const components = won ? null : computeEdgeComponents(edges);
+
   for (const ek of edges) {
+    ctx.strokeStyle = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
     const [a, b] = parseEdgeKey(ek);
     const [sx1, sy1] = toScreen(a, layout);
     const [sx2, sy2] = toScreen(b, layout);
