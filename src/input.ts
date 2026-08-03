@@ -1,4 +1,4 @@
-import { cellAt, type Layout } from './game/geometry';
+import { faceAt, type Layout } from './game/geometry';
 import type { PathOp, PathState } from './game/pathEdit';
 import { toggleRegion } from './game/pathEdit';
 import { regionAt, type RegionMap } from './game/regions';
@@ -52,10 +52,11 @@ interface TapCandidate {
 }
 
 /**
- * Wires unified pointer handling onto `canvas`: a tap on a cell toggles the
- * region it belongs to (marking every unmarked boundary edge and unmarking
- * every marked one), single-finger drags pan the board, and two-finger
- * gestures pinch-zoom. Returns a teardown function.
+ * Wires unified pointer handling onto `canvas`: a tap on a face (a grid
+ * square between vertices) toggles the region it belongs to (marking every
+ * unmarked boundary edge and unmarking every marked one), single-finger
+ * drags pan the board, and two-finger gestures pinch-zoom. Returns a
+ * teardown function.
  */
 export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost): () => void {
   const activePointers = new Map<number, { x: number; y: number }>();
@@ -106,8 +107,8 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     const [px, py] = toCanvasLocal(wx, wy, host.getView());
     const puzzle = host.getPuzzle();
     const layout = host.getLayout();
-    const cell = cellAt(px, py, layout, puzzle.W, puzzle.H);
-    const regionId = regionAt(host.getRegionMap(), cell);
+    const face = faceAt(px, py, layout, puzzle.W, puzzle.H);
+    const regionId = regionAt(host.getRegionMap(), face);
     if (regionId !== null) {
       tapCandidate = { regionId, downClientX: evt.clientX, downClientY: evt.clientY };
       host.setFocusedRegion(regionId);

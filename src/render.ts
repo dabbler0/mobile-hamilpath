@@ -1,6 +1,5 @@
-import { toScreen, type Layout } from './game/geometry';
-import type { Cell } from './game/hamiltonianCycle';
-import { parseEdgeKey, type EdgeKey, type Region } from './game/regions';
+import { faceToScreen, toScreen, type Layout } from './game/geometry';
+import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { parseKey, type Puzzle } from './game/puzzle';
 
 export interface RenderState {
@@ -9,8 +8,8 @@ export interface RenderState {
   won: boolean;
   /** The region a press/keyboard cursor is currently over, if any, so it can be highlighted as the one about to toggle. */
   focusedRegion?: Region | null;
-  /** The keyboard-control cursor's exact cell, if keyboard navigation is in use — drawn on top of the (possibly larger) focused-region fill so movement within one region is still visible. */
-  keyboardCursor?: Cell | null;
+  /** The keyboard-control cursor's exact face, if keyboard navigation is in use — drawn on top of the (possibly larger) focused-region fill so movement within one region is still visible. */
+  keyboardCursor?: Face | null;
 }
 
 const COLORS = {
@@ -72,10 +71,9 @@ function drawNodes(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout
 
 function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layout: Layout): void {
   ctx.fillStyle = COLORS.regionFocus;
-  const half = layout.cellSize / 2;
-  for (const cell of region.cells) {
-    const [sx, sy] = toScreen(cell, layout);
-    ctx.fillRect(sx - half, sy - half, layout.cellSize, layout.cellSize);
+  for (const face of region.faces) {
+    const [sx, sy] = toScreen(face, layout);
+    ctx.fillRect(sx, sy, layout.cellSize, layout.cellSize);
   }
 }
 
@@ -94,8 +92,8 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
   }
 }
 
-function drawCursor(ctx: CanvasRenderingContext2D, cell: Cell, layout: Layout): void {
-  const [sx, sy] = toScreen(cell, layout);
+function drawCursor(ctx: CanvasRenderingContext2D, face: Face, layout: Layout): void {
+  const [sx, sy] = faceToScreen(face, layout);
   const r = Math.max(6, layout.cellSize * 0.44);
   ctx.beginPath();
   ctx.setLineDash([4, 4]);

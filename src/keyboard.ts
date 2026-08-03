@@ -1,6 +1,5 @@
-import type { Cell } from './game/hamiltonianCycle';
 import { toggleRegion, type PathOp, type PathState } from './game/pathEdit';
-import { regionAt, type RegionMap } from './game/regions';
+import { regionAt, type Face, type RegionMap } from './game/regions';
 import type { Puzzle } from './game/puzzle';
 
 /** The mutable pieces of game/view state that keyboard interaction needs to read and update. */
@@ -12,7 +11,7 @@ export interface KeyboardInputHost {
   setPathState(state: PathState, ops: PathOp[]): void;
   /** Reports which region the cursor currently sits in, so it can be highlighted as the one Enter/Space would toggle. */
   setFocusedRegion(id: number | null): void;
-  setKeyboardCursor(cursor: Cell | null): void;
+  setKeyboardCursor(cursor: Face | null): void;
   /** False while keyboard control shouldn't act at all (e.g. an overlay is open). */
   isEnabled(): boolean;
 }
@@ -32,23 +31,24 @@ const DIRECTIONS: Record<string, Direction> = {
 /** Tag names for controls that should keep their own native keyboard behavior (form navigation, button activation). */
 const NATIVE_CONTROL_TAGS = new Set(['SELECT', 'INPUT', 'TEXTAREA', 'BUTTON']);
 
-function clampToBoard(cell: Cell, puzzle: Puzzle): Cell {
-  return [Math.max(0, Math.min(puzzle.W - 1, cell[0])), Math.max(0, Math.min(puzzle.H - 1, cell[1]))];
+/** Clamps a face position to the (W-1) x (H-1) face grid — one less than the vertex grid in each dimension, since a face needs a vertex on every side of it. */
+function clampToFaceBoard(face: Face, puzzle: Puzzle): Face {
+  return [Math.max(0, Math.min(puzzle.W - 2, face[0])), Math.max(0, Math.min(puzzle.H - 2, face[1]))];
 }
 
 /**
  * Wires keyboard-only controls onto `target`: arrow keys move a free cursor
- * around the lattice (shift+arrow jumps `JUMP` cells at once), always
+ * around the face grid (shift+arrow jumps `JUMP` faces at once), always
  * sitting inside some region — that region is reported as "focused" so it
  * can be highlighted as the one that will toggle. Pressing the action key
  * (Enter or Space) toggles it: every unmarked boundary edge becomes marked
  * and vice versa. Returns a teardown function.
  */
 export function attachKeyboardHandling(target: Window, host: KeyboardInputHost): () => void {
-  let cursor: Cell | null = null;
+  let cursor: Face | null = null;
 
-  function ensureCursor(): Cell {
-    if (!cursor) cursor = host.getPuzzle().startCell;
+  function ensureCursor(): Face {
+    if (!cursor) cursor = clampToFaceBoard(host.getPuzzle().startCell, host.getPuzzle());
     return cursor;
   }
 
@@ -69,7 +69,7 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
 
   function handleMove(direction: Direction, jump: number): void {
     const c = ensureCursor();
-    cursor = clampToBoard([c[0] + direction[0] * jump, c[1] + direction[1] * jump], host.getPuzzle());
+    cursor = clampToFaceBoard([c[0] + direction[0] * jump, c[1] + direction[1] * jump], host.getPuzzle());
   }
 
   function onKeyDown(evt: KeyboardEvent): void {
