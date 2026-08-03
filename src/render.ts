@@ -1,5 +1,5 @@
 import { computeEdgeComponents } from './game/edgeComponents';
-import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, TOROIDAL_TILE_COPIES, type Layout } from './game/geometry';
+import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, TOROIDAL_PRIMARY_TILE_INDEX, TOROIDAL_TILE_COPIES, type Layout } from './game/geometry';
 import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { parseKey, type Puzzle } from './game/puzzle';
 
@@ -21,6 +21,9 @@ const COLORS = {
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
 };
+
+/** Opacity of a toroidal board's surrounding halo copies — legible enough to show the wraparound and the board's true size, but visually recessive and clearly not the interactive tile (see `isWithinToroidalPrimaryTile`). */
+const TOROIDAL_HALO_OPACITY = 0.28;
 
 /**
  * One color per connected component of marked edges, so it's easy to tell
@@ -135,15 +138,17 @@ function drawCursor(ctx: CanvasRenderingContext2D, face: Face, layout: Layout): 
 }
 
 /**
- * A toroidal board is rendered as `TOROIDAL_TILE_COPIES` x
- * `TOROIDAL_TILE_COPIES` repeated copies of the same content (see
- * `geometry.ts`), so panning past an edge reveals the seamless continuation
- * instead of a hard boundary. The tricky part is edges: an edge between two
- * cells that are graph-adjacent via the wraparound (e.g. column W-1 to
- * column 0) would draw as one long line straight across the tile if drawn
- * from each cell's own position in the *same* tile copy — `wrapDelta` finds
- * the small (usually ±1) on-screen offset that makes it look like ordinary
- * local adjacency in every repeated copy instead.
+ * A toroidal board is rendered as one interactive primary tile surrounded by
+ * `TOROIDAL_TILE_COPIES` x `TOROIDAL_TILE_COPIES` - 1 dimmed, non-interactive
+ * halo copies (see `geometry.ts`, `isWithinToroidalPrimaryTile`) — just
+ * enough context to make the wraparound and the board's true size legible,
+ * without implying the board is an actually-infinite scrolling surface. The
+ * tricky part is edges: an edge between two cells that are graph-adjacent
+ * via the wraparound (e.g. column W-1 to column 0) would draw as one long
+ * line straight across the tile if drawn from each cell's own position in
+ * the *same* tile copy — `wrapDelta` finds the small (usually ±1) on-screen
+ * offset that makes it look like ordinary local adjacency in every repeated
+ * copy instead.
  */
 function wrapDelta(v1: number, v2: number, period: number): number {
   let d = ((v2 - v1) % period) + period;
@@ -183,7 +188,15 @@ function drawToroidal(ctx: CanvasRenderingContext2D, state: RenderState, layout:
 
   for (let tileY = 0; tileY < TOROIDAL_TILE_COPIES; tileY++) {
     for (let tileX = 0; tileX < TOROIDAL_TILE_COPIES; tileX++) {
-      if (focusedRegion) {
+      const isPrimary = tileX === TOROIDAL_PRIMARY_TILE_INDEX && tileY === TOROIDAL_PRIMARY_TILE_INDEX;
+      ctx.globalAlpha = isPrimary ? 1 : TOROIDAL_HALO_OPACITY;
+
+      // The focused-region highlight and keyboard cursor mark something the
+      // player can act on — only ever the primary tile now that halo taps
+      // don't toggle anything (see `input.ts`), so skip drawing them
+      // (dimmed) in the halo, which would otherwise imply they're separately
+      // interactive there too.
+      if (isPrimary && focusedRegion) {
         ctx.fillStyle = COLORS.regionFocus;
         for (const face of focusedRegion.faces) {
           const [sx, sy] = toScreenTiled(face, layout, tileX, tileY, W, H);
@@ -222,7 +235,7 @@ function drawToroidal(ctx: CanvasRenderingContext2D, state: RenderState, layout:
         ctx.stroke();
       }
 
-      if (keyboardCursor) {
+      if (isPrimary && keyboardCursor) {
         const [sx, sy] = faceToScreenTiled(keyboardCursor, layout, tileX, tileY, W, H);
         const cr = Math.max(6, layout.cellSize * 0.44);
         ctx.beginPath();
@@ -235,4 +248,5 @@ function drawToroidal(ctx: CanvasRenderingContext2D, state: RenderState, layout:
       }
     }
   }
+  ctx.globalAlpha = 1;
 }
