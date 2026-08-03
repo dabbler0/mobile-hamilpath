@@ -5,6 +5,7 @@ import {
   faceAt,
   faceToScreen,
   faceToScreenTiled,
+  isWithinToroidalPrimaryTile,
   toroidalCanvasPixelSize,
   toroidalPrimaryTileOrigin,
   toScreen,
@@ -83,5 +84,30 @@ describe('toroidalCanvasPixelSize / toroidalPrimaryTileOrigin', () => {
     const origin = toroidalPrimaryTileOrigin(puzzle, layout);
     expect(origin.x).toBe(1 * puzzle.W * layout.cellSize);
     expect(origin.y).toBe(1 * puzzle.H * layout.cellSize);
+  });
+});
+
+describe('isWithinToroidalPrimaryTile', () => {
+  const puzzle = { W: 6, H: 8 };
+
+  it('is true for a pixel inside the primary (middle) tile copy', () => {
+    const [sx, sy] = toScreenTiled([2, 3], layout, 1, 1, puzzle.W, puzzle.H);
+    expect(isWithinToroidalPrimaryTile(sx, sy, layout, puzzle)).toBe(true);
+    // Just inside the primary tile's near edge.
+    const origin = toroidalPrimaryTileOrigin(puzzle, layout);
+    expect(isWithinToroidalPrimaryTile(layout.pad + origin.x, layout.pad + origin.y, layout, puzzle)).toBe(true);
+  });
+
+  it('is false for a pixel in a neighboring halo copy', () => {
+    const [sx, sy] = toScreenTiled([2, 3], layout, 0, 1, puzzle.W, puzzle.H);
+    expect(isWithinToroidalPrimaryTile(sx, sy, layout, puzzle)).toBe(false);
+    const [sx2, sy2] = toScreenTiled([2, 3], layout, 2, 1, puzzle.W, puzzle.H);
+    expect(isWithinToroidalPrimaryTile(sx2, sy2, layout, puzzle)).toBe(false);
+  });
+
+  it('is false exactly at the primary tile boundary (one period past its origin)', () => {
+    const origin = toroidalPrimaryTileOrigin(puzzle, layout);
+    const rightEdge = layout.pad + origin.x + puzzle.W * layout.cellSize;
+    expect(isWithinToroidalPrimaryTile(rightEdge, layout.pad + origin.y, layout, puzzle)).toBe(false);
   });
 });

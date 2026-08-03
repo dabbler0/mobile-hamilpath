@@ -58,6 +58,20 @@ function hasEdges(record: { edges?: unknown }): boolean {
   return Array.isArray(record.edges);
 }
 
+/**
+ * A record saved before board shapes existed has no `shapeMode` at all —
+ * unlike `segments`/`edges`, this one predates a *readable* format change
+ * (every puzzle before this feature genuinely was a plain rectangle), so
+ * rather than discarding it, default it to `'rect'`. `in-progress`/
+ * `progress` records are keyed by (day, size, shape) and so never surface
+ * here at all under the old key (a lookup for the new key just won't find
+ * them, handled elsewhere as an ordinary cache miss) — this only matters for
+ * `completed` records, which `listCompleted` scans regardless of key.
+ */
+function withShapeModeDefault<T extends { shapeMode?: ShapeMode }>(record: T): T & { shapeMode: ShapeMode } {
+  return record.shapeMode ? (record as T & { shapeMode: ShapeMode }) : { ...record, shapeMode: 'rect' };
+}
+
 export async function getInProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<InProgressRecord | undefined> {
   const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode));
   return record && hasEdges(record) ? record : undefined;
@@ -94,12 +108,15 @@ export interface CompletedRecord {
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
   const all = await getAllRecords<CompletedRecord>(STORES.completed);
-  return all.filter(hasEdges).sort((a, b) => b.completedAt - a.completedAt);
+  return all
+    .filter(hasEdges)
+    .map(withShapeModeDefault)
+    .sort((a, b) => b.completedAt - a.completedAt);
 }
 
 export async function getCompleted(id: PuzzleId): Promise<CompletedRecord | undefined> {
   const record = await getRecord<CompletedRecord>(STORES.completed, puzzleRecordId(id));
-  return record && hasEdges(record) ? record : undefined;
+  return record && hasEdges(record) ? withShapeModeDefault(record) : undefined;
 }
 
 /** Records a win: stores the completed puzzle (plus its move log, for replay) for later review, clears its in-progress record, and — if it was the next in line — advances the unlock gate so the following index becomes playable. */

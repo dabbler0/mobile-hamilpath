@@ -1,4 +1,4 @@
-import { faceAt, type Layout } from './game/geometry';
+import { faceAt, isWithinToroidalPrimaryTile, type Layout } from './game/geometry';
 import type { PathOp, PathState } from './game/pathEdit';
 import { toggleRegion } from './game/pathEdit';
 import { regionAt, type RegionMap } from './game/regions';
@@ -107,6 +107,9 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     const [px, py] = toCanvasLocal(wx, wy, host.getView());
     const puzzle = host.getPuzzle();
     const layout = host.getLayout();
+    // A toroidal board's dimmed halo copies are just visual context (see
+    // render.ts) — a press landing on one shouldn't toggle a region.
+    if (puzzle.toroidal && !isWithinToroidalPrimaryTile(px, py, layout, puzzle)) return;
     const face = faceAt(px, py, layout, puzzle.W, puzzle.H, puzzle.toroidal);
     const regionId = regionAt(host.getRegionMap(), face);
     if (regionId !== null) {

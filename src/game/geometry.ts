@@ -64,15 +64,18 @@ export function boardPixelSize(puzzle: Pick<Puzzle, 'W' | 'H'>, layout: Layout):
 }
 
 /**
- * A toroidal board is rendered as a seamlessly-repeating tiling (panning
- * past an edge reveals the next copy, exactly like the board wraps) rather
- * than a single rectangle — see `render.ts`. `TOROIDAL_TILE_COPIES` tile
- * copies are drawn per axis (a halo of copies around the one primary tile,
- * enough that panning within the view bounds `main.ts` allows never runs out
- * of pre-drawn halo), indexed 0..TOROIDAL_TILE_COPIES-1 with the primary
- * tile at the middle index.
+ * A toroidal board is rendered as the one playable primary tile surrounded
+ * by its 8 neighboring copies, dimmed and non-interactive (see `render.ts`,
+ * `isWithinToroidalPrimaryTile`) — there just to make the wraparound and the
+ * board's true size legible at a glance, not to imply an actually-infinite
+ * scrolling board. `TOROIDAL_TILE_COPIES` tile copies are drawn per axis
+ * (a halo of copies around the one primary tile), indexed
+ * 0..TOROIDAL_TILE_COPIES-1 with the primary tile at the middle index.
  */
 export const TOROIDAL_TILE_COPIES = 3;
+
+/** 0-indexed tile-copy coordinate of the one interactive, full-opacity tile — see `TOROIDAL_TILE_COPIES`. */
+export const TOROIDAL_PRIMARY_TILE_INDEX = Math.floor(TOROIDAL_TILE_COPIES / 2);
 
 /** Screen position of a cell within one specific repeated tile copy (`tileX`/`tileY`, 0-indexed — see `TOROIDAL_TILE_COPIES`) of a toroidal board. */
 export function toScreenTiled(cell: Cell, layout: Layout, tileX: number, tileY: number, W: number, H: number): [number, number] {
@@ -95,6 +98,13 @@ export function toroidalCanvasPixelSize(puzzle: Pick<Puzzle, 'W' | 'H'>, layout:
 
 /** The pixel offset, within the haloed toroidal canvas, of the primary (center) tile copy's origin — what a toroidal board's view should be fit/centered on, rather than the whole haloed canvas. */
 export function toroidalPrimaryTileOrigin(puzzle: Pick<Puzzle, 'W' | 'H'>, layout: Layout): { x: number; y: number } {
-  const centerIndex = Math.floor(TOROIDAL_TILE_COPIES / 2);
-  return { x: centerIndex * puzzle.W * layout.cellSize, y: centerIndex * puzzle.H * layout.cellSize };
+  return { x: TOROIDAL_PRIMARY_TILE_INDEX * puzzle.W * layout.cellSize, y: TOROIDAL_PRIMARY_TILE_INDEX * puzzle.H * layout.cellSize };
+}
+
+/** Whether a canvas-local pixel position falls within the one interactive primary tile of a toroidal board (as opposed to its dimmed, non-interactive halo) — see `TOROIDAL_TILE_COPIES`. */
+export function isWithinToroidalPrimaryTile(px: number, py: number, layout: Layout, puzzle: Pick<Puzzle, 'W' | 'H'>): boolean {
+  const origin = toroidalPrimaryTileOrigin(puzzle, layout);
+  const left = layout.pad + origin.x;
+  const top = layout.pad + origin.y;
+  return px >= left && px < left + puzzle.W * layout.cellSize && py >= top && py < top + puzzle.H * layout.cellSize;
 }

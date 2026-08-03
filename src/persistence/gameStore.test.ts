@@ -166,4 +166,20 @@ describe('completed games', () => {
     expect(await listCompleted()).toEqual([]);
     expect(await getCompleted(id)).toBeUndefined();
   });
+
+  it('defaults a pre-board-shape completed record (no shapeMode) to rect in listCompleted, instead of crashing the history view', async () => {
+    // Every puzzle before board shapes existed was a plain rectangle, so this
+    // is a readable legacy format (unlike segments/edges above) — it should
+    // surface normally, not be filtered out. (Its id also predates the
+    // shapeMode-qualified key format, so — like other breaking key-format
+    // changes in this codebase — it's simply not reachable via `getCompleted`
+    // by id anymore; that's fine, since only `listCompleted` feeds the
+    // history view.)
+    const legacyId = { id: '2026-07-10::mini::0', day: '2026-07-10', sizeKey: 'mini', index: 0 };
+    await putRecord(STORES.completed, { ...legacyId, edges: ['0,0|1,0'], completedAt: Date.now() });
+
+    const listed = await listCompleted();
+    expect(listed).toHaveLength(1);
+    expect(listed[0].shapeMode).toBe(RECT);
+  });
 });
