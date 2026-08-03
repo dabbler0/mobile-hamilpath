@@ -59,6 +59,59 @@ describe('faceAt (torus board)', () => {
   });
 });
 
+describe('faceAt (klein/projective board — mirrored tiles, regression: was off by one)', () => {
+  // faceAt must be the exact inverse of faceToScreenTiled: tapping anywhere
+  // inside the rendered square for a face must resolve back to that same
+  // face, in every mirrored tile, not just the primary one. This is a
+  // regression test for a real bug: faceAt used to un-mirror a face index
+  // the same way cellAt un-mirrors a vertex (a plain `W - 1 - local` point
+  // reflection), but a face spans a unit width rather than being a single
+  // point, so tapping inside a mirrored tile resolved to the face one over
+  // from the one actually tapped.
+  for (const [name, topology] of [
+    ['klein', KLEIN_BOTTLE],
+    ['projective', PROJECTIVE_PLANE],
+  ] as const) {
+    it(`round-trips every face in a mirrored tile back to itself (${name})`, () => {
+      const W = 6;
+      const H = 8;
+      // Covers unflipped, single-flip, and double-flip tiles, in both
+      // panning directions (negative tile indices too — a player can pan
+      // either way from the start).
+      for (let tileX = -2; tileX <= 2; tileX++) {
+        for (let tileY = -2; tileY <= 2; tileY++) {
+          for (let fx = 0; fx < W; fx++) {
+            for (let fy = 0; fy < H; fy++) {
+              const o = topology.tileOrientation(tileX, tileY);
+              const lx = o.flipX ? W - 1 - (fx + 0.5) : fx + 0.5;
+              const ly = o.flipY ? H - 1 - (fy + 0.5) : fy + 0.5;
+              const px = layout.pad + (tileX * W + lx) * layout.cellSize;
+              const py = layout.pad + (tileY * H + ly) * layout.cellSize;
+              expect(faceAt(px, py, layout, W, H, topology)).toEqual([fx, fy]);
+            }
+          }
+        }
+      }
+    });
+  }
+
+  it('a tap that used to land on the wrong face now resolves to the tapped face (klein, concrete case)', () => {
+    // Tile (0,1) on a Klein bottle board is x-flipped. Tapping the center of
+    // canonical face (2,3)'s *rendered* square (as toScreenTiled/render.ts
+    // draws it) must resolve back to (2,3), not (1,3) — the old bug's
+    // off-by-one landed one column to the left of the intended face.
+    const W = 6;
+    const H = 8;
+    const face: [number, number] = [2, 3];
+    const o = KLEIN_BOTTLE.tileOrientation(0, 1);
+    const lx = o.flipX ? W - 1 - (face[0] + 0.5) : face[0] + 0.5;
+    const ly = o.flipY ? H - 1 - (face[1] + 0.5) : face[1] + 0.5;
+    const px = layout.pad + lx * layout.cellSize;
+    const py = layout.pad + (H + ly) * layout.cellSize;
+    expect(faceAt(px, py, layout, W, H, KLEIN_BOTTLE)).toEqual(face);
+  });
+});
+
 describe('toScreenTiled / faceToScreenTiled', () => {
   it('matches toScreen/faceToScreen at tile index (0,0) with identity orientation', () => {
     expect(toScreenTiled([2, 3], layout, 0, 0, 6, 8, IDENTITY_ORIENTATION)).toEqual(toScreen([2, 3], layout));

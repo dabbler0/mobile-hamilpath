@@ -56,17 +56,51 @@ export function faceToScreen(face: Face, layout: Layout): [number, number] {
  * on a wraparound board every face in the full W x H grid exists (see
  * `regions.ts`) and the board tiles infinitely, so this resolves the same
  * way `cellAt` does — which (possibly-mirrored) tile, then un-mirror.
+ *
+ * Two things make this trickier than `cellAt`, both regression-tested
+ * below (a real, reported bug: tapping inside a face in a mirrored tile —
+ * or the region-highlight that tracks the pointer — resolved to the wrong
+ * face, off by one, in Klein bottle/projective tiles of certain parities):
+ *
+ *  - The un-mirroring is *not* a plain `W - 1 - localFx` point reflection
+ *    the way `cellAt`'s is: a vertex is a point, so reflecting it about the
+ *    tile's mirror line is exactly that. A face is a unit-width *span*
+ *    (`[fx, fx+1)`), so its correctly-mirrored image is the interval
+ *    `[W-2-fx, W-1-fx)` — one less than the point reflection — which is
+ *    why `faceToScreenTiled` below renders a mirrored face's center at
+ *    `W-1-(face+0.5)`, not `W-1-face`.
+ *  - That interval shift means a *flipped* tile's faces occupy local slots
+ *    `[-1, W-2]` rather than `[0, W)` — so the naive `tileX = floor(rawFx /
+ *    W)` can name the wrong tile for a pixel right at that boundary (its
+ *    true tile is one more along that axis). Whether a tile is flipped
+ *    depends on the *other* axis's tile index (`tileOrientation`'s flipX
+ *    depends on tileY and vice versa for projective), so getting tileX
+ *    wrong can flip which flipY applies too — there's no way to resolve
+ *    the two axes independently. Instead, try the (at most 4) tile
+ *    candidates the shift could possibly point to and keep whichever one's
+ *    own orientation makes its local coordinates land in its actual
+ *    occupied range.
  */
 export function faceAt(px: number, py: number, layout: Layout, W: number, H: number, topology?: Topology): Face {
   const rawFx = Math.floor((px - layout.pad) / layout.cellSize);
   const rawFy = Math.floor((py - layout.pad) / layout.cellSize);
   if (!topology) return [Math.max(0, Math.min(W - 2, rawFx)), Math.max(0, Math.min(H - 2, rawFy))];
-  const tileX = Math.floor(rawFx / W);
-  const tileY = Math.floor(rawFy / H);
-  const localFx = rawFx - tileX * W;
-  const localFy = rawFy - tileY * H;
-  const o = topology.tileOrientation(tileX, tileY);
-  return [o.flipX ? W - 1 - localFx : localFx, o.flipY ? H - 1 - localFy : localFy];
+  const tileX0 = Math.floor(rawFx / W);
+  const tileY0 = Math.floor(rawFy / H);
+  for (const tileX of [tileX0, tileX0 + 1]) {
+    for (const tileY of [tileY0, tileY0 + 1]) {
+      const localX = rawFx - tileX * W;
+      const localY = rawFy - tileY * H;
+      const o = topology.tileOrientation(tileX, tileY);
+      const validX = o.flipX ? localX >= -1 && localX <= W - 2 : localX >= 0 && localX < W;
+      const validY = o.flipY ? localY >= -1 && localY <= H - 2 : localY >= 0 && localY < H;
+      if (!validX || !validY) continue;
+      return [o.flipX ? W - 2 - localX : localX, o.flipY ? H - 2 - localY : localY];
+    }
+  }
+  // Unreachable: the four (tileX0 | tileX0+1) x (tileY0 | tileY0+1)
+  // candidates always contain exactly one valid decomposition.
+  return [tileX0 >= 0 ? 0 : W - 1, tileY0 >= 0 ? 0 : H - 1];
 }
 
 /** The full (untransformed) pixel size of a single board tile's grid — the whole canvas for an ordinary board, or one repeated tile's span for a wraparound board (see `render.ts`). */
