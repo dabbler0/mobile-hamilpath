@@ -1,10 +1,9 @@
 import { generateDailyPuzzle, SIZE_OPTIONS, sizeOption, todayKey, type PuzzleId } from './game/dailyPuzzle';
 import { boardPixelSize, type Layout } from './game/geometry';
-import type { Cell } from './game/hamiltonianCycle';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
 import { totalCells, type Puzzle } from './game/puzzle';
-import { computeRegions, type RegionMap } from './game/regions';
+import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
@@ -72,7 +71,7 @@ let view: Viewport = { scale: 1, tx: 0, ty: 0 };
 let pendingPersist: Promise<void> = Promise.resolve();
 /** Id of whichever region is currently focused (press-candidate under a pointer, or the keyboard cursor's region), for highlighting. Reset on any mode/puzzle change. */
 let focusedRegionId: number | null = null;
-let keyboardCursor: Cell | null = null;
+let keyboardCursor: Face | null = null;
 
 let replayFrames: PathState[] = [];
 let replayIndex = 0;
@@ -106,7 +105,7 @@ function setFocusedRegion(id: number | null): void {
   render();
 }
 
-function setKeyboardCursor(cursor: Cell | null): void {
+function setKeyboardCursor(cursor: Face | null): void {
   keyboardCursor = cursor;
   render();
 }
