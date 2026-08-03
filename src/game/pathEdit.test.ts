@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyPathOp, computeWin, createInitialPath, toggleRegion, type PathState } from './pathEdit';
 import { computeRegions, regionAt } from './regions';
-import { buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
+import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
 import { rectShape } from './shape';
 
@@ -131,6 +131,18 @@ describe('toggleRegion reachability (multi-region)', () => {
   it('some combination of region toggles reaches a win on a toroidal puzzle', () => {
     for (const seed of [1, 2, 3]) {
       assertSomeToggleCombinationWins(buildToroidalPuzzle(3, 4, 0, mulberry32(seed)));
+    }
+  });
+
+  it('some combination of region toggles reaches a win on a Klein bottle puzzle', () => {
+    for (const seed of [1, 2, 3]) {
+      assertSomeToggleCombinationWins(buildKleinBottlePuzzle(3, 4, 0, mulberry32(seed)));
+    }
+  });
+
+  it('some combination of region toggles reaches a win on a projective plane puzzle', () => {
+    for (const seed of [1, 2, 3]) {
+      assertSomeToggleCombinationWins(buildProjectivePlanePuzzle(3, 4, 0, mulberry32(seed)));
     }
   });
 });

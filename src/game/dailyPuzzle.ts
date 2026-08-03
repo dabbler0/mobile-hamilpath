@@ -1,4 +1,4 @@
-import { buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, type Puzzle } from './puzzle';
+import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
 import { rectShape } from './shape';
 
@@ -29,11 +29,13 @@ export function sizeOption(sizeKey: string): SizeOption {
 /**
  * The board's shape, orthogonal to its size: a plain m x n rectangle (the
  * original board), a random connected polyomino of the same area (see
- * `randomShape`), or a toroidal-wraparound board (see `buildToroidalPuzzle`).
- * Stable identifiers, like `SizeOption.key` — never rename once puzzles have
- * been played.
+ * `randomShape`), or one of three wraparound surfaces — toroidal (see
+ * `buildToroidalPuzzle`), Klein bottle, or projective plane (see
+ * `buildKleinBottlePuzzle`/`buildProjectivePlanePuzzle`). Stable
+ * identifiers, like `SizeOption.key` — never rename once puzzles have been
+ * played.
  */
-export type ShapeMode = 'rect' | 'random' | 'toroidal';
+export type ShapeMode = 'rect' | 'random' | 'toroidal' | 'klein' | 'projective';
 
 export interface ShapeModeOption {
   key: ShapeMode;
@@ -44,6 +46,8 @@ export const SHAPE_MODE_OPTIONS: readonly ShapeModeOption[] = [
   { key: 'rect', label: 'Rectangle' },
   { key: 'random', label: 'Random shape' },
   { key: 'toroidal', label: 'Toroidal' },
+  { key: 'klein', label: 'Klein bottle' },
+  { key: 'projective', label: 'Projective plane' },
 ];
 
 export function shapeModeOption(shapeModeKey: string): ShapeModeOption {
@@ -100,5 +104,9 @@ export function generateDailyPuzzle(id: PuzzleId): Puzzle {
       return buildRandomShapePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
     case 'toroidal':
       return buildToroidalPuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+    case 'klein':
+      return buildKleinBottlePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+    case 'projective':
+      return buildProjectivePlanePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
   }
 }

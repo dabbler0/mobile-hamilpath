@@ -70,7 +70,7 @@ describe('puzzleSeed / puzzleIdKey', () => {
 });
 
 describe('generateDailyPuzzle', () => {
-  const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+  const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
 
   it.each(shapeModes)('is fully deterministic for shape mode %s: the same (day, size, shape, index) always yields the same puzzle', (shapeMode) => {
     const id: PuzzleId = { day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 4 };
@@ -95,7 +95,20 @@ describe('generateDailyPuzzle', () => {
     const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'toroidal', index: 0 };
     const puzzle = generateDailyPuzzle(id);
     const { m, n } = sizeOption('mini');
-    expect(puzzle.toroidal).toBe(true);
+    expect(puzzle.topology).toBe('torus');
+    expect(puzzle.W).toBe(2 * m);
+    expect(puzzle.H).toBe(2 * n);
+    expect(totalCells(puzzle)).toBe(puzzle.W * puzzle.H);
+  });
+
+  it.each([
+    ['klein', 'klein'],
+    ['projective', 'projective'],
+  ] as const)('produces a %s puzzle that fills the whole rectangle', (shapeMode, expectedTopology) => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode, index: 0 };
+    const puzzle = generateDailyPuzzle(id);
+    const { m, n } = sizeOption('mini');
+    expect(puzzle.topology).toBe(expectedTopology);
     expect(puzzle.W).toBe(2 * m);
     expect(puzzle.H).toBe(2 * n);
     expect(totalCells(puzzle)).toBe(puzzle.W * puzzle.H);
