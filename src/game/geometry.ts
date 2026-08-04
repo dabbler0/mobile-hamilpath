@@ -56,6 +56,17 @@ export function faceToScreen(face: Face, layout: Layout): [number, number] {
  * on a wraparound board every face in the full W x H grid exists (see
  * `regions.ts`) and the board tiles infinitely, so this resolves the same
  * way `cellAt` does — which (possibly-mirrored) tile, then un-mirror.
+ *
+ * Unlike `cellAt`, un-mirroring a *face* index isn't a plain point
+ * reflection: a face identifies a unit-width span (fx to fx+1), not a
+ * point, so once mirrored by an orientation-reversing seam its correct
+ * image is an *interval* reflection (`W - 2 - local`), one less than the
+ * point reflection (`W - 1 - local`) a vertex uses — see `regions.ts`'s
+ * `faceNeighbor` doc comment, which derives this from inverting
+ * `faceToScreenTiled`'s own forward formula. Using the vertex-style point
+ * reflection here was a real bug: every tap on a mirrored tile (i.e. every
+ * tile except the primary one) resolved to a face shifted over by one,
+ * so the highlighted/toggled region didn't match what was tapped.
  */
 export function faceAt(px: number, py: number, layout: Layout, W: number, H: number, topology?: Topology): Face {
   const rawFx = Math.floor((px - layout.pad) / layout.cellSize);
@@ -66,7 +77,7 @@ export function faceAt(px: number, py: number, layout: Layout, W: number, H: num
   const localFx = rawFx - tileX * W;
   const localFy = rawFy - tileY * H;
   const o = topology.tileOrientation(tileX, tileY);
-  return [o.flipX ? W - 1 - localFx : localFx, o.flipY ? H - 1 - localFy : localFy];
+  return [o.flipX ? wrapIndex(W - 2 - localFx, W) : localFx, o.flipY ? wrapIndex(H - 2 - localFy, H) : localFy];
 }
 
 /** The full (untransformed) pixel size of a single board tile's grid — the whole canvas for an ordinary board, or one repeated tile's span for a wraparound board (see `render.ts`). */

@@ -258,8 +258,14 @@ function drawWrapped(
     forEachTile((tileX, tileY) => {
       const orientation = topology.tileOrientation(tileX, tileY);
       for (const face of focusedRegion.faces) {
-        const [sx, sy] = toScreenTiled(face, layout, tileX, tileY, W, H, orientation);
-        ctx.fillRect(sx, sy, layout.cellSize, layout.cellSize);
+        // A face isn't a vertex — `toScreenTiled` would silently mirror it
+        // by the wrong (point, not interval) reflection in a flipped tile,
+        // landing the fill a full cell off from the face it's meant to
+        // mark (see `faceAt`'s doc comment). `faceToScreenTiled` gives the
+        // face's *center*, so offset back by half a cell for `fillRect`'s
+        // top-left corner.
+        const [cx, cy] = faceToScreenTiled(face, layout, tileX, tileY, W, H, orientation);
+        ctx.fillRect(cx - layout.cellSize / 2, cy - layout.cellSize / 2, layout.cellSize, layout.cellSize);
       }
     });
   }

@@ -59,6 +59,24 @@ describe('faceAt (torus board)', () => {
   });
 });
 
+describe('faceAt (klein/projective board — mirrored tiles round-trip)', () => {
+  it('recovers every face index after rendering it into a Klein-mirrored tile', () => {
+    const orientation = KLEIN_BOTTLE.tileOrientation(0, 1); // flipX true, flipY false
+    for (let fx = 0; fx < 6; fx++) {
+      const [sx, sy] = faceToScreenTiled([fx, 3], layout, 0, 1, 6, 8, orientation);
+      expect(faceAt(sx, sy, layout, 6, 8, KLEIN_BOTTLE)).toEqual([fx, 3]);
+    }
+  });
+
+  it('recovers every face index after rendering it into a projective-plane-mirrored tile', () => {
+    const orientation = PROJECTIVE_PLANE.tileOrientation(1, 0); // flipX false, flipY true
+    for (let fy = 0; fy < 8; fy++) {
+      const [sx, sy] = faceToScreenTiled([2, fy], layout, 1, 0, 6, 8, orientation);
+      expect(faceAt(sx, sy, layout, 6, 8, PROJECTIVE_PLANE)).toEqual([2, fy]);
+    }
+  });
+});
+
 describe('toScreenTiled / faceToScreenTiled', () => {
   it('matches toScreen/faceToScreen at tile index (0,0) with identity orientation', () => {
     expect(toScreenTiled([2, 3], layout, 0, 0, 6, 8, IDENTITY_ORIENTATION)).toEqual(toScreen([2, 3], layout));
