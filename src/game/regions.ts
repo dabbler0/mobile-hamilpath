@@ -74,8 +74,8 @@ export interface RegionMap {
  *    that's a plain wrap (same row/column on the other side); for a Klein
  *    bottle/projective plane one or both directions also flip the other
  *    coordinate, so "the neighbor to the right" isn't simply "column 0,
- *    same row" — see `rightOf`/`belowOf`/`leftOf`/`aboveOf` below, which are
- *    the only places that need to know this.
+ *    same row" — see `faceWalls` below, the only place that needs to know
+ *    this.
  */
 export function computeRegions(puzzle: Puzzle): RegionMap {
   const { W, H, adj } = puzzle;
@@ -96,6 +96,10 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     return adj.has(key(fx, fy)) && adj.has(key(fx + 1, fy)) && adj.has(key(fx, fy + 1)) && adj.has(key(fx + 1, fy + 1));
   }
 
+  function wrapIndex(v: number, size: number): number {
+    return ((v % size) + size) % size;
+  }
+
   /**
    * Resolves a vertex that may be out of [0,W) x [0,H) via `topology`'s wrap
    * rule; a no-op for an in-range vertex or an unwrapped board.
@@ -103,18 +107,16 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
    * Deliberately does *not* delegate to `topology.wrapX`/`wrapY` directly:
    * those assume only one axis is ever out of range at a time (true for a
    * single unit step, which is all `wrappedNeighbor` ever needs). But
-   * `rightOf`/`belowOf`/`leftOf`/`aboveOf` below each need a face's diagonal
-   * corner vertex (e.g. `vertexAt(fx+1, fy+1)`), and at the one face where
-   * both fx and fy are already at the board's far edge, that corner is out
-   * of range on *both* axes simultaneously. Calling `wrapX` alone there
-   * silently leaves the other coordinate unwrapped (e.g. `(0, H)` instead of
-   * the correct `(0, 0)`), which breaks wall detection and can even name the
-   * wrong neighbor face entirely (this was a real bug: it let a board's
-   * corner face silently fuse with a distant, unrelated face). Using the
-   * same tile-index + `tileOrientation` math `geometry.ts`'s `cellAt` uses
-   * — already proven correct for arbitrary (including negative) tile
-   * offsets in `topology.test.ts` — handles any offset uniformly, including
-   * both axes wrapping at once.
+   * `faceWalls` below needs a face's diagonal corner vertex (e.g.
+   * `vertexAt(fx+1, fy+1)`), and at the one face where both fx and fy are
+   * already at the board's far edge, that corner is out of range on *both*
+   * axes simultaneously. Calling `wrapX` alone there silently leaves the
+   * other coordinate unwrapped (e.g. `(0, H)` instead of the correct
+   * `(0, 0)`), which breaks wall detection and can even name the wrong
+   * neighbor face entirely. Using the same tile-index + `tileOrientation`
+   * math `geometry.ts`'s `cellAt` uses — already proven correct for
+   * arbitrary (including negative) tile offsets in `topology.test.ts` —
+   * handles any offset uniformly, including both axes wrapping at once.
    */
   function vertexAt(x: number, y: number): Cell {
     if (!wrapped) return [x, y];
@@ -126,16 +128,6 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     return [o.flipX ? W - 1 - localX : localX, o.flipY ? H - 1 - localY : localY];
   }
 
-  interface Neighbor {
-    face: Face;
-    v1: Cell;
-    v2: Cell;
-  }
-
-  function wrapIndex(v: number, size: number): number {
-    return ((v % size) + size) % size;
-  }
-
   /**
    * The face one step (dx, dy) away from (fx, fy) — exactly one of dx/dy is
    * ±1, the other 0 — wrapping via `topology` if that step falls outside
@@ -145,15 +137,11 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
    * `vertexAt` wraps a vertex: a face's index identifies a unit-width span
    * (fx to fx+1), not a point, so once mirrored by an orientation-reversing
    * seam, its correct image is an *interval* reflection (`W - 2 - local`),
-   * one less than the point reflection (`W - 1 - local`) a vertex uses. Confirmed
-   * by inverting `render.ts`/`geometry.ts`'s own `faceToScreenTiled` formula
-   * (a face's rendered pixel center is at `local + 0.5`, mirrored to
-   * `W - 1 - (local + 0.5)` — solving that back to an index lands on
-   * `W - 2 - local`, not `W - 1 - local`). Using the vertex-style point
-   * reflection here was the second half of a real bug: it made a board's
-   * corner face's computed neighbor land on the wrong face (as far as the
-   * diagonally-opposite corner, in one case), silently welding unrelated
-   * regions together.
+   * one less than the point reflection (`W - 1 - local`) a vertex uses.
+   * Confirmed by inverting `render.ts`/`geometry.ts`'s own
+   * `faceToScreenTiled` formula (a face's rendered pixel center is at
+   * `local + 0.5`, mirrored to `W - 1 - (local + 0.5)` — solving that back
+   * to an index lands on `W - 2 - local`, not `W - 1 - local`).
    */
   function faceNeighbor(fx: number, fy: number, dx: number, dy: number): Face {
     if (!wrapped) return [fx + dx, fy + dy];
@@ -169,28 +157,71 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     return [gx, gy];
   }
 
-  /** The face to the right of (fx,fy) and the two vertices of their shared (vertical) edge — or null if there's no such face (the true, unwrapped board edge). */
-  function rightOf(fx: number, fy: number): Neighbor | null {
-    if (!wrapped && fx + 1 >= FW) return null;
-    return { face: faceNeighbor(fx, fy, 1, 0), v1: vertexAt(fx + 1, fy), v2: vertexAt(fx + 1, fy + 1) };
+  interface Wall {
+    v1: Cell;
+    v2: Cell;
+    /** The face sharing this wall, or null if there's none (the true, unwrapped board edge). */
+    neighbor: Face | null;
   }
 
-  /** The face below (fx,fy) and the two vertices of their shared (horizontal) edge — or null if there's no such face. */
-  function belowOf(fx: number, fy: number): Neighbor | null {
-    if (!wrapped && fy + 1 >= FH) return null;
-    return { face: faceNeighbor(fx, fy, 0, 1), v1: vertexAt(fx, fy + 1), v2: vertexAt(fx + 1, fy + 1) };
-  }
+  /**
+   * All 4 walls of face (fx,fy) — right, below, left, above, in that order
+   * — each computed purely from *this* face's own 4 corners
+   * (`vertexAt(fx,fy)`, `vertexAt(fx+1,fy)`, `vertexAt(fx,fy+1)`,
+   * `vertexAt(fx+1,fy+1)`), never by re-deriving a neighbor's own corners
+   * with an offset coordinate (e.g. computing the left wall via
+   * `vertexAt(fx-1, ...)`, as if it were "the right wall of the face at
+   * fx-1"). That distinction matters — and is the reason this function
+   * exists at all — because those two routes can disagree near a Klein
+   * bottle/projective plane board's degenerate corners: `vertexAt` wraps
+   * each corner of a face independently by floor-dividing its *own* raw
+   * coordinate into a tile, and two faces that `faceNeighbor` calls mutual
+   * neighbors don't necessarily each land their own two shared-wall corners
+   * in that computation the same way the other does. Concretely (found via
+   * this exact case, see `regions.test.ts`): on a projective plane board,
+   * face (0, H-1)'s own left wall is the vertex pair
+   * (`vertexAt(0,H-1)`, `vertexAt(0,H)`) — a well-defined, real candidate
+   * edge — but `faceNeighbor`'s independently-computed reflection for "the
+   * right wall of face (0,H-1)'s left neighbor" lands on a *different*
+   * vertex pair entirely, because that neighbor is the one face on the
+   * board whose own far corner is degenerate (its own two independently-
+   * wrapped corners collapse onto its near corner — confirmed three
+   * independent ways: the tile-index math itself, and composing the
+   * board's two axis wraps in either order, all agree on the same landing
+   * vertex). A caller that only ever asked each face for its own right and
+   * below walls (as this function's two predecessors, `rightOf`/`belowOf`,
+   * did) would silently never test this specific left-wall vertex pair at
+   * all — from *either* side — since the degenerate neighbor's own
+   * corresponding wall names a different pair. That produced two distinct,
+   * observed failure modes: a wall that should have been a permanent, ever-
+   * present separator (no candidate edge exists there) never got a chance
+   * to union the two faces it separates, and — when a real candidate edge
+   * *does* exist there — neither face's region ever learned about it,
+   * leaving a region's boundary short by exactly that edge (a marked loop
+   * that didn't close). Iterating all 4 of a face's own walls, from every
+   * face, guarantees every real edge gets discovered as *someone's* own
+   * wall (redundantly from both sides away from the degenerate corners,
+   * which is harmless — union and the `Set`-based boundary below are both
+   * naturally idempotent).
+   */
+  function faceWalls(fx: number, fy: number): Wall[] {
+    const tl = vertexAt(fx, fy);
+    const tr = vertexAt(fx + 1, fy);
+    const bl = vertexAt(fx, fy + 1);
+    const br = vertexAt(fx + 1, fy + 1);
 
-  /** The face to the left of (fx,fy) and the two vertices of their shared (vertical) edge — or null if there's no such face. */
-  function leftOf(fx: number, fy: number): Neighbor | null {
-    if (!wrapped && fx - 1 < 0) return null;
-    return { face: faceNeighbor(fx, fy, -1, 0), v1: vertexAt(fx - 1, fy), v2: vertexAt(fx - 1, fy + 1) };
-  }
+    const wall = (v1: Cell, v2: Cell, atBoardEdge: boolean, dx: number, dy: number): Wall => {
+      if (!wrapped && atBoardEdge) return { v1, v2, neighbor: null };
+      const n = faceNeighbor(fx, fy, dx, dy);
+      return { v1, v2, neighbor: faceExists(n[0], n[1]) ? n : null };
+    };
 
-  /** The face above (fx,fy) and the two vertices of their shared (horizontal) edge — or null if there's no such face. */
-  function aboveOf(fx: number, fy: number): Neighbor | null {
-    if (!wrapped && fy - 1 < 0) return null;
-    return { face: faceNeighbor(fx, fy, 0, -1), v1: vertexAt(fx, fy - 1), v2: vertexAt(fx + 1, fy - 1) };
+    return [
+      wall(tr, br, fx + 1 >= FW, 1, 0), // right
+      wall(bl, br, fy + 1 >= FH, 0, 1), // below
+      wall(tl, bl, fx - 1 < 0, -1, 0), // left
+      wall(tl, tr, fy - 1 < 0, 0, -1), // above
+    ];
   }
 
   const parent = new Int32Array(nFaces);
@@ -211,15 +242,11 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
   for (let fx = 0; fx < FW; fx++) {
     for (let fy = 0; fy < FH; fy++) {
       if (!faceExists(fx, fy)) continue;
-
-      const right = rightOf(fx, fy);
-      if (right && faceExists(right.face[0], right.face[1]) && !hasEdge(right.v1[0], right.v1[1], right.v2[0], right.v2[1])) {
-        union(faceId(fx, fy), faceId(right.face[0], right.face[1]));
-      }
-
-      const below = belowOf(fx, fy);
-      if (below && faceExists(below.face[0], below.face[1]) && !hasEdge(below.v1[0], below.v1[1], below.v2[0], below.v2[1])) {
-        union(faceId(fx, fy), faceId(below.face[0], below.face[1]));
+      for (const wall of faceWalls(fx, fy)) {
+        if (!wall.neighbor) continue;
+        if (!hasEdge(wall.v1[0], wall.v1[1], wall.v2[0], wall.v2[1])) {
+          union(faceId(fx, fy), faceId(wall.neighbor[0], wall.neighbor[1]));
+        }
       }
     }
   }
@@ -243,60 +270,41 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     }
   }
 
-  /**
-   * The face(s) (0, 1, or 2 of them) that a real puzzle-graph edge (ax,ay)-
-   * (bx,by) borders. Classifies the edge by testing which of the 4
-   * `Neighbor` queries it matches (an X-step, from either endpoint, borders
-   * the face above/below; a Y-step borders the face left/right — see the
-   * `rightOf`/`belowOf`/`leftOf`/`aboveOf` doc comments) rather than
-   * comparing raw coordinates directly, since a klein/projective wraparound
-   * edge's endpoints can differ in *both* coordinates at once (the flip),
-   * unlike a torus's simple same-row/same-column wrap.
-   */
-  function facesBordering(ax: number, ay: number, bx: number, by: number): Face[] {
-    const faces: Face[] = [];
-    const push = (f: Face | null) => {
-      if (f && faceExists(f[0], f[1])) faces.push(f);
-    };
+  // Built as a Set per region (not pushed straight into `regions[i].boundary`)
+  // because `faceWalls` reports every real wall redundantly from both faces
+  // it borders (see its doc comment) — a plain array would double up most
+  // edges, and `toggleRegion` flips every edge in `boundary` by presence, so
+  // a duplicate would toggle it there and back, a silent no-op that would
+  // leave that edge stuck exactly the opposite of every other edge the
+  // player just drew.
+  const boundarySets: Set<EdgeKey>[] = regions.map(() => new Set());
 
-    const aRight = vertexAt(ax + 1, ay);
-    if (aRight[0] === bx && aRight[1] === by) {
-      push([ax, ay]);
-      push(aboveOf(ax, ay)?.face ?? null);
-      return faces;
+  for (let fx = 0; fx < FW; fx++) {
+    for (let fy = 0; fy < FH; fy++) {
+      if (!faceExists(fx, fy)) continue;
+      const selfRegion = faceToRegion.get(key(fx, fy))!;
+      for (const wall of faceWalls(fx, fy)) {
+        if (!hasEdge(wall.v1[0], wall.v1[1], wall.v2[0], wall.v2[1])) continue; // no candidate edge here at all — not a boundary, not even a wall to toggle
+        const ek = edgeKey(wall.v1, wall.v2);
+        if (!wall.neighbor) {
+          boundarySets[selfRegion].add(ek);
+          continue;
+        }
+        const neighborRegion = faceToRegion.get(key(wall.neighbor[0], wall.neighbor[1]))!;
+        // Add to both sides' boundaries even when they're the same region
+        // (the two faces are connected some other way around too, without
+        // crossing this edge) — the region can still be shaped so this real
+        // edge is the only thing separating two of its own faces along one
+        // path between them (see `regions.test.ts`'s "lists a boundary edge
+        // once even when both its faces are already in the same region"),
+        // and toggling the region should still flip it.
+        boundarySets[selfRegion].add(ek);
+        boundarySets[neighborRegion].add(ek);
+      }
     }
-    const bRight = vertexAt(bx + 1, by);
-    if (bRight[0] === ax && bRight[1] === ay) {
-      push([bx, by]);
-      push(aboveOf(bx, by)?.face ?? null);
-      return faces;
-    }
-    const aDown = vertexAt(ax, ay + 1);
-    if (aDown[0] === bx && aDown[1] === by) {
-      push([ax, ay]);
-      push(leftOf(ax, ay)?.face ?? null);
-      return faces;
-    }
-    // The only remaining possibility for a valid single-step edge: B steps down to A.
-    push([bx, by]);
-    push(leftOf(bx, by)?.face ?? null);
-    return faces;
   }
 
-  const seenEdges = new Set<string>();
-  for (const [k, neighbors] of adj) {
-    const [x1, y1] = parseKey(k);
-    for (const nk of neighbors) {
-      const dedupeKey = k < nk ? `${k}|${nk}` : `${nk}|${k}`;
-      if (seenEdges.has(dedupeKey)) continue;
-      seenEdges.add(dedupeKey);
-      const [x2, y2] = parseKey(nk);
-      const ek = edgeKey([x1, y1], [x2, y2]);
-      const bordering = facesBordering(x1, y1, x2, y2);
-      const touchedRegionIds = new Set(bordering.map(([fx, fy]) => faceToRegion.get(key(fx, fy))!));
-      for (const rid of touchedRegionIds) regions[rid].boundary.push(ek);
-    }
-  }
+  for (let i = 0; i < regions.length; i++) regions[i].boundary = [...boundarySets[i]];
 
   return { faceToRegion, regions };
 }
