@@ -1,5 +1,5 @@
 import { computeEdgeComponents } from './game/edgeComponents';
-import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, type Layout } from './game/geometry';
+import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
 import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { parseKey, type Puzzle } from './game/puzzle';
 import { topologyFor, wrappedNeighbor, type Topology } from './game/topology';
@@ -277,8 +277,9 @@ function drawWrapped(
     const oFrom = topology.tileOrientation(tileX, tileY);
     for (const { from, to, tileDX, tileDY } of tiledEdges) {
       const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
-      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(tileX + tileDX, tileY + tileDY);
-      const [sx2, sy2] = toScreenTiled(to, layout, tileX + tileDX, tileY + tileDY, W, H, oTo);
+      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+      const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);
       ctx.lineTo(sx2, sy2);
@@ -304,8 +305,9 @@ function drawWrapped(
     const oFrom = topology.tileOrientation(tileX, tileY);
     for (const { from, to, tileDX, tileDY, color } of tiledMarkedEdges) {
       const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
-      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(tileX + tileDX, tileY + tileDY);
-      const [sx2, sy2] = toScreenTiled(to, layout, tileX + tileDX, tileY + tileDY, W, H, oTo);
+      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+      const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
       ctx.strokeStyle = color;
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);

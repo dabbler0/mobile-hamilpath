@@ -107,3 +107,27 @@ export function faceToScreenTiled(face: Face, layout: Layout, tileX: number, til
   const cy = orientation.flipY ? H - 1 - (face[1] + 0.5) : face[1] + 0.5;
   return [layout.pad + (tileX * W + cx) * layout.cellSize, layout.pad + (tileY * H + cy) * layout.cellSize];
 }
+
+/**
+ * The tile a wrap edge's far endpoint actually renders in, given the
+ * orientation of the tile its *near* endpoint (`from`) is drawn in and the
+ * `tileDX`/`tileDY` `render.ts`'s `classifyEdge` computed for that edge.
+ *
+ * `classifyEdge`'s `tileDX`/`tileDY` are computed once, independent of any
+ * particular tile, in terms of the puzzle's *canonical* (unmirrored) wrap
+ * direction — e.g. `tileDX` is `+1` for a rightward wrap because that's the
+ * direction the puzzle's own coordinates cross the seam in. But if the near
+ * endpoint is actually being drawn in a tile that's mirrored along that
+ * axis, canonical "rightward" renders going *left* on screen, so the far
+ * endpoint's tile is the mirror image of what `tileDX`/`tileDY` naively
+ * suggest — it's `tileX - tileDX`, not `tileX + tileDX`. Skipping this
+ * correction was a real bug: on any tile row/column whose orientation is
+ * flipped, a wrap edge's far endpoint landed many cells away instead of
+ * one, rendering as a long, obviously-wrong line (this is what produced
+ * spurious-looking candidate/marked edges on Klein bottle and projective
+ * plane boards away from the primary, unmirrored tile — see
+ * `geometry.test.ts`'s `wrapToTile` tests for the concrete numbers).
+ */
+export function wrapToTile(fromOrientation: Orientation, tileX: number, tileY: number, tileDX: number, tileDY: number): [number, number] {
+  return [tileX + (fromOrientation.flipX ? -tileDX : tileDX), tileY + (fromOrientation.flipY ? -tileDY : tileDY)];
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cellAt, faceAt, faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, type Layout } from './geometry';
+import { cellAt, faceAt, faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './geometry';
 import { IDENTITY_ORIENTATION, KLEIN_BOTTLE, PROJECTIVE_PLANE, TORUS } from './topology';
 
 const layout: Layout = { cellSize: 10, pad: 5 };
@@ -74,6 +74,68 @@ describe('faceAt (klein/projective board — mirrored tiles round-trip)', () => 
       const [sx, sy] = faceToScreenTiled([2, fy], layout, 1, 0, 6, 8, orientation);
       expect(faceAt(sx, sy, layout, 6, 8, PROJECTIVE_PLANE)).toEqual([2, fy]);
     }
+  });
+});
+
+describe('wrapToTile', () => {
+  it('is a no-op addition when the near tile is unflipped', () => {
+    expect(wrapToTile(IDENTITY_ORIENTATION, 2, -1, 1, 0)).toEqual([3, -1]);
+    expect(wrapToTile(IDENTITY_ORIENTATION, 2, -1, 0, 1)).toEqual([2, 0]);
+  });
+
+  it('negates tileDX when the near tile is flipped in x, and tileDY when flipped in y', () => {
+    expect(wrapToTile({ flipX: true, flipY: false }, 2, -1, 1, 0)).toEqual([1, -1]);
+    expect(wrapToTile({ flipX: false, flipY: true }, 2, -1, 0, 1)).toEqual([2, -2]);
+    expect(wrapToTile({ flipX: true, flipY: true }, 2, -1, 1, 1)).toEqual([1, -2]);
+  });
+
+  it('a rightward wrap edge rendered from a Klein-mirrored tile row still spans exactly one cell (regression: used to span 2W-1 cells)', () => {
+    // KLEIN_BOTTLE.tileOrientation(_, 1) flips x — every tileX in that row does.
+    const W = 6,
+      H = 8;
+    const oFrom = KLEIN_BOTTLE.tileOrientation(0, 1);
+    // classifyEdge would produce this for the (W-1,y)-(0,y) wrap: tileDX=1.
+    const from: [number, number] = [W - 1, 3];
+    const to: [number, number] = [0, 3];
+    const [sx1, sy1] = toScreenTiled(from, layout, 0, 1, W, H, oFrom);
+    const [toTileX, toTileY] = wrapToTile(oFrom, 0, 1, 1, 0);
+    const oTo = KLEIN_BOTTLE.tileOrientation(toTileX, toTileY);
+    const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+    expect(Math.abs(sx2 - sx1)).toBe(layout.cellSize);
+    expect(sy2).toBe(sy1);
+  });
+
+  it('a rightward wrap edge rendered from a projective-plane-mirrored tile row still spans exactly one cell (regression: used to span 2W-1 cells)', () => {
+    const W = 6,
+      H = 8;
+    // PROJECTIVE_PLANE.tileOrientation(_, 1) flips x, same as the Klein case above.
+    const oFrom = PROJECTIVE_PLANE.tileOrientation(0, 1);
+    // The actual (5,1)-(0,6) wrap edge from the reported bug's puzzle.
+    const from: [number, number] = [5, 1];
+    const to: [number, number] = [0, 6];
+    const [sx1, sy1] = toScreenTiled(from, layout, 0, 1, W, H, oFrom);
+    const [toTileX, toTileY] = wrapToTile(oFrom, 0, 1, 1, 0);
+    const oTo = PROJECTIVE_PLANE.tileOrientation(toTileX, toTileY);
+    const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+    const dx = Math.abs(sx2 - sx1);
+    const dy = Math.abs(sy2 - sy1);
+    expect((dx === layout.cellSize && dy === 0) || (dx === 0 && dy === layout.cellSize)).toBe(true);
+  });
+
+  it('a downward wrap edge rendered from a projective-plane-mirrored tile column still spans exactly one cell', () => {
+    const W = 6,
+      H = 8;
+    // PROJECTIVE_PLANE.tileOrientation(1, _) flips y.
+    const oFrom = PROJECTIVE_PLANE.tileOrientation(1, 0);
+    const from: [number, number] = [2, H - 1];
+    const to: [number, number] = [W - 1 - 2, 0];
+    const [sx1, sy1] = toScreenTiled(from, layout, 1, 0, W, H, oFrom);
+    const [toTileX, toTileY] = wrapToTile(oFrom, 1, 0, 0, 1);
+    const oTo = PROJECTIVE_PLANE.tileOrientation(toTileX, toTileY);
+    const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+    const dx = Math.abs(sx2 - sx1);
+    const dy = Math.abs(sy2 - sy1);
+    expect((dx === layout.cellSize && dy === 0) || (dx === 0 && dy === layout.cellSize)).toBe(true);
   });
 });
 
