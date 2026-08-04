@@ -307,6 +307,27 @@ describe('computeRegions at the diagonal-wrap corner (regression: face-adjacency
     expect(new Set(region.faces.map(([x, y]) => key(x, y)))).toEqual(new Set(['3,3', '0,3', '3,0', '2,3', '3,2']));
     expect(regions).toHaveLength(12);
   });
+
+  it("a non-corner face's own left wall can independently reach the degenerate corner face on a projective plane board", () => {
+    // On a 6x8 projective plane board, face (0,7)'s own left wall — the
+    // vertex pair `vertexAt(0,7)`-`vertexAt(0,8)` — reduces to (0,7)-(5,0),
+    // which is a real candidate edge in its own right (unrelated to the
+    // corner face (5,7)'s own degenerate self-pairing tested above). Its
+    // wrapped neighbor across that wall, `faceNeighbor(0,7,-1,0)`, is the
+    // corner face (5,7) — but `rightOf`/`belowOf`, checked from *every*
+    // face on the board, never happen to test this exact vertex pair from
+    // *either* side (the corner's own degenerate right/below walls reduce
+    // to a *different* pair, (0,0)-(5,7) — see the projective test above).
+    // A version of `computeRegions` that only ever asked each face for its
+    // own right and below walls would never discover this merge at all —
+    // omitting this one edge should fuse face (0,7) with the corner face
+    // regardless.
+    const puzzle = fullyWalledWrappedPuzzle(6, 8, 'projective', edgeKey([0, 7], [5, 0]));
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.get('0,7')).toBe(faceToRegion.get('5,7'));
+    const region = regions[faceToRegion.get('0,7')!];
+    expect(region.faces.map(([x, y]) => key(x, y))).toContain('5,7');
+  });
 });
 
 describe('computeRegions on real generated puzzles', () => {
