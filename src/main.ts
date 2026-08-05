@@ -1,13 +1,16 @@
 import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
+import { computeEdgeComponents } from './game/edgeComponents';
+import { computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
-import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
-import { EDGE_COLLECTION_LIMITS, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams, type Puzzle } from './game/puzzle';
+import { orderLoopCells } from './game/loopOrder';
+import { createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
+import { NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
-import { draw } from './render';
+import { draw, GROW_MS, PULSE_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -41,9 +44,6 @@ const puzzleLabelEl = byId<HTMLDivElement>('puzzleLabel');
 const winBannerEl = byId<HTMLDivElement>('winBanner');
 const sizeSelect = byId<HTMLSelectElement>('sizeSelect');
 const shapeSelect = byId<HTMLSelectElement>('shapeSelect');
-const maxCollectionsInput = byId<HTMLInputElement>('maxCollectionsInput');
-const minCollectionSizeInput = byId<HTMLInputElement>('minCollectionSizeInput');
-const maxCollectionSizeInput = byId<HTMLInputElement>('maxCollectionSizeInput');
 const nextBtn = byId<HTMLButtonElement>('nextBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
@@ -61,33 +61,6 @@ const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
 const historyOverlayEl = byId<HTMLDivElement>('historyOverlay');
 const historyListEl = byId<HTMLDivElement>('historyList');
 const toastEl = byId<HTMLDivElement>('toast');
-
-function clampInt(value: string, min: number, max: number, fallback: number): number {
-  const n = Math.round(Number(value));
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
-
-/**
- * Reads and clamps the three edge-collection number inputs into a valid
- * `EdgeCollectionParams`, swapping min/max size if the player entered them
- * backwards rather than rejecting the input. `maxCollections: 0` (the
- * default) turns the feature off entirely — see `NO_EDGE_COLLECTIONS`.
- */
-function currentCollectionParams(): EdgeCollectionParams {
-  const maxCollections = clampInt(maxCollectionsInput.value, EDGE_COLLECTION_LIMITS.maxCollections.min, EDGE_COLLECTION_LIMITS.maxCollections.max, NO_EDGE_COLLECTIONS.maxCollections);
-  let minSize = clampInt(minCollectionSizeInput.value, EDGE_COLLECTION_LIMITS.size.min, EDGE_COLLECTION_LIMITS.size.max, NO_EDGE_COLLECTIONS.minSize);
-  let maxSize = clampInt(maxCollectionSizeInput.value, EDGE_COLLECTION_LIMITS.size.min, EDGE_COLLECTION_LIMITS.size.max, NO_EDGE_COLLECTIONS.maxSize);
-  if (minSize > maxSize) [minSize, maxSize] = [maxSize, minSize];
-  return { maxCollections, minSize, maxSize };
-}
-
-/** Writes a (possibly clamped/swapped) `EdgeCollectionParams` back into the three inputs, so an out-of-range or backwards entry visibly snaps to what was actually used. */
-function reflectCollectionParams(params: EdgeCollectionParams): void {
-  maxCollectionsInput.value = String(params.maxCollections);
-  minCollectionSizeInput.value = String(params.minSize);
-  maxCollectionSizeInput.value = String(params.maxSize);
-}
 
 type Mode = 'playing' | 'reviewing';
 let mode: Mode = 'playing';
@@ -127,6 +100,97 @@ let replayIndex = 0;
 let replayTimerId: number | null = null;
 let toastTimerId: number | null = null;
 
+/**
+ * ## Animations
+ *
+ * All "juice" is purely a rendering overlay on top of the already-committed
+ * game state — nothing here ever gates a real move, undo, or win check.
+ * `render()` is the single place that reads/prunes this state and feeds it
+ * to `render.ts`'s `draw()`; every entry is keyed by `performance.now()`
+ * timestamps rather than a frame counter, so pausing/resuming the tab (or a
+ * slow frame) can't desync an animation from where it should be.
+ *
+ * - `growingEdges`/`shrinkingEdges`/`pulsingEdges` are populated by
+ *   `scheduleToggleAnimation`, called only from `setPathState` — i.e. only a
+ *   live tap/keyboard toggle animates. Undo, redo, reset, Give Up, and
+ *   entering/leaving review all jump straight to a new state instead
+ *   (`clearEdgeAnimations`), which is simplest and keeps this file from
+ *   having to reconcile an in-flight animation with a state it no longer
+ *   describes.
+ * - `winLoopCells`/`winLoopEdgesRef`/`winLoopStartTime` track the traveling
+ *   win-loop dot; see `render()`'s doc comment for how they're kept in sync
+ *   with whatever's actually on screen.
+ * - `animFrameId` is the single `requestAnimationFrame` handle driving
+ *   continued redraws while anything above is active; `render()` reschedules
+ *   itself as long as `edgeAnimsActive() || winLoopCells !== null`, and lets
+ *   the loop lapse the moment neither is true.
+ */
+const growingEdges = new Map<EdgeKey, number>();
+const shrinkingEdges = new Map<EdgeKey, { start: number; color: string }>();
+const pulsingEdges = new Map<EdgeKey, { start: number; delay: number; fromColor: string }>();
+/** Stagger between adjacent hops of a recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`. */
+const PULSE_STAGGER_MS = 45;
+
+let winLoopCells: ReadonlyArray<readonly [number, number]> | null = null;
+/** Reference (not deep-equality) to whichever edge set `winLoopCells` was computed from, so a *different* already-won puzzle (e.g. opening another completed puzzle in review) recomputes instead of keeping a stale cycle — see `render()`. */
+let winLoopEdgesRef: ReadonlySet<EdgeKey> | null = null;
+let winLoopStartTime = 0;
+
+let animFrameId: number | null = null;
+
+function edgeAnimsActive(): boolean {
+  return growingEdges.size > 0 || shrinkingEdges.size > 0 || pulsingEdges.size > 0;
+}
+
+function pruneFinishedEdgeAnims(now: number): void {
+  for (const [ek, start] of growingEdges) if (now - start >= GROW_MS) growingEdges.delete(ek);
+  for (const [ek, a] of shrinkingEdges) if (now - a.start >= SHRINK_MS) shrinkingEdges.delete(ek);
+  for (const [ek, a] of pulsingEdges) if (now - a.start - a.delay >= PULSE_MS) pulsingEdges.delete(ek);
+}
+
+/** Called by every "jump straight to a new state" mutation (undo/redo/reset/Give Up/review navigation) so a leftover in-flight animation never gets reinterpreted against a state it no longer describes. */
+function clearEdgeAnimations(): void {
+  growingEdges.clear();
+  shrinkingEdges.clear();
+  pulsingEdges.clear();
+}
+
+/**
+ * Schedules the visual grow/shrink/recolor-ripple animation for one path
+ * edit. Called from `setPathState` with the edge sets on either side of the
+ * toggle plus exactly which edges it touched (`ops`, see `PathOp`) — an
+ * edge newly present starts a grow, one newly absent freezes its current
+ * color and starts a shrink (see `render.ts`'s `ShrinkingEdges`), and
+ * `computeRecoloredEdges` finds any *other* still-marked edge that visibly
+ * recolored as a side effect (a merge/split), scheduling a delayed pulse
+ * staggered by its graph distance from the toggle so the recolor visibly
+ * ripples outward rather than flipping everywhere at once.
+ */
+function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, ops: PathOp[]): void {
+  const toggled = new Set<EdgeKey>();
+  for (const op of ops) for (const ek of op.edges) toggled.add(ek);
+  if (toggled.size === 0) return;
+
+  const now = performance.now();
+  const prevComponents = computeEdgeComponents(prevEdges);
+
+  for (const ek of toggled) {
+    growingEdges.delete(ek);
+    shrinkingEdges.delete(ek);
+    pulsingEdges.delete(ek);
+    if (nextEdges.has(ek) && !prevEdges.has(ek)) {
+      growingEdges.set(ek, now);
+    } else if (prevEdges.has(ek) && !nextEdges.has(ek)) {
+      shrinkingEdges.set(ek, { start: now, color: segmentColor(prevComponents.get(ek)!) });
+    }
+  }
+
+  for (const { edge, distance } of computeRecoloredEdges(prevEdges, nextEdges, toggled)) {
+    if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
+    pulsingEdges.set(edge, { start: now, delay: distance * PULSE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
+  }
+}
+
 function activePuzzle(): Puzzle {
   return mode === 'reviewing' && reviewPuzzle ? reviewPuzzle : puzzle;
 }
@@ -135,22 +199,71 @@ function activeRegionMap(): RegionMap {
   return mode === 'reviewing' && reviewRegionMap ? reviewRegionMap : regionMap;
 }
 
+/**
+ * Draws the current frame and, if any edge/win-loop animation is still in
+ * flight, reschedules itself via `requestAnimationFrame` to keep going —
+ * every other call site just calls `render()` once, same as before
+ * animations existed; this function is the only place that decides whether
+ * a *follow-up* frame is needed. `animFrameId` guards against ever having
+ * more than one such chain running at once (harmless either way, since
+ * every frame just redraws the same live state, but wasteful).
+ *
+ * Also owns the win-loop dot's cycle cache: `completed` is `reviewWon`
+ * while reviewing (deliberately excluding `gaveUp` — a given-up puzzle was
+ * *not* actually won, see its doc comment) or `pathState.won` while
+ * playing. The cycle is only recomputed when `completed` newly holds *or*
+ * the edge set it was computed from has changed by reference — covering a
+ * fresh win, opening a different already-completed puzzle in review, and
+ * replay reaching (or leaving) its final frame, all without recomputing on
+ * every single one of the animation's own re-renders.
+ */
 function render(): void {
-  const state =
-    mode === 'reviewing' && reviewPuzzle
-      ? { puzzle: reviewPuzzle, edges: reviewEdges, won: reviewWon, focusedRegion: null, keyboardCursor: null }
-      : {
-          puzzle,
-          edges: pathState.edges,
-          // Drawn with the same single "solved" color as an actual win once given
-          // up — `pathState.won` itself stays false (it wasn't a real win, see
-          // `gaveUp`'s doc comment), this only affects how the revealed solution
-          // looks on screen.
-          won: pathState.won || gaveUp,
-          focusedRegion: focusedRegionId !== null ? regionMap.regions[focusedRegionId] : null,
-          keyboardCursor,
-        };
-  draw(ctx, canvas.width, canvas.height, state, LAYOUT, view);
+  const now = performance.now();
+  pruneFinishedEdgeAnims(now);
+
+  const reviewing = mode === 'reviewing' && reviewPuzzle !== null;
+  const state = mode === 'reviewing' && reviewPuzzle
+    ? { puzzle: reviewPuzzle, edges: reviewEdges, won: reviewWon, focusedRegion: null, keyboardCursor: null }
+    : {
+        puzzle,
+        edges: pathState.edges,
+        // Drawn with the same single "solved" color as an actual win once given
+        // up — `pathState.won` itself stays false (it wasn't a real win, see
+        // `gaveUp`'s doc comment), this only affects how the revealed solution
+        // looks on screen.
+        won: pathState.won || gaveUp,
+        focusedRegion: focusedRegionId !== null ? regionMap.regions[focusedRegionId] : null,
+        keyboardCursor,
+      };
+
+  const completed = reviewing ? reviewWon : pathState.won;
+  if (completed) {
+    if (winLoopEdgesRef !== state.edges) {
+      winLoopCells = orderLoopCells(state.edges);
+      winLoopEdgesRef = state.edges;
+      winLoopStartTime = now;
+    }
+  } else if (winLoopEdgesRef !== null) {
+    winLoopCells = null;
+    winLoopEdgesRef = null;
+  }
+
+  const anim: AnimationState = {
+    now,
+    growing: growingEdges.size > 0 ? growingEdges : undefined,
+    shrinking: shrinkingEdges.size > 0 ? shrinkingEdges : undefined,
+    pulsing: pulsingEdges.size > 0 ? pulsingEdges : undefined,
+    winLoop: winLoopCells ? { cells: winLoopCells, startTime: winLoopStartTime } : undefined,
+  };
+
+  draw(ctx, canvas.width, canvas.height, { ...state, anim }, LAYOUT, view);
+
+  if (animFrameId === null && (edgeAnimsActive() || winLoopCells !== null)) {
+    animFrameId = requestAnimationFrame(() => {
+      animFrameId = null;
+      render();
+    });
+  }
 }
 
 function setFocusedRegion(id: number | null): void {
@@ -234,6 +347,7 @@ function persistLiveState(): void {
 function setPathState(next: PathState, ops: PathOp[]): void {
   const prev = pathState;
   const justWon = next.won && !prev.won;
+  scheduleToggleAnimation(prev.edges, next.edges, ops);
   pathState = next;
   history = recordMove(history, prev, ops);
   updateProgress();
@@ -249,6 +363,7 @@ function performUndo(): void {
   if (!undoRedoAllowed()) return;
   const result = undoHistory(history, pathState);
   if (!result) return;
+  clearEdgeAnimations();
   history = result.history;
   pathState = result.state;
   focusedRegionId = null;
@@ -264,6 +379,7 @@ function performRedo(): void {
   if (!undoRedoAllowed()) return;
   const result = redoHistory(history, pathState);
   if (!result) return;
+  clearEdgeAnimations();
   history = result.history;
   pathState = result.state;
   focusedRegionId = null;
@@ -295,6 +411,7 @@ function revealSolution(): void {
   const confirmed = window.confirm('Give up and reveal the intended solution? This puzzle will no longer count as solved.');
   if (!confirmed) return;
 
+  clearEdgeAnimations();
   pathState = { edges: generateDailySolutionEdges(currentPuzzleId), won: false };
   gaveUp = true;
   focusedRegionId = null;
@@ -365,6 +482,7 @@ function layout(): void {
 }
 
 function resetPath(): void {
+  clearEdgeAnimations();
   pathState = createInitialPath();
   // Reset starts a fresh attempt, so its move history starts fresh too — otherwise a
   // later win's replay would confusingly interleave an earlier abandoned attempt.
@@ -383,17 +501,20 @@ function resetPath(): void {
 
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
 const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
-const LAST_MAX_COLLECTIONS_KEY = 'loopit:collections:max';
-const LAST_MIN_COLLECTION_SIZE_KEY = 'loopit:collections:minSize';
-const LAST_MAX_COLLECTION_SIZE_KEY = 'loopit:collections:maxSize';
 
-/** Loads whichever puzzle is current for this size+shape+collections today: a resumed in-progress game, or the next unlocked one. */
-async function startPuzzle(sizeKey: string, shapeMode: ShapeMode, collections: EdgeCollectionParams): Promise<void> {
+/**
+ * Loads whichever puzzle is current for this size+shape today: a resumed
+ * in-progress game, or the next unlocked one. Edge collections are
+ * generated with `NO_EDGE_COLLECTIONS` (the UI for tuning them was removed —
+ * see CLAUDE.md's "Edge collections" section; the generation code itself is
+ * still there for `dailyPuzzle`/history to reproduce old completed puzzles
+ * that were played with collections enabled).
+ */
+async function startPuzzle(sizeKey: string, shapeMode: ShapeMode): Promise<void> {
+  clearEdgeAnimations();
   localStorage.setItem(LAST_SIZE_STORAGE_KEY, sizeKey);
   localStorage.setItem(LAST_SHAPE_STORAGE_KEY, shapeMode);
-  localStorage.setItem(LAST_MAX_COLLECTIONS_KEY, String(collections.maxCollections));
-  localStorage.setItem(LAST_MIN_COLLECTION_SIZE_KEY, String(collections.minSize));
-  localStorage.setItem(LAST_MAX_COLLECTION_SIZE_KEY, String(collections.maxSize));
+  const collections = NO_EDGE_COLLECTIONS;
   const day = todayKey();
   const unlockedIndex = await getUnlockedIndex(day, sizeKey, shapeMode, collections);
   const existing = await getInProgress(day, sizeKey, shapeMode, collections);
@@ -478,6 +599,7 @@ function closeHistory(): void {
 
 async function enterReview(item: CompletedRecord): Promise<void> {
   closeHistory();
+  clearEdgeAnimations();
   const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index, collections: item.collections };
   reviewPuzzle = generateDailyPuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
@@ -503,6 +625,7 @@ async function enterReview(item: CompletedRecord): Promise<void> {
 
 function exitReview(): void {
   closeReplay();
+  clearEdgeAnimations();
   mode = 'playing';
   reviewPuzzle = null;
   reviewRegionMap = null;
@@ -606,24 +729,16 @@ undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 giveUpBtn.addEventListener('click', revealSolution);
 sizeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
 });
 shapeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
 });
-function onCollectionsInputChange(): void {
-  const params = currentCollectionParams();
-  reflectCollectionParams(params); // snap any out-of-range/backwards entry back to what's actually used
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, params);
-}
-maxCollectionsInput.addEventListener('change', onCollectionsInputChange);
-minCollectionSizeInput.addEventListener('change', onCollectionsInputChange);
-maxCollectionSizeInput.addEventListener('change', onCollectionsInputChange);
 nextBtn.addEventListener('click', () => {
   if (!pathState.won) return;
   void (async () => {
     await pendingPersist;
-    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode, currentPuzzleId.collections ?? NO_EDGE_COLLECTIONS);
+    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode);
   })();
 });
 byId('historyBtn').addEventListener('click', () => {
@@ -694,11 +809,4 @@ const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
 if (lastShape && SELECTABLE_SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
   shapeSelect.value = lastShape;
 }
-const lastMaxCollections = localStorage.getItem(LAST_MAX_COLLECTIONS_KEY);
-if (lastMaxCollections !== null) maxCollectionsInput.value = lastMaxCollections;
-const lastMinCollectionSize = localStorage.getItem(LAST_MIN_COLLECTION_SIZE_KEY);
-if (lastMinCollectionSize !== null) minCollectionSizeInput.value = lastMinCollectionSize;
-const lastMaxCollectionSize = localStorage.getItem(LAST_MAX_COLLECTION_SIZE_KEY);
-if (lastMaxCollectionSize !== null) maxCollectionSizeInput.value = lastMaxCollectionSize;
-reflectCollectionParams(currentCollectionParams());
-void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
+void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);

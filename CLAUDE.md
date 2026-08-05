@@ -201,6 +201,71 @@ pointer-press candidate gets) for `render.ts` to draw as a dashed ring.
   primary tile (`geometry.ts`'s plain `faceToScreen`, not the `*Tiled`
   variants), matching how `render.ts` draws that same tile.
 
+## Animations
+
+Three purely-visual overlays on top of the otherwise-instant game state —
+none of them gate a real move, undo, or win check, and none of them are
+persisted (a reload always resumes/redraws in the fully-settled state).
+`main.ts` owns scheduling and timing; `render.ts` owns drawing a given
+instant of it (its `AnimationState`, threaded through `RenderState.anim`)
+for both the ordinary and wraparound (`drawWrapped`) render paths.
+
+- **Grow/shrink**: a region toggle's newly-marked edges "grow" from zero to
+  full length, and newly-unmarked edges "shrink" back to zero, over
+  `render.ts`'s `GROW_MS`/`SHRINK_MS` (220ms each, eased with `smoothstep`).
+  `main.ts`'s `scheduleToggleAnimation` (called only from `setPathState`,
+  the single funnel every pointer/keyboard toggle already goes through)
+  diffs the op's edges against the previous state to decide grow vs. shrink
+  per edge. A shrinking edge is no longer in `pathState.edges` at all, so
+  its color is frozen at the moment of removal (`segmentColor`, exported
+  from `render.ts` for this) rather than recomputed live, and `render.ts`
+  draws it as an extra edge alongside the live ones for as long as it's
+  still animating.
+- **Recolor ripple**: when a toggle causes a merge or split, some *other*
+  already-marked edge's component (and so its color) can change as a side
+  effect. `game/edgeRipple.ts`'s `computeRecoloredEdges` finds every such
+  edge that's actually graph-reachable from the toggle location in the
+  post-toggle marked-edge graph, together with its hop distance; `main.ts`
+  staggers each one's pulse start by `distance * PULSE_STAGGER_MS` so the
+  recolor visibly ripples outward rather than flipping everywhere at once.
+  Each pulse (`render.ts`'s `PULSE_MS`, 260ms) bulges the edge's line width
+  up and back down, swapping from its old color to its live one right at
+  the peak — "growing and then shrinking as it changes color". A merge/
+  split can also renumber an entirely *unrelated* component purely because
+  `edgeComponents.ts`'s component ids are assigned by iteration order, not
+  identity (see its doc comment) — `computeRecoloredEdges` deliberately
+  excludes anything not reachable from the toggle, so that case recolors
+  instantly on the next render with no ripple, matching the fact that there's
+  nowhere real for a ripple to travel from.
+- **Win-loop dot**: once a puzzle is actually complete (`pathState.won`
+  live, or `reviewWon` while reviewing — deliberately *not* `gaveUp`, which
+  is explicitly not a real win, see "Give Up" below), a small dot travels
+  around the solved loop forever. `game/loopOrder.ts`'s `orderLoopCells`
+  walks the marked-edge set (guaranteed to be one simple Hamiltonian cycle
+  by `computeWin`) into an ordered cell sequence once per completed state;
+  `render.ts` interpolates the dot's on-screen position each frame from
+  elapsed time (`winDotPeriodMs`, scaled by loop length and clamped so a
+  tiny board isn't dizzying and a huge one doesn't crawl).
+
+All three share one `requestAnimationFrame` chain, driven entirely by
+`main.ts`'s `render()`: every other call site still just calls `render()`
+once, exactly as before animations existed, and `render()` itself is the
+only place that decides whether a follow-up frame is needed
+(`edgeAnimsActive() || winLoopCells !== null`), rescheduling itself via
+`animFrameId` until neither is true. Every entry is keyed by
+`performance.now()` timestamps rather than a frame counter, so a slow frame
+or a backgrounded tab can't desync an animation from where it should be.
+
+Only a live tap/keyboard toggle (`setPathState`) starts a grow/shrink/pulse
+animation. Anything that jumps straight to a different state instead — undo,
+redo, Give Up, Reset, starting a new puzzle, entering/leaving review — calls
+`clearEdgeAnimations()` up front, so a leftover in-flight animation is never
+reinterpreted against a state it no longer describes. The win-loop dot's
+cycle cache doesn't need this: `render()` recomputes it (or clears it)
+automatically whenever "is this state completed" changes, or the completed
+edge set's *reference* changes (a fresh win, a different already-completed
+puzzle opened in review, a replay frame) — see `render()`'s own doc comment.
+
 ## Edge collections
 
 `puzzle.ts`'s `EdgeCollection { id, edges, required }`: an optional extra
@@ -226,10 +291,22 @@ edge strokes plus a small badge (at every one of its edges) showing
 `required`, turning error-red the moment the current marked count doesn't
 match.
 
-The three number inputs in the controls bar (`main.ts`'s
-`currentCollectionParams`/`reflectCollectionParams`) read/clamp/swap
-player-entered bounds into a valid `EdgeCollectionParams`, persisted to
-`localStorage` the same way size/shape are.
+**The player-facing controls for tuning collection params are currently
+removed.** In practice a puzzle's links turned out not to affect its
+difficulty much — optimal play mostly ignores them, since the grid's own
+"visit every cell" constraint is almost always enough to force the same
+loop a link would additionally require. Every puzzle is now generated with
+`NO_EDGE_COLLECTIONS` (`main.ts`'s `startPuzzle` hardcodes it, no UI reads
+it back), so `index.html`'s three number inputs, and `main.ts`'s
+`currentCollectionParams`/`reflectCollectionParams`/`onCollectionsInputChange`
+and their `localStorage` keys, are gone. The generation code above is
+deliberately untouched — `EdgeCollectionParams`/`generateEdgeCollections`/
+`pickCollectionEdges`/`countCollectionEdges` all still work exactly as
+described, `dailyPuzzle.ts`/`gameStore.ts` still handle a `PuzzleId` whose
+`collections` isn't `NO_EDGE_COLLECTIONS` (so an old completed puzzle that
+*was* played with links on still regenerates and reviews correctly), and
+the balance question may get revisited later — it's just not something a
+player can currently opt into from the UI.
 
 ## Give Up
 
@@ -437,10 +514,13 @@ calls `enterReview()` which regenerates that puzzle and switches `mode`.
 
 ## Testing notes
 
-242 vitest tests across 15 files, all in `*.test.ts` files next to their
+250 vitest tests across 17 files, all in `*.test.ts` files next to their
 modules. Pure game logic (`src/game/*`), viewport math, and persistence are
-unit tested. `render.ts`, `input.ts`, and `keyboard.ts` are not — they're
-thin DOM/canvas glue verified by hand instead. When changing pointer or
+unit tested — including the pure pieces of the animation system
+(`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS), even
+though the animations themselves are visual-only. `render.ts`, `input.ts`,
+and `keyboard.ts` are not — they're thin DOM/canvas glue verified by hand
+instead. When changing pointer or
 keyboard interaction, the fastest way to sanity-check is a throwaway
 Playwright script against `npm run dev` (pre-installed Chromium at
 `/opt/pw-browsers/chromium-1194/chrome-linux/chrome` in this environment)
