@@ -1,5 +1,5 @@
-import { generateDailyPuzzle, generateDailySolutionEdges, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
-import { boardPixelSize, type Layout } from './game/geometry';
+import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
+import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
 import { EDGE_COLLECTION_LIMITS, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams, type Puzzle } from './game/puzzle';
@@ -9,7 +9,7 @@ import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
 import { draw } from './render';
 import './style.css';
-import { computeFitView, computeZoomAt, type Viewport, type ViewportBounds } from './view/viewport';
+import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
 const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
@@ -17,6 +17,13 @@ const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
 const REPLAY_FRAME_MS = 50;
 /** How long a transient status message (e.g. "undo history unavailable") stays visible. */
 const TOAST_MS = 3200;
+/**
+ * How close (in on-screen pixels) the keyboard cursor is allowed to get to
+ * the edge of `wrapEl` before the view auto-scrolls to pull it back — see
+ * `setKeyboardCursor`. Expressed in screen pixels (not board cells), so it
+ * stays a sensible-looking gap regardless of zoom level.
+ */
+const KEYBOARD_CURSOR_SCROLL_MARGIN = 56;
 
 function byId<T extends HTMLElement>(id: string): T {
   const el = document.getElementById(id);
@@ -151,9 +158,25 @@ function setFocusedRegion(id: number | null): void {
   render();
 }
 
+/**
+ * Updates the keyboard cursor and, if it moved, auto-scrolls the view to
+ * keep it on screen — the same idea as a text editor scrolling to follow
+ * its caret. `render()` first so the moved cursor is actually drawn onto the
+ * canvas bitmap (needed even when no pan happens, and needed *before*
+ * `setView` for a wraparound board, whose `applyTransform` redraws from the
+ * current state at the new view); `setView` only runs when a pan is
+ * actually needed (`panToKeepVisible` returns the same `view` reference
+ * otherwise), so ordinary cursor movement within a screenful of board causes
+ * no extra work.
+ */
 function setKeyboardCursor(cursor: Face | null): void {
   keyboardCursor = cursor;
   render();
+  if (cursor) {
+    const [px, py] = faceToScreen(cursor, LAYOUT);
+    const next = panToKeepVisible(view, px, py, wrapEl.clientWidth, wrapEl.clientHeight, KEYBOARD_CURSOR_SCROLL_MARGIN);
+    if (next !== view) setView(next);
+  }
 }
 
 /** An ordinary board's pan/zoom is a cheap CSS transform on the whole canvas element. A wraparound board instead bakes pan/zoom into the canvas drawing itself (see `render.ts`'s `drawWrapped`), since the board tiles genuinely infinitely — there's no fixed-size bitmap a CSS transform could pan across — so it keeps the canvas untransformed and re-renders on every view change instead. */
@@ -668,7 +691,7 @@ if (lastSize && SIZE_OPTIONS.some((opt) => opt.key === lastSize)) {
   sizeSelect.value = lastSize;
 }
 const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
-if (lastShape && SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
+if (lastShape && SELECTABLE_SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
   shapeSelect.value = lastShape;
 }
 const lastMaxCollections = localStorage.getItem(LAST_MAX_COLLECTIONS_KEY);
