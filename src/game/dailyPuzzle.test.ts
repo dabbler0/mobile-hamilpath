@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   DAILY_PUZZLE_DENSITY,
   generateDailyPuzzle,
+  generateDailySolutionCells,
+  generateDailySolutionEdges,
   puzzleIdKey,
   puzzleSeed,
   SHAPE_MODE_OPTIONS,
@@ -12,7 +14,7 @@ import {
   type PuzzleId,
   type ShapeMode,
 } from './dailyPuzzle';
-import { NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
+import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
 
 describe('todayKey', () => {
   it('formats as local YYYY-MM-DD', () => {
@@ -169,5 +171,45 @@ describe('edge collections in the puzzle id', () => {
   it('generateDailyPuzzle gives no collections when the field is omitted', () => {
     const id: PuzzleId = { day: '2026-07-10', sizeKey: 'small', shapeMode: 'rect', index: 0 };
     expect(generateDailyPuzzle(id).edgeCollections).toEqual([]);
+  });
+});
+
+describe('generateDailySolutionCells / generateDailySolutionEdges', () => {
+  const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
+
+  it.each(shapeModes)('is deterministic for shape mode %s', (shapeMode) => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 3 };
+    expect(generateDailySolutionCells(id)).toEqual(generateDailySolutionCells(id));
+    expect(generateDailySolutionEdges(id)).toEqual(generateDailySolutionEdges(id));
+  });
+
+  it.each(shapeModes)('visits every cell of the matching puzzle exactly once, all as real edges of its adj graph (%s)', (shapeMode) => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode, index: 2 };
+    const puzzle = generateDailyPuzzle(id);
+    const cells = generateDailySolutionCells(id);
+    expect(cells.length).toBe(totalCells(puzzle));
+    expect(new Set(cells.map(([x, y]) => key(x, y))).size).toBe(cells.length);
+
+    const edges = generateDailySolutionEdges(id);
+    expect(edges.size).toBe(cells.length);
+    for (let i = 0; i < cells.length; i++) {
+      const [x1, y1] = cells[i];
+      const [x2, y2] = cells[(i + 1) % cells.length];
+      expect(puzzle.adj.get(key(x1, y1))?.has(key(x2, y2))).toBe(true);
+    }
+  });
+
+  it('agrees with the CLAUDE.md-documented shortcut for a plain rectangle: cell order is a valid win path', () => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'small', shapeMode: 'rect', index: 1 };
+    const puzzle = generateDailyPuzzle(id);
+    // every cell has exactly two solution-edge neighbors — the hallmark of a single cycle
+    const degree = new Map<string, number>();
+    for (const ek of generateDailySolutionEdges(id)) {
+      const [a, b] = ek.split('|');
+      degree.set(a, (degree.get(a) ?? 0) + 1);
+      degree.set(b, (degree.get(b) ?? 0) + 1);
+    }
+    expect(degree.size).toBe(totalCells(puzzle));
+    for (const d of degree.values()) expect(d).toBe(2);
   });
 });

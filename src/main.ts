@@ -1,4 +1,4 @@
-import { generateDailyPuzzle, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
+import { generateDailyPuzzle, generateDailySolutionEdges, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
 import { boardPixelSize, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
@@ -40,6 +40,7 @@ const maxCollectionSizeInput = byId<HTMLInputElement>('maxCollectionSizeInput');
 const nextBtn = byId<HTMLButtonElement>('nextBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
+const giveUpBtn = byId<HTMLButtonElement>('giveUpBtn');
 const playControlsEl = byId<HTMLDivElement>('playControls');
 const reviewBarEl = byId<HTMLDivElement>('reviewBar');
 const reviewLabelEl = byId<HTMLSpanElement>('reviewLabel');
@@ -88,6 +89,16 @@ let currentPuzzleId: PuzzleId;
 let puzzle: Puzzle;
 let regionMap: RegionMap;
 let pathState: PathState;
+/**
+ * True once the player has hit Give Up on the current live puzzle attempt
+ * and its `pathState.edges` holds the revealed intended solution rather
+ * than anything the player actually marked. Deliberately *not* folded into
+ * `pathState.won`: giving up is not a win (no `recordCompletion`, no
+ * `unlockedIndex` advance, nothing persisted — see `revealSolution`), but
+ * input still needs blocking exactly like a real win does, which is why
+ * `host.getPathState()` below reports `won: true` whenever this is set.
+ */
+let gaveUp = false;
 /** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed puzzle and on Reset. */
 let history: HistoryState = createHistory();
 let reviewPuzzle: Puzzle | null = null;
@@ -124,7 +135,11 @@ function render(): void {
       : {
           puzzle,
           edges: pathState.edges,
-          won: pathState.won,
+          // Drawn with the same single "solved" color as an actual win once given
+          // up — `pathState.won` itself stays false (it wasn't a real win, see
+          // `gaveUp`'s doc comment), this only affects how the revealed solution
+          // looks on screen.
+          won: pathState.won || gaveUp,
           focusedRegion: focusedRegionId !== null ? regionMap.regions[focusedRegionId] : null,
           keyboardCursor,
         };
@@ -168,9 +183,14 @@ function updateNextButton(): void {
   nextBtn.disabled = !pathState.won;
 }
 
-/** Undo/Redo only ever act on the live, not-yet-won game — once a puzzle is won, editing (and so undoing) is already blocked everywhere else (input.ts/keyboard.ts refuse edits when `won`), so there's no "undo the winning move" case to reconcile with `recordCompletion` having already fired. */
+/** Give Up only makes sense on a live, not-yet-decided game: not while reviewing, not once the player has actually won, and not a second time once the solution is already showing. */
+function updateGiveUpButton(): void {
+  giveUpBtn.disabled = mode !== 'playing' || pathState.won || gaveUp;
+}
+
+/** Undo/Redo only ever act on the live, not-yet-won game — once a puzzle is won, editing (and so undoing) is already blocked everywhere else (input.ts/keyboard.ts refuse edits when `won`), so there's no "undo the winning move" case to reconcile with `recordCompletion` having already fired. Giving up blocks editing the same way a win does (see `gaveUp`'s doc comment), so it's excluded here too — there's nothing to undo back into a revealed solution. */
 function undoRedoAllowed(): boolean {
-  return mode === 'playing' && !pathState.won;
+  return mode === 'playing' && !pathState.won && !gaveUp;
 }
 
 function updateUndoRedoButtons(): void {
@@ -195,6 +215,7 @@ function setPathState(next: PathState, ops: PathOp[]): void {
   history = recordMove(history, prev, ops);
   updateProgress();
   updateNextButton();
+  updateGiveUpButton();
   updateUndoRedoButtons();
   render();
   if (justWon) winBannerEl.classList.add('show');
@@ -210,6 +231,7 @@ function performUndo(): void {
   focusedRegionId = null;
   updateProgress();
   updateNextButton();
+  updateGiveUpButton();
   updateUndoRedoButtons();
   render();
   persistLiveState();
@@ -224,9 +246,49 @@ function performRedo(): void {
   focusedRegionId = null;
   updateProgress();
   updateNextButton();
+  updateGiveUpButton();
   updateUndoRedoButtons();
   render();
   persistLiveState();
+}
+
+/**
+ * Reveals the puzzle's intended solution (the hidden Hamiltonian cycle it
+ * was generated from — `dailyPuzzle.ts`'s `generateDailySolutionEdges`) and
+ * blocks further editing, without treating it as a win: no `recordCompletion`,
+ * no `unlockedIndex` advance, and — unlike every other path mutation in this
+ * file — nothing written to `persistLiveState`, so a reload resumes whatever
+ * was actually in progress before Give Up was pressed, exactly as if it had
+ * never happened. `pathState.won` deliberately stays `false` (it wasn't a
+ * real win); `gaveUp` is what blocks input instead (see its doc comment).
+ *
+ * A puzzle with edge collections may not have this exact cycle as a valid
+ * win at all (`generateDailySolutionEdges`'s doc comment) — the button still
+ * shows it, since it's the intended answer regardless of whether the
+ * player's particular collection constraints happen to also accept it.
+ */
+function revealSolution(): void {
+  if (mode !== 'playing' || pathState.won || gaveUp) return;
+  const confirmed = window.confirm('Give up and reveal the intended solution? This puzzle will no longer count as solved.');
+  if (!confirmed) return;
+
+  pathState = { edges: generateDailySolutionEdges(currentPuzzleId), won: false };
+  gaveUp = true;
+  focusedRegionId = null;
+  keyboardCursor = null;
+  updateProgress();
+  updateNextButton();
+  updateGiveUpButton();
+  updateUndoRedoButtons();
+  winBannerEl.textContent = 'Here’s the solution';
+  winBannerEl.classList.add('gaveUp', 'show');
+  render();
+}
+
+/** Restores `#winBanner` to its default hidden, "Loop complete!" state — shared by every place that starts a fresh live attempt (a real win's banner is set explicitly by `setPathState`; a given-up one by `revealSolution`). */
+function resetWinBanner(): void {
+  winBannerEl.classList.remove('show', 'gaveUp');
+  winBannerEl.textContent = 'Loop complete!';
 }
 
 function showToast(message: string): void {
@@ -284,11 +346,13 @@ function resetPath(): void {
   // Reset starts a fresh attempt, so its move history starts fresh too — otherwise a
   // later win's replay would confusingly interleave an earlier abandoned attempt.
   history = createHistory();
-  winBannerEl.classList.remove('show');
+  gaveUp = false;
+  resetWinBanner();
   focusedRegionId = null;
   keyboardCursor = null;
   updateProgress();
   updateNextButton();
+  updateGiveUpButton();
   updateUndoRedoButtons();
   pendingPersist = saveInProgress(currentPuzzleId, [...pathState.edges], history).catch((err: unknown) => console.error('failed to save progress', err));
   render();
@@ -329,12 +393,14 @@ async function startPuzzle(sizeKey: string, shapeMode: ShapeMode, collections: E
     if (resuming) showToast("This saved game predates undo history, so it isn't available for it.");
   }
 
-  winBannerEl.classList.remove('show');
+  gaveUp = false;
+  resetWinBanner();
   focusedRegionId = null;
   keyboardCursor = null;
   updatePuzzleLabel();
   updateProgress();
   updateNextButton();
+  updateGiveUpButton();
   updateUndoRedoButtons();
   layout();
 }
@@ -408,7 +474,7 @@ async function enterReview(item: CompletedRecord): Promise<void> {
   replayBtn.title = hasReplay ? '' : "Replay isn't available — this puzzle was solved before replay support was added.";
   reviewBarEl.classList.remove('hidden');
   playControlsEl.classList.add('hidden');
-  winBannerEl.classList.remove('show');
+  resetWinBanner();
   layout();
 }
 
@@ -479,10 +545,16 @@ function closeReplay(): void {
   }
 }
 
+/** The path state input handling should see: reviewing and giving-up both force `won: true` purely to block further edits (`input.ts`/`keyboard.ts` both gate on `.won`) without pretending either is an actual win — `pathState.won` itself, and `main.ts`'s own win-vs-gave-up bookkeeping, stay untouched. */
+function inputPathState(): PathState {
+  if (mode === 'reviewing') return { edges: reviewEdges, won: true };
+  return gaveUp ? { edges: pathState.edges, won: true } : pathState;
+}
+
 const host: GameInputHost = {
   getPuzzle: () => activePuzzle(),
   getRegionMap: () => activeRegionMap(),
-  getPathState: () => (mode === 'reviewing' ? { edges: reviewEdges, won: true } : pathState),
+  getPathState: inputPathState,
   setPathState,
   getLayout: () => LAYOUT,
   getView: () => view,
@@ -497,7 +569,7 @@ attachPointerHandling(canvas, host);
 const keyboardHost: KeyboardInputHost = {
   getPuzzle: () => activePuzzle(),
   getRegionMap: () => activeRegionMap(),
-  getPathState: () => (mode === 'reviewing' ? { edges: reviewEdges, won: true } : pathState),
+  getPathState: inputPathState,
   setPathState,
   setFocusedRegion,
   setKeyboardCursor,
@@ -509,6 +581,7 @@ attachKeyboardHandling(window, keyboardHost);
 byId('resetBtn').addEventListener('click', resetPath);
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
+giveUpBtn.addEventListener('click', revealSolution);
 sizeSelect.addEventListener('change', () => {
   void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
 });

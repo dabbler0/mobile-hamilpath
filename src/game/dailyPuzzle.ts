@@ -1,3 +1,4 @@
+import { generateHamiltonianCycle, generateShapeAndCycle, type Cell } from './hamiltonianCycle';
 import {
   buildKleinBottlePuzzle,
   buildProjectivePlanePuzzle,
@@ -8,8 +9,9 @@ import {
   type EdgeCollectionParams,
   type Puzzle,
 } from './puzzle';
+import { edgeKey, type EdgeKey } from './regions';
 import { mulberry32 } from './rng';
-import { rectShape } from './shape';
+import { randomShape, randomToroidalShape, rectShape } from './shape';
 
 export interface SizeOption {
   /** Stable identifier used in storage keys and puzzle-id hashing — never rename once puzzles have been played. */
@@ -144,4 +146,58 @@ export function generateDailyPuzzle(id: PuzzleId): Puzzle {
     case 'projective':
       return buildProjectivePlanePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng, collections);
   }
+}
+
+/**
+ * Recomputes the hidden Hamiltonian cycle a puzzle id was generated from —
+ * the "intended" solution — without ever storing it on the `Puzzle` itself
+ * (see `puzzle.ts`'s `Puzzle.adj` doc comment: `adj` is intentionally the
+ * only puzzle representation kept at runtime). This mirrors, call for call,
+ * the exact sequence of shape/cycle generation each `generateDailyPuzzle`
+ * branch makes, starting from a freshly-seeded rng with the same seed —
+ * since a seeded rng's output only depends on calls made *so far*, making
+ * the identical prefix of calls reproduces the identical cycle regardless
+ * of what `generateDailyPuzzle` itself goes on to do with the rng
+ * afterward (distractor edges, edge collections). See `CLAUDE.md`'s
+ * "regenerate the cycle directly" testing note, which this generalizes to
+ * every shape mode.
+ *
+ * Used only for the player-facing "reveal solution" give-up button
+ * (`main.ts`) — this is *a* valid win path through the puzzle's `adj`
+ * graph, not necessarily the only one (distractor edges can open up other
+ * solutions the player may have found instead), and if the puzzle has edge
+ * collections, marking exactly these edges is not guaranteed to satisfy
+ * every collection's required count (`generateEdgeCollections` picks each
+ * collection's required count independently of how many of its edges
+ * happen to be on the hidden cycle).
+ */
+export function generateDailySolutionCells(id: PuzzleId): Cell[] {
+  const { m, n } = sizeOption(id.sizeKey);
+  const rng = mulberry32(puzzleSeed(id));
+  switch (id.shapeMode) {
+    case 'rect':
+    case 'klein':
+    case 'projective':
+      return generateHamiltonianCycle(rectShape(m, n), rng).cells;
+    case 'random':
+      return generateShapeAndCycle((r) => randomShape(m, n, r), rng).cycle.cells;
+    case 'toroidal': {
+      const { cycle } = generateShapeAndCycle((r) => randomToroidalShape(m, n, r), rng);
+      const W = 2 * m;
+      const H = 2 * n;
+      const wrapX = (x: number) => ((x % W) + W) % W;
+      const wrapY = (y: number) => ((y % H) + H) % H;
+      return cycle.cells.map(([x, y]): Cell => [wrapX(x), wrapY(y)]);
+    }
+  }
+}
+
+/** `generateDailySolutionCells`'s cycle, converted to the same `EdgeKey` set shape `PathState.edges` uses, closing the loop back from the last cell to the first. */
+export function generateDailySolutionEdges(id: PuzzleId): Set<EdgeKey> {
+  const cells = generateDailySolutionCells(id);
+  const edges = new Set<EdgeKey>();
+  for (let i = 0; i < cells.length; i++) {
+    edges.add(edgeKey(cells[i], cells[(i + 1) % cells.length]));
+  }
+  return edges;
 }
