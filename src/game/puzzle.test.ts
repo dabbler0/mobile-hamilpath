@@ -15,7 +15,15 @@ import {
   totalCells,
   type EdgeCollectionParams,
 } from './puzzle';
+import { generateHamiltonianCycle } from './hamiltonianCycle';
 import { KLEIN_BOTTLE, PROJECTIVE_PLANE, type Topology } from './topology';
+
+/** Mirrors `puzzle.ts`'s private `edgeKeyOf` so tests can build the same canonical edge keys. */
+function edgeKeyOf(a: readonly [number, number], b: readonly [number, number]): string {
+  const ka = key(a[0], a[1]);
+  const kb = key(b[0], b[1]);
+  return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+}
 
 function manhattan(a: readonly [number, number], b: readonly [number, number]): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]);
@@ -258,8 +266,29 @@ describe('edge collections', () => {
       for (const c of collections) {
         expect(c.edges.length).toBeGreaterThanOrEqual(params.minSize);
         expect(c.edges.length).toBeLessThanOrEqual(params.maxSize);
-        expect(c.required).toBeGreaterThanOrEqual(Math.floor(c.edges.length / 2));
-        expect(c.required).toBeLessThanOrEqual(Math.ceil(c.edges.length / 2));
+        expect(c.required).toBeGreaterThanOrEqual(0);
+        expect(c.required).toBeLessThanOrEqual(c.edges.length);
+      }
+    }
+  });
+
+  it('the generated (hidden) solution always satisfies every collection exactly — regression for the unwinnable-puzzle bug', () => {
+    // Regenerating the cycle independently from the same seed reproduces the
+    // identical Hamiltonian cycle buildPuzzle traced internally (it's the
+    // first rng consumer), per the technique documented in CLAUDE.md.
+    const params: EdgeCollectionParams = { maxCollections: 5, minSize: 2, maxSize: 5 };
+    for (let seed = 0; seed < 50; seed++) {
+      const shape = rectShape(4, 6);
+      const puzzle = buildPuzzle(shape, 0.3, mulberry32(seed), params);
+      const cycle = generateHamiltonianCycle(shape, mulberry32(seed));
+      const cycleEdgeKeys = new Set<string>();
+      for (let i = 0; i < cycle.cells.length; i++) {
+        const a = cycle.cells[i];
+        const b = cycle.cells[(i + 1) % cycle.cells.length];
+        cycleEdgeKeys.add(edgeKeyOf(a, b));
+      }
+      for (const c of puzzle.edgeCollections ?? []) {
+        expect(countCollectionEdges(c, cycleEdgeKeys)).toBe(c.required);
       }
     }
   });

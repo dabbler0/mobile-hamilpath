@@ -113,11 +113,23 @@ function pickCollectionEdges(cyclePool: readonly EdgeKey[], distractorPool: read
   return picked;
 }
 
-/** Exactly half of `size` when that's a whole number; otherwise floor or ceil with equal probability. */
-function pickRequiredCount(size: number, rng: Rng): number {
-  const lo = Math.floor(size / 2);
-  const hi = Math.ceil(size / 2);
-  return lo === hi ? lo : rng() < 0.5 ? lo : hi;
+/**
+ * How many of `edges` belong to the hidden solution cycle. This is what
+ * `required` must be set to — the generated solution marks exactly its own
+ * cycle edges and none of the distractor edges, so a collection's `required`
+ * has to equal this count (not some independently-rolled number) for the
+ * generated solution to actually satisfy it. See the bug this fixes: a
+ * collection could previously land on e.g. 3 cycle edges + 1 distractor edge
+ * but require only 2 marked (a coin-flipped half of size 4), which the
+ * intended solution — marking all 3 cycle edges — could never satisfy,
+ * making the puzzle unwinnable via its own generated solution.
+ */
+function countCycleEdges(edges: readonly EdgeKey[], cycleEdgeSet: ReadonlySet<EdgeKey>): number {
+  let n = 0;
+  for (const e of edges) {
+    if (cycleEdgeSet.has(e)) n++;
+  }
+  return n;
 }
 
 /**
@@ -125,18 +137,22 @@ function pickRequiredCount(size: number, rng: Rng): number {
  * `[0, params.maxCollections]`) of collections, each a random size
  * (uniform in `[params.minSize, params.maxSize]`) drawn from a mix of the
  * hidden solution cycle's edges and the distractor edges just added (see
- * `pickCollectionEdges`), each requiring roughly half its own edges marked
- * (see `pickRequiredCount`). Every edge is used in at most one collection —
- * `used` accumulates across the whole call — so a color/badge on the board
- * is never ambiguous about which collection it belongs to. Stops early
- * (returning fewer than `count` collections) once there aren't enough
- * unused edges left for a meaningful (>=2 edge) collection.
+ * `pickCollectionEdges`), each requiring exactly as many of its own edges
+ * marked as actually belong to the hidden solution cycle (see
+ * `countCycleEdges`) — this is what guarantees the generated solution always
+ * satisfies every collection, regardless of how the cycle/distractor mix in
+ * that collection happened to land. Every edge is used in at most one
+ * collection — `used` accumulates across the whole call — so a color/badge
+ * on the board is never ambiguous about which collection it belongs to.
+ * Stops early (returning fewer than `count` collections) once there aren't
+ * enough unused edges left for a meaningful (>=2 edge) collection.
  * `params.maxCollections <= 0` (`NO_EDGE_COLLECTIONS`, the default) always
  * returns `[]` without consuming any `rng` calls, so puzzles generated with
  * the feature off are byte-identical to puzzles from before it existed.
  */
 export function generateEdgeCollections(cycleEdges: readonly EdgeKey[], distractorEdges: readonly EdgeKey[], params: EdgeCollectionParams, rng: Rng): EdgeCollection[] {
   if (params.maxCollections <= 0) return [];
+  const cycleEdgeSet = new Set(cycleEdges);
   const count = Math.floor(rng() * (params.maxCollections + 1));
   const collections: EdgeCollection[] = [];
   const used = new Set<EdgeKey>();
@@ -147,7 +163,7 @@ export function generateEdgeCollections(cycleEdges: readonly EdgeKey[], distract
     const edges = pickCollectionEdges(cycleEdges, distractorEdges, used, size, rng);
     if (edges.length < 2) break; // not enough unused edges left for a meaningful collection
     for (const e of edges) used.add(e);
-    collections.push({ id: collections.length, edges, required: pickRequiredCount(edges.length, rng) });
+    collections.push({ id: collections.length, edges, required: countCycleEdges(edges, cycleEdgeSet) });
   }
   return collections;
 }
