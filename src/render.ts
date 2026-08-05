@@ -1,7 +1,7 @@
 import { computeEdgeComponents } from './game/edgeComponents';
 import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
 import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
-import { parseKey, type Puzzle } from './game/puzzle';
+import { countCollectionEdges, parseKey, type EdgeCollection, type Puzzle } from './game/puzzle';
 import { topologyFor, wrappedNeighbor, type Topology } from './game/topology';
 import type { Viewport } from './view/viewport';
 
@@ -22,7 +22,25 @@ const COLORS = {
   markedWon: '#35c46a',
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
+  /** Badge color for an edge collection whose currently-marked count doesn't match its `required` count — see `drawEdgeCollectionBadges`. */
+  collectionError: '#e6483c',
+  /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
+  collectionBadgeText: '#ffffff',
 };
+
+/**
+ * One color per edge collection (see `puzzle.ts`'s `EdgeCollection`), used
+ * for both the colored "halo" drawn behind a collection's edges and its
+ * count badge's fill when satisfied. Deliberately a different palette from
+ * `SEGMENT_COLORS` (warmer/more saturated) since a collection edge and a
+ * marked path segment routinely render at the very same screen position at
+ * once — see `drawEdgeCollectionHalos`.
+ */
+const COLLECTION_COLORS = ['#ffb020', '#ff5da2', '#39e0c8', '#b98bff', '#ffe14d', '#6fd15f', '#5ab0ff', '#ff8a3d'];
+
+function collectionColor(id: number): string {
+  return COLLECTION_COLORS[id % COLLECTION_COLORS.length];
+}
 
 /**
  * One color per connected component of marked edges, so it's easy to tell
@@ -62,9 +80,11 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
 function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
   const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
+  drawEdgeCollectionHalos(ctx, puzzle, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
   drawMarkedEdges(ctx, edges, won, layout);
+  drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
@@ -127,6 +147,80 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
     ctx.moveTo(sx1, sy1);
     ctx.lineTo(sx2, sy2);
     ctx.stroke();
+  }
+}
+
+/**
+ * Draws each edge collection's edges as a thick colored line *behind* the
+ * ordinary candidate/marked-edge strokes (drawn right after this, in
+ * `drawSingleTile`), so a collection edge always shows a colored "halo"
+ * peeking out on both sides regardless of whether it's currently marked —
+ * marking/unmarking a collection edge only changes the thin line on top,
+ * never its collection identity underneath.
+ */
+function drawEdgeCollectionHalos(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout): void {
+  const collections = puzzle.edgeCollections;
+  if (!collections || collections.length === 0) return;
+  ctx.lineCap = 'round';
+  ctx.lineWidth = Math.max(5, layout.cellSize * 0.5);
+  for (const collection of collections) {
+    ctx.strokeStyle = collectionColor(collection.id);
+    for (const ek of collection.edges) {
+      const [a, b] = parseEdgeKey(ek);
+      const [sx1, sy1] = toScreen(a, layout);
+      const [sx2, sy2] = toScreen(b, layout);
+      ctx.beginPath();
+      ctx.moveTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.stroke();
+    }
+  }
+}
+
+/** Fill + text color for one collection's count badge, given how many of its edges are currently marked. */
+function collectionBadgeFill(collection: EdgeCollection, edges: ReadonlySet<EdgeKey>): string {
+  return countCollectionEdges(collection, edges) === collection.required ? collectionColor(collection.id) : COLORS.collectionError;
+}
+
+function drawBadge(ctx: CanvasRenderingContext2D, mx: number, my: number, r: number, text: string, fill: string): void {
+  ctx.beginPath();
+  ctx.arc(mx, my, r, 0, Math.PI * 2);
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+  ctx.stroke();
+  ctx.fillStyle = COLORS.collectionBadgeText;
+  ctx.fillText(text, mx, my);
+}
+
+/**
+ * Draws each collection's `required` count as a small badge at the midpoint
+ * of every one of its edges (repeated per-edge rather than once per
+ * collection, since a collection's edges are usually scattered around the
+ * board — see `puzzle.ts`'s `pickCollectionEdges` — so there's no single
+ * obviously-right place to put one shared label). Turns
+ * `COLORS.collectionError` instead of the collection's own color the moment
+ * the currently-marked count stops matching `required`, in either
+ * direction — the simplest, most visually obvious way to flag "too many" or
+ * "too few" without a separate icon.
+ */
+function drawEdgeCollectionBadges(ctx: CanvasRenderingContext2D, puzzle: Puzzle, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+  const collections = puzzle.edgeCollections;
+  if (!collections || collections.length === 0) return;
+  const r = Math.max(7, layout.cellSize * 0.26);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = `bold ${Math.max(9, r * 1.15)}px sans-serif`;
+  for (const collection of collections) {
+    const fill = collectionBadgeFill(collection, edges);
+    const text = String(collection.required);
+    for (const ek of collection.edges) {
+      const [a, b] = parseEdgeKey(ek);
+      const [sx1, sy1] = toScreen(a, layout);
+      const [sx2, sy2] = toScreen(b, layout);
+      drawBadge(ctx, (sx1 + sx2) / 2, (sy1 + sy2) / 2, r, text, fill);
+    }
   }
 }
 
@@ -247,6 +341,25 @@ function drawWrapped(
     tiledMarkedEdges.push({ ...classifyEdge(a, b, topology, W, H), color });
   }
 
+  // Same "one entry per collection edge" shape as `tiledMarkedEdges`, computed
+  // once up front so `forEachTile` below only has to re-project (not
+  // re-derive) each collection edge's color/badge per tile copy — see
+  // `drawEdgeCollectionHalos`/`drawEdgeCollectionBadges`'s single-tile
+  // versions for what this is mirroring.
+  const tiledCollectionHalos: Array<TiledEdge & { color: string }> = [];
+  const tiledCollectionBadges: Array<TiledEdge & { text: string; fill: string }> = [];
+  for (const collection of puzzle.edgeCollections ?? []) {
+    const color = collectionColor(collection.id);
+    const fill = collectionBadgeFill(collection, edges);
+    const text = String(collection.required);
+    for (const ek of collection.edges) {
+      const [a, b] = parseEdgeKey(ek);
+      const classified = classifyEdge(a, b, topology, W, H);
+      tiledCollectionHalos.push({ ...classified, color });
+      tiledCollectionBadges.push({ ...classified, text, fill });
+    }
+  }
+
   function forEachTile(fn: (tileX: number, tileY: number) => void): void {
     for (let tileY = minTileY; tileY <= maxTileY; tileY++) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX++) fn(tileX, tileY);
@@ -269,6 +382,23 @@ function drawWrapped(
       }
     });
   }
+
+  ctx.lineCap = 'round';
+  ctx.lineWidth = Math.max(5, layout.cellSize * 0.5);
+  forEachTile((tileX, tileY) => {
+    const oFrom = topology.tileOrientation(tileX, tileY);
+    for (const { from, to, tileDX, tileDY, color } of tiledCollectionHalos) {
+      const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
+      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+      const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+      ctx.strokeStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.stroke();
+    }
+  });
 
   ctx.strokeStyle = COLORS.edge;
   ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.09);
@@ -315,6 +445,23 @@ function drawWrapped(
       ctx.stroke();
     }
   });
+
+  if (tiledCollectionBadges.length > 0) {
+    const r = Math.max(7, layout.cellSize * 0.26);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.font = `bold ${Math.max(9, r * 1.15)}px sans-serif`;
+    forEachTile((tileX, tileY) => {
+      const oFrom = topology.tileOrientation(tileX, tileY);
+      for (const { from, to, tileDX, tileDY, text, fill } of tiledCollectionBadges) {
+        const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
+        const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+        const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+        const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+        drawBadge(ctx, (sx1 + sx2) / 2, (sy1 + sy2) / 2, r, text, fill);
+      }
+    });
+  }
 
   if (keyboardCursor) {
     const cr = Math.max(6, layout.cellSize * 0.44);

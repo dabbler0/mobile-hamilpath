@@ -12,7 +12,7 @@ import {
   type PuzzleId,
   type ShapeMode,
 } from './dailyPuzzle';
-import { totalCells } from './puzzle';
+import { NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
 
 describe('todayKey', () => {
   it('formats as local YYYY-MM-DD', () => {
@@ -125,5 +125,49 @@ describe('generateDailyPuzzle', () => {
     const a = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 0 });
     const b = generateDailyPuzzle({ day: '2026-07-10', sizeKey: 'tiny', shapeMode, index: 1 });
     expect(serialize(a)).not.toBe(serialize(b));
+  });
+});
+
+describe('edge collections in the puzzle id', () => {
+  const base: PuzzleId = { day: '2026-07-10', sizeKey: 'mini', shapeMode: 'rect', index: 5 };
+
+  it('leaves the hash/key untouched when collections are left off — absent, explicit NO_EDGE_COLLECTIONS, or maxCollections 0 with any size bounds all agree', () => {
+    const untouched = puzzleIdKey(base);
+    const explicitOff: EdgeCollectionParams = { ...NO_EDGE_COLLECTIONS };
+    const zeroWithOtherBounds: EdgeCollectionParams = { maxCollections: 0, minSize: 3, maxSize: 7 };
+    expect(puzzleIdKey({ ...base, collections: explicitOff })).toBe(untouched);
+    expect(puzzleIdKey({ ...base, collections: zeroWithOtherBounds })).toBe(untouched);
+    expect(puzzleSeed({ ...base, collections: explicitOff })).toBe(puzzleSeed(base));
+  });
+
+  it('changes the hash/key once collections are actually turned on', () => {
+    const on: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
+    expect(puzzleIdKey({ ...base, collections: on })).not.toBe(puzzleIdKey(base));
+    expect(puzzleSeed({ ...base, collections: on })).not.toBe(puzzleSeed(base));
+  });
+
+  it('distinguishes different active collection params from each other', () => {
+    const a: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
+    const b: EdgeCollectionParams = { maxCollections: 3, minSize: 2, maxSize: 4 };
+    const c: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 5 };
+    const keys = new Set([a, b, c].map((collections) => puzzleIdKey({ ...base, collections })));
+    expect(keys.size).toBe(3);
+  });
+
+  it('generateDailyPuzzle attaches edgeCollections respecting the given params, deterministically', () => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'small', shapeMode: 'rect', index: 0, collections: { maxCollections: 3, minSize: 2, maxSize: 4 } };
+    const a = generateDailyPuzzle(id);
+    const b = generateDailyPuzzle(id);
+    expect(a.edgeCollections).toEqual(b.edgeCollections);
+    expect(a.edgeCollections!.length).toBeLessThanOrEqual(3);
+    for (const c of a.edgeCollections!) {
+      expect(c.edges.length).toBeGreaterThanOrEqual(2);
+      expect(c.edges.length).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it('generateDailyPuzzle gives no collections when the field is omitted', () => {
+    const id: PuzzleId = { day: '2026-07-10', sizeKey: 'small', shapeMode: 'rect', index: 0 };
+    expect(generateDailyPuzzle(id).edgeCollections).toEqual([]);
   });
 });

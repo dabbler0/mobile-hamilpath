@@ -60,6 +60,14 @@
             <option value="projective">Projective plane</option>
           </select>
         </label>
+        <label
+          >Collections
+          <div class="collectionsInputs">
+            <input type="number" id="maxCollectionsInput" min="0" max="6" step="1" value="0" title="Max number of edge collections (0 = off)" />
+            <input type="number" id="minCollectionSizeInput" min="2" max="8" step="1" value="2" title="Minimum edges per collection" />
+            <input type="number" id="maxCollectionSizeInput" min="2" max="8" step="1" value="4" title="Maximum edges per collection" />
+          </div>
+        </label>
         <button class="secondary" id="resetBtn">Reset</button>
         <button class="secondary" id="undoBtn" disabled>Undo</button>
         <button class="secondary" id="redoBtn" disabled>Redo</button>

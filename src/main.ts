@@ -2,7 +2,7 @@ import { generateDailyPuzzle, SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption,
 import { boardPixelSize, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { createInitialPath, type PathOp, type PathState } from './game/pathEdit';
-import { totalCells, type Puzzle } from './game/puzzle';
+import { EDGE_COLLECTION_LIMITS, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams, type Puzzle } from './game/puzzle';
 import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
@@ -34,6 +34,9 @@ const puzzleLabelEl = byId<HTMLDivElement>('puzzleLabel');
 const winBannerEl = byId<HTMLDivElement>('winBanner');
 const sizeSelect = byId<HTMLSelectElement>('sizeSelect');
 const shapeSelect = byId<HTMLSelectElement>('shapeSelect');
+const maxCollectionsInput = byId<HTMLInputElement>('maxCollectionsInput');
+const minCollectionSizeInput = byId<HTMLInputElement>('minCollectionSizeInput');
+const maxCollectionSizeInput = byId<HTMLInputElement>('maxCollectionSizeInput');
 const nextBtn = byId<HTMLButtonElement>('nextBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
@@ -50,6 +53,33 @@ const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
 const historyOverlayEl = byId<HTMLDivElement>('historyOverlay');
 const historyListEl = byId<HTMLDivElement>('historyList');
 const toastEl = byId<HTMLDivElement>('toast');
+
+function clampInt(value: string, min: number, max: number, fallback: number): number {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+/**
+ * Reads and clamps the three edge-collection number inputs into a valid
+ * `EdgeCollectionParams`, swapping min/max size if the player entered them
+ * backwards rather than rejecting the input. `maxCollections: 0` (the
+ * default) turns the feature off entirely — see `NO_EDGE_COLLECTIONS`.
+ */
+function currentCollectionParams(): EdgeCollectionParams {
+  const maxCollections = clampInt(maxCollectionsInput.value, EDGE_COLLECTION_LIMITS.maxCollections.min, EDGE_COLLECTION_LIMITS.maxCollections.max, NO_EDGE_COLLECTIONS.maxCollections);
+  let minSize = clampInt(minCollectionSizeInput.value, EDGE_COLLECTION_LIMITS.size.min, EDGE_COLLECTION_LIMITS.size.max, NO_EDGE_COLLECTIONS.minSize);
+  let maxSize = clampInt(maxCollectionSizeInput.value, EDGE_COLLECTION_LIMITS.size.min, EDGE_COLLECTION_LIMITS.size.max, NO_EDGE_COLLECTIONS.maxSize);
+  if (minSize > maxSize) [minSize, maxSize] = [maxSize, minSize];
+  return { maxCollections, minSize, maxSize };
+}
+
+/** Writes a (possibly clamped/swapped) `EdgeCollectionParams` back into the three inputs, so an out-of-range or backwards entry visibly snaps to what was actually used. */
+function reflectCollectionParams(params: EdgeCollectionParams): void {
+  maxCollectionsInput.value = String(params.maxCollections);
+  minCollectionSizeInput.value = String(params.minSize);
+  maxCollectionSizeInput.value = String(params.maxSize);
+}
 
 type Mode = 'playing' | 'reviewing';
 let mode: Mode = 'playing';
@@ -129,7 +159,9 @@ function updatePuzzleLabel(): void {
   const opt = sizeOption(currentPuzzleId.sizeKey);
   const shapeOpt = shapeModeOption(currentPuzzleId.shapeMode);
   const shapeSuffix = currentPuzzleId.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
-  puzzleLabelEl.textContent = `${opt.label}${shapeSuffix} #${currentPuzzleId.index + 1}`;
+  const collectionCount = puzzle.edgeCollections?.length ?? 0;
+  const collectionSuffix = collectionCount > 0 ? ` · ${collectionCount} link${collectionCount > 1 ? 's' : ''}` : '';
+  puzzleLabelEl.textContent = `${opt.label}${shapeSuffix} #${currentPuzzleId.index + 1}${collectionSuffix}`;
 }
 
 function updateNextButton(): void {
@@ -264,18 +296,24 @@ function resetPath(): void {
 
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
 const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
+const LAST_MAX_COLLECTIONS_KEY = 'loopit:collections:max';
+const LAST_MIN_COLLECTION_SIZE_KEY = 'loopit:collections:minSize';
+const LAST_MAX_COLLECTION_SIZE_KEY = 'loopit:collections:maxSize';
 
-/** Loads whichever puzzle is current for this size+shape today: a resumed in-progress game, or the next unlocked one. */
-async function startPuzzle(sizeKey: string, shapeMode: ShapeMode): Promise<void> {
+/** Loads whichever puzzle is current for this size+shape+collections today: a resumed in-progress game, or the next unlocked one. */
+async function startPuzzle(sizeKey: string, shapeMode: ShapeMode, collections: EdgeCollectionParams): Promise<void> {
   localStorage.setItem(LAST_SIZE_STORAGE_KEY, sizeKey);
   localStorage.setItem(LAST_SHAPE_STORAGE_KEY, shapeMode);
+  localStorage.setItem(LAST_MAX_COLLECTIONS_KEY, String(collections.maxCollections));
+  localStorage.setItem(LAST_MIN_COLLECTION_SIZE_KEY, String(collections.minSize));
+  localStorage.setItem(LAST_MAX_COLLECTION_SIZE_KEY, String(collections.maxSize));
   const day = todayKey();
-  const unlockedIndex = await getUnlockedIndex(day, sizeKey, shapeMode);
-  const existing = await getInProgress(day, sizeKey, shapeMode);
+  const unlockedIndex = await getUnlockedIndex(day, sizeKey, shapeMode, collections);
+  const existing = await getInProgress(day, sizeKey, shapeMode, collections);
   const resuming = existing && existing.index === unlockedIndex;
   const index = resuming ? existing.index : unlockedIndex;
 
-  currentPuzzleId = { day, sizeKey, shapeMode, index };
+  currentPuzzleId = { day, sizeKey, shapeMode, index, collections };
   puzzle = generateDailyPuzzle(currentPuzzleId);
   regionMap = computeRegions(puzzle);
   pathState = resuming ? { edges: new Set(existing.edges), won: false } : createInitialPath();
@@ -351,7 +389,7 @@ function closeHistory(): void {
 
 async function enterReview(item: CompletedRecord): Promise<void> {
   closeHistory();
-  const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index };
+  const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index, collections: item.collections };
   reviewPuzzle = generateDailyPuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
   reviewEdges = new Set(item.edges);
@@ -472,16 +510,24 @@ byId('resetBtn').addEventListener('click', resetPath);
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 sizeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
 });
 shapeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());
 });
+function onCollectionsInputChange(): void {
+  const params = currentCollectionParams();
+  reflectCollectionParams(params); // snap any out-of-range/backwards entry back to what's actually used
+  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, params);
+}
+maxCollectionsInput.addEventListener('change', onCollectionsInputChange);
+minCollectionSizeInput.addEventListener('change', onCollectionsInputChange);
+maxCollectionSizeInput.addEventListener('change', onCollectionsInputChange);
 nextBtn.addEventListener('click', () => {
   if (!pathState.won) return;
   void (async () => {
     await pendingPersist;
-    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode);
+    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode, currentPuzzleId.collections ?? NO_EDGE_COLLECTIONS);
   })();
 });
 byId('historyBtn').addEventListener('click', () => {
@@ -552,4 +598,11 @@ const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
 if (lastShape && SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
   shapeSelect.value = lastShape;
 }
-void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+const lastMaxCollections = localStorage.getItem(LAST_MAX_COLLECTIONS_KEY);
+if (lastMaxCollections !== null) maxCollectionsInput.value = lastMaxCollections;
+const lastMinCollectionSize = localStorage.getItem(LAST_MIN_COLLECTION_SIZE_KEY);
+if (lastMinCollectionSize !== null) minCollectionSizeInput.value = lastMinCollectionSize;
+const lastMaxCollectionSize = localStorage.getItem(LAST_MAX_COLLECTION_SIZE_KEY);
+if (lastMaxCollectionSize !== null) maxCollectionSizeInput.value = lastMaxCollectionSize;
+reflectCollectionParams(currentCollectionParams());
+void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode, currentCollectionParams());

@@ -1,4 +1,4 @@
-import { key, totalCells, type CellKey, type Puzzle } from './puzzle';
+import { countCollectionEdges, key, totalCells, type CellKey, type Puzzle } from './puzzle';
 import { parseEdgeKey, type EdgeKey, type RegionMap } from './regions';
 
 export type { EdgeKey } from './regions';
@@ -18,7 +18,9 @@ export function createInitialPath(): PathState {
  * regions can freely create branch points or leave the board fragmented)
  * all cells are reachable from one another via marked edges — this last
  * check is what rules out e.g. two disjoint sub-loops that would otherwise
- * each satisfy the degree-2 check.
+ * each satisfy the degree-2 check — *and*, if the puzzle has any edge
+ * collections (see `puzzle.ts`'s `EdgeCollection`), each one's marked count
+ * matches its `required` count exactly, not just "a valid loop exists".
  */
 export function computeWin(puzzle: Puzzle, edges: ReadonlySet<EdgeKey>): boolean {
   const total = totalCells(puzzle);
@@ -51,7 +53,12 @@ export function computeWin(puzzle: Puzzle, edges: ReadonlySet<EdgeKey>): boolean
       }
     }
   }
-  return seen.size === total;
+  if (seen.size !== total) return false;
+
+  for (const collection of puzzle.edgeCollections ?? []) {
+    if (countCollectionEdges(collection, edges) !== collection.required) return false;
+  }
+  return true;
 }
 
 /**

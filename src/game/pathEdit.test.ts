@@ -185,3 +185,35 @@ describe('computeWin', () => {
     expect(computeWin(puzzle, edges)).toBe(true);
   });
 });
+
+describe('computeWin with edge collections', () => {
+  const FULL_CYCLE = ['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1'];
+
+  it('is false when a collection has too many of its edges marked (it always does here, since the full cycle marks every edge)', () => {
+    const puzzle = { ...twoByTwoCyclePuzzle(), edgeCollections: [{ id: 0, edges: ['0,0|1,0', '1,0|1,1'], required: 1 }] };
+    expect(computeWin(puzzle, new Set(FULL_CYCLE))).toBe(false);
+  });
+
+  it('is true once the marked set is a full cycle and every collection is satisfied exactly', () => {
+    const puzzle = { ...twoByTwoCyclePuzzle(), edgeCollections: [{ id: 0, edges: ['0,0|1,0'], required: 1 }] };
+    expect(computeWin(puzzle, new Set(FULL_CYCLE))).toBe(true);
+  });
+
+  it('checks every collection, not just the first', () => {
+    const puzzle = {
+      ...twoByTwoCyclePuzzle(),
+      edgeCollections: [
+        { id: 0, edges: ['0,0|1,0'], required: 1 },
+        { id: 1, edges: ['1,0|1,1', '0,1|1,1'], required: 1 },
+      ],
+    };
+    // Second collection has both its edges marked (2), required only 1.
+    expect(computeWin(puzzle, new Set(FULL_CYCLE))).toBe(false);
+  });
+
+  it('treats a puzzle with no edgeCollections field the same as an empty list', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    expect(puzzle.edgeCollections).toBeUndefined();
+    expect(computeWin(puzzle, new Set(FULL_CYCLE))).toBe(true);
+  });
+});

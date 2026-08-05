@@ -1,14 +1,26 @@
-import type { PuzzleId, ShapeMode } from '../game/dailyPuzzle';
+import { collectionsKeySuffix, puzzleIdKey, type PuzzleId, type ShapeMode } from '../game/dailyPuzzle';
 import type { HistoryState, MoveLogEntry } from '../game/history';
+import type { EdgeCollectionParams } from '../game/puzzle';
 import type { EdgeKey } from '../game/regions';
 import { deleteRecord, getAllRecords, getRecord, putRecord, STORES } from './db';
 
-function dayAndSizeId(day: string, sizeKey: string, shapeMode: ShapeMode): string {
-  return `${day}::${sizeKey}::${shapeMode}`;
+/**
+ * Storage key for "the currently-active puzzle of this day+size+shape(+
+ * collection params)" — used for both the unlock gate (`progress`) and the
+ * resumable save (`inProgress`), neither of which is qualified by `index`
+ * (there's only ever one active puzzle per this key at a time). Includes
+ * `collectionsKeySuffix` so a distinct edge-collections setting gets its own
+ * independent progression, exactly like `shapeMode` already does — and, for
+ * the common case of collections left off, is byte-identical to the
+ * pre-collections key format.
+ */
+function dayAndSizeId(day: string, sizeKey: string, shapeMode: ShapeMode, collections?: EdgeCollectionParams): string {
+  return `${day}::${sizeKey}::${shapeMode}${collectionsKeySuffix(collections)}`;
 }
 
+/** Storage key for one specific completed puzzle — reuses `dailyPuzzle.ts`'s `puzzleIdKey` so the two never drift apart. */
 function puzzleRecordId(id: PuzzleId): string {
-  return `${id.day}::${id.sizeKey}::${id.shapeMode}::${id.index}`;
+  return puzzleIdKey(id);
 }
 
 export interface ProgressRecord {
@@ -20,20 +32,20 @@ export interface ProgressRecord {
   unlockedIndex: number;
 }
 
-export async function getProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<ProgressRecord | undefined> {
-  return getRecord<ProgressRecord>(STORES.progress, dayAndSizeId(day, sizeKey, shapeMode));
+export async function getProgress(day: string, sizeKey: string, shapeMode: ShapeMode, collections?: EdgeCollectionParams): Promise<ProgressRecord | undefined> {
+  return getRecord<ProgressRecord>(STORES.progress, dayAndSizeId(day, sizeKey, shapeMode, collections));
 }
 
-/** The next playable index for this day+size+shape — 0 if no puzzles of that size/shape have been completed yet today. */
-export async function getUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<number> {
-  const record = await getProgress(day, sizeKey, shapeMode);
+/** The next playable index for this day+size+shape(+collections) — 0 if no puzzles of that combo have been completed yet today. */
+export async function getUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode, collections?: EdgeCollectionParams): Promise<number> {
+  const record = await getProgress(day, sizeKey, shapeMode, collections);
   return record?.unlockedIndex ?? 0;
 }
 
-async function advanceUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode, completedIndex: number): Promise<void> {
-  const current = await getUnlockedIndex(day, sizeKey, shapeMode);
+async function advanceUnlockedIndex(day: string, sizeKey: string, shapeMode: ShapeMode, completedIndex: number, collections?: EdgeCollectionParams): Promise<void> {
+  const current = await getUnlockedIndex(day, sizeKey, shapeMode, collections);
   if (completedIndex !== current) return; // only forward, in-order completion advances the gate
-  const record: ProgressRecord = { id: dayAndSizeId(day, sizeKey, shapeMode), day, sizeKey, shapeMode, unlockedIndex: completedIndex + 1 };
+  const record: ProgressRecord = { id: dayAndSizeId(day, sizeKey, shapeMode, collections), day, sizeKey, shapeMode, unlockedIndex: completedIndex + 1 };
   await putRecord(STORES.progress, record);
 }
 
@@ -46,6 +58,8 @@ export interface InProgressRecord {
   edges: EdgeKey[];
   /** Undo/redo stacks + move log for this in-progress game. Absent on saves from before this feature existed — callers must fall back to a fresh (empty) history rather than assume this is present. */
   history?: HistoryState;
+  /** The edge-collection params this puzzle was generated with. Absent on saves from before this feature existed (equivalent to `NO_EDGE_COLLECTIONS`) — needed to regenerate the exact same puzzle graph on resume. */
+  collections?: EdgeCollectionParams;
 }
 
 /**
@@ -72,26 +86,27 @@ function withShapeModeDefault<T extends { shapeMode?: ShapeMode }>(record: T): T
   return record.shapeMode ? (record as T & { shapeMode: ShapeMode }) : { ...record, shapeMode: 'rect' };
 }
 
-export async function getInProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<InProgressRecord | undefined> {
-  const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode));
+export async function getInProgress(day: string, sizeKey: string, shapeMode: ShapeMode, collections?: EdgeCollectionParams): Promise<InProgressRecord | undefined> {
+  const record = await getRecord<InProgressRecord>(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode, collections));
   return record && hasEdges(record) ? record : undefined;
 }
 
 export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: HistoryState): Promise<void> {
   const record: InProgressRecord = {
-    id: dayAndSizeId(id.day, id.sizeKey, id.shapeMode),
+    id: dayAndSizeId(id.day, id.sizeKey, id.shapeMode, id.collections),
     day: id.day,
     sizeKey: id.sizeKey,
     shapeMode: id.shapeMode,
     index: id.index,
     edges,
     history,
+    collections: id.collections,
   };
   await putRecord(STORES.inProgress, record);
 }
 
-export async function clearInProgress(day: string, sizeKey: string, shapeMode: ShapeMode): Promise<void> {
-  await deleteRecord(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode));
+export async function clearInProgress(day: string, sizeKey: string, shapeMode: ShapeMode, collections?: EdgeCollectionParams): Promise<void> {
+  await deleteRecord(STORES.inProgress, dayAndSizeId(day, sizeKey, shapeMode, collections));
 }
 
 export interface CompletedRecord {
@@ -104,6 +119,8 @@ export interface CompletedRecord {
   completedAt: number;
   /** The move log for this game's whole solve, for the replay animation. Absent on completions recorded before this feature existed — callers must treat replay as unavailable rather than assume this is present. */
   moveLog?: MoveLogEntry[];
+  /** The edge-collection params this puzzle was generated with. Absent on completions recorded before this feature existed (equivalent to `NO_EDGE_COLLECTIONS`) — needed to regenerate the exact same puzzle graph for review. */
+  collections?: EdgeCollectionParams;
 }
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
@@ -130,8 +147,9 @@ export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?:
     edges,
     completedAt: Date.now(),
     moveLog,
+    collections: id.collections,
   };
   await putRecord(STORES.completed, record);
-  await clearInProgress(id.day, id.sizeKey, id.shapeMode);
-  await advanceUnlockedIndex(id.day, id.sizeKey, id.shapeMode, id.index);
+  await clearInProgress(id.day, id.sizeKey, id.shapeMode, id.collections);
+  await advanceUnlockedIndex(id.day, id.sizeKey, id.shapeMode, id.index, id.collections);
 }
