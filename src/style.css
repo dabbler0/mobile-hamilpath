@@ -163,6 +163,11 @@ button:disabled {
 #winBanner.show {
   transform: translateX(-50%) translateY(0);
 }
+/** Shown instead of the normal green "Loop complete!" styling when the banner is announcing a revealed (given-up) solution rather than an actual win. */
+#winBanner.gaveUp {
+  background: #ffb020;
+  color: #3a2400;
+}
 #toast {
   position: absolute;
   bottom: 14px;
