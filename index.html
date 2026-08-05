@@ -56,8 +56,14 @@
             <option value="rect" selected>Rectangle</option>
             <option value="random">Random shape</option>
             <option value="toroidal">Toroidal</option>
-            <option value="klein">Klein bottle</option>
-            <option value="projective">Projective plane</option>
+            <!--
+              Klein bottle / projective plane are temporarily disabled — their
+              nonorientable-surface generation has known bugs that are too hard
+              to fix for now (src/game/topology.ts's file doc comment). The
+              underlying code (buildKleinBottlePuzzle/buildProjectivePlanePuzzle
+              etc.) is still there for a future fix; these options are just not
+              offered to players meanwhile.
+            -->
           </select>
         </label>
         <label

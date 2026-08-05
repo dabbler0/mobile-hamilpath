@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeFitView, computePan, computeZoomAt, toCanvasLocal } from './viewport';
+import { computeFitView, computePan, computeZoomAt, panToKeepVisible, toCanvasLocal, toWrapLocal } from './viewport';
 
 const BOUNDS = { minScale: 0.12, maxScale: 3 };
 
@@ -61,5 +61,55 @@ describe('toCanvasLocal', () => {
     const view = { scale: 2, tx: 10, ty: 10 };
     // wrap-local (30, 30) -> canvas-local ((30-10)/2, (30-10)/2) = (10, 10)
     expect(toCanvasLocal(30, 30, view)).toEqual([10, 10]);
+  });
+});
+
+describe('toWrapLocal', () => {
+  it('is the exact inverse of toCanvasLocal', () => {
+    const view = { scale: 2, tx: 10, ty: -5 };
+    expect(toWrapLocal(...toCanvasLocal(123, 45, view), view)).toEqual([123, 45]);
+    expect(toCanvasLocal(...toWrapLocal(7, 8, view), view)).toEqual([7, 8]);
+  });
+});
+
+describe('panToKeepVisible', () => {
+  const view = { scale: 1, tx: 0, ty: 0 };
+
+  it('leaves the view untouched when the point is already comfortably inside the margin', () => {
+    const next = panToKeepVisible(view, 200, 200, 400, 400, 20);
+    expect(next).toBe(view); // same reference: genuinely a no-op
+  });
+
+  it('pans just enough to bring a point past the left/top edge up to the margin', () => {
+    const next = panToKeepVisible(view, -50, -50, 400, 400, 20);
+    expect(next.tx).toBeCloseTo(70); // -50 + tx == 20  =>  tx == 70
+    expect(next.ty).toBeCloseTo(70);
+    expect(next.scale).toBe(1);
+  });
+
+  it('pans just enough to bring a point past the right/bottom edge back to the margin', () => {
+    const next = panToKeepVisible(view, 450, 500, 400, 400, 20);
+    expect(next.tx).toBeCloseTo(400 - 20 - 450); // sx == availW - margin
+    expect(next.ty).toBeCloseTo(400 - 20 - 500);
+  });
+
+  it('only pans the axis that actually needs it', () => {
+    const next = panToKeepVisible(view, 200, -50, 400, 400, 20);
+    expect(next.tx).toBe(0);
+    expect(next.ty).toBeCloseTo(70);
+  });
+
+  it('accounts for the current scale/pan when locating the point on screen', () => {
+    const zoomed = { scale: 2, tx: 100, ty: 100 };
+    // canvas-local (-60, 0) -> wrap-local (100 + 2*-60, 100) = (-20, 100), left of the margin
+    const next = panToKeepVisible(zoomed, -60, 0, 400, 400, 20);
+    expect(next.tx).toBeCloseTo(140); // wants sx == 20: 2*-60 + tx == 20 => tx == 140
+    expect(next.ty).toBe(100);
+  });
+
+  it('clamps an oversized margin to half the viewport so both edges never fight', () => {
+    const next = panToKeepVisible(view, 50, 50, 100, 100, 1000);
+    expect(next.tx).toBeCloseTo(0); // margin clamped to 50 == availW/2, point already exactly there
+    expect(next.ty).toBeCloseTo(0);
   });
 });

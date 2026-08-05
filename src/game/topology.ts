@@ -3,6 +3,18 @@
  * W x H (doubled cells) or m x n (blocks) can wrap its edges together in
  * different ways, giving different closed surfaces:
  *
+ * **Klein bottle and projective plane are currently disabled** from the
+ * shape picker (`dailyPuzzle.ts`'s `SHAPE_MODE_OPTIONS`/`ShapeModeOption.
+ * disabled`) — dealing with these nonorientable surfaces correctly has
+ * turned out to be an ongoing source of subtle bugs (wraparound corner
+ * cases in `regions.ts`/`geometry.ts`, wrong-neighbor bugs in rendering,
+ * etc. — see git history) that are too hard to fully stamp out for now.
+ * The code below (and `buildKleinBottlePuzzle`/`buildProjectivePlanePuzzle`
+ * in `puzzle.ts`) is left in place, still exercised by tests, and still used
+ * to regenerate any puzzle that was completed back when they *were*
+ * selectable — it's just no longer reachable as a choice for a new puzzle.
+ * May be revisited later.
+ *
  *  - **torus**: right edge glues straight to left edge, top glues straight
  *    to bottom. Both gluings preserve orientation.
  *  - **klein bottle**: right glues straight to left (like a torus), but top

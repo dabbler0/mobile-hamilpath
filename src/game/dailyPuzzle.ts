@@ -45,21 +45,39 @@ export function sizeOption(sizeKey: string): SizeOption {
  * `buildKleinBottlePuzzle`/`buildProjectivePlanePuzzle`). Stable
  * identifiers, like `SizeOption.key` — never rename once puzzles have been
  * played.
+ *
+ * `klein`/`projective` are currently disabled from the shape picker (see
+ * `ShapeModeOption.disabled`) — their nonorientable-surface generation has
+ * known bugs that are too hard to fix for now (`topology.ts`'s file doc
+ * comment) — but the type still includes them, and `generateDailyPuzzle`
+ * still handles them, purely so a puzzle completed while they *were*
+ * selectable keeps regenerating correctly for review.
  */
 export type ShapeMode = 'rect' | 'random' | 'toroidal' | 'klein' | 'projective';
 
 export interface ShapeModeOption {
   key: ShapeMode;
   label: string;
+  /**
+   * True for a shape mode that's currently broken and hidden from the shape
+   * picker (see `ShapeMode`'s doc comment). Kept in `SHAPE_MODE_OPTIONS`
+   * (rather than deleted) so `shapeModeOption` can still resolve a label for
+   * an already-completed puzzle of this shape — e.g. in the history list —
+   * even though it can no longer be freshly selected.
+   */
+  disabled?: boolean;
 }
 
 export const SHAPE_MODE_OPTIONS: readonly ShapeModeOption[] = [
   { key: 'rect', label: 'Rectangle' },
   { key: 'random', label: 'Random shape' },
   { key: 'toroidal', label: 'Toroidal' },
-  { key: 'klein', label: 'Klein bottle' },
-  { key: 'projective', label: 'Projective plane' },
+  { key: 'klein', label: 'Klein bottle', disabled: true },
+  { key: 'projective', label: 'Projective plane', disabled: true },
 ];
+
+/** The shape modes currently offered by the picker — `SHAPE_MODE_OPTIONS` minus any `disabled` entries (see `ShapeModeOption.disabled`). */
+export const SELECTABLE_SHAPE_MODE_OPTIONS: readonly ShapeModeOption[] = SHAPE_MODE_OPTIONS.filter((opt) => !opt.disabled);
 
 export function shapeModeOption(shapeModeKey: string): ShapeModeOption {
   const found = SHAPE_MODE_OPTIONS.find((s) => s.key === shapeModeKey);
