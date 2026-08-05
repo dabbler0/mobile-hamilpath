@@ -1,5 +1,6 @@
 import type { Rng } from './rng';
 import { generateHamiltonianCycle, generateShapeAndCycle, type Cell, type HamiltonianCycle } from './hamiltonianCycle';
+import type { EdgeKey } from './regions';
 import { hasBlock, randomShape, randomToroidalShape, rectShape, type Shape } from './shape';
 import { KLEIN_BOTTLE, PROJECTIVE_PLANE, type Topology, type TopologyKind } from './topology';
 
@@ -22,6 +23,133 @@ export interface Puzzle {
   startCell: Cell;
   /** Which wraparound surface the board is glued into (torus/klein/projective) — the last column/row wraps back to the first (with a coordinate flip for klein/projective, see `topology.ts`), both for adjacency and for face regions. Absent (falsy) for an ordinary rectangular or shaped board with no wraparound. */
   topology?: TopologyKind;
+  /**
+   * Extra constraints layered on top of the plain "visit every cell" rule:
+   * each collection names a handful of `adj` edges (a mix of hidden-solution
+   * and distractor edges — see `generateEdgeCollections`) and a `required`
+   * count that the player's finished loop must mark *exactly* that many of,
+   * no more, no fewer (`pathEdit.ts`'s `computeWin` enforces this; `render.ts`
+   * draws each collection in its own color with a badge showing `required`,
+   * turning error-colored when the current marked count doesn't match).
+   * Absent or empty for a puzzle generated with collections turned off
+   * (`NO_EDGE_COLLECTIONS`, the default) — every puzzle before this feature
+   * existed behaves exactly as if this were `[]`.
+   */
+  edgeCollections?: EdgeCollection[];
+}
+
+export interface EdgeCollection {
+  id: number;
+  /** The `adj` edges belonging to this collection — disjoint from every other collection's edges. */
+  edges: EdgeKey[];
+  /** Exactly how many of `edges` the finished loop must mark — see `Puzzle.edgeCollections`. */
+  required: number;
+}
+
+/**
+ * Tunable knobs for random edge-collection generation (see
+ * `generateEdgeCollections`). Part of `PuzzleId` (`dailyPuzzle.ts`) so a
+ * puzzle stays fully reproducible from its id alone.
+ */
+export interface EdgeCollectionParams {
+  /** Upper bound (inclusive) on how many collections a puzzle gets — the actual count is uniformly random in `[0, maxCollections]`. `0` disables the feature entirely: no collections are ever added, regardless of `minSize`/`maxSize`. */
+  maxCollections: number;
+  /** Inclusive bounds on how many edges land in each collection (usually 2-4). */
+  minSize: number;
+  maxSize: number;
+}
+
+/** The feature turned off — every puzzle generated before edge collections existed behaves exactly as if this were passed. */
+export const NO_EDGE_COLLECTIONS: EdgeCollectionParams = { maxCollections: 0, minSize: 2, maxSize: 4 };
+
+/** Sane input-range clamps for the UI controls that let a player set `EdgeCollectionParams` themselves (see `main.ts`). */
+export const EDGE_COLLECTION_LIMITS = {
+  maxCollections: { min: 0, max: 6 },
+  size: { min: 2, max: 8 },
+} as const;
+
+/** Sums how many of a collection's edges are currently marked — used both by `pathEdit.ts`'s win check (must equal `required` exactly) and by `render.ts` (to decide whether to draw the collection's badge in its normal or error color). */
+export function countCollectionEdges(collection: EdgeCollection, edges: ReadonlySet<EdgeKey>): number {
+  let n = 0;
+  for (const ek of collection.edges) {
+    if (edges.has(ek)) n++;
+  }
+  return n;
+}
+
+function edgeKeyOf(a: Cell, b: Cell): EdgeKey {
+  const ka = key(a[0], a[1]);
+  const kb = key(b[0], b[1]);
+  return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+}
+
+function shuffled<T>(items: readonly T[], rng: Rng): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * Picks `size` not-yet-`used` edges for one collection out of the two pools,
+ * preferring at least one of each (when both have one available) so a
+ * collection is usually a genuine mix of "real" solution edges and "fake"
+ * distractor edges, per this feature's whole point, rather than by chance
+ * landing on all of one kind. Falls back to filling entirely from whichever
+ * pool has edges left (e.g. a zero-density puzzle has no distractor edges at
+ * all) rather than failing — may return fewer than `size` edges if both
+ * pools run dry, which the caller treats as "stop, no more collections fit".
+ */
+function pickCollectionEdges(cyclePool: readonly EdgeKey[], distractorPool: readonly EdgeKey[], used: ReadonlySet<EdgeKey>, size: number, rng: Rng): EdgeKey[] {
+  const cycleAvail = shuffled(cyclePool.filter((e) => !used.has(e)), rng);
+  const distractorAvail = shuffled(distractorPool.filter((e) => !used.has(e)), rng);
+  const picked: EdgeKey[] = [];
+  if (cycleAvail.length > 0) picked.push(cycleAvail.shift()!);
+  if (picked.length < size && distractorAvail.length > 0) picked.push(distractorAvail.shift()!);
+  const rest = shuffled([...cycleAvail, ...distractorAvail], rng);
+  while (picked.length < size && rest.length > 0) picked.push(rest.shift()!);
+  return picked;
+}
+
+/** Exactly half of `size` when that's a whole number; otherwise floor or ceil with equal probability. */
+function pickRequiredCount(size: number, rng: Rng): number {
+  const lo = Math.floor(size / 2);
+  const hi = Math.ceil(size / 2);
+  return lo === hi ? lo : rng() < 0.5 ? lo : hi;
+}
+
+/**
+ * Builds `Puzzle.edgeCollections`: a random number (uniform in
+ * `[0, params.maxCollections]`) of collections, each a random size
+ * (uniform in `[params.minSize, params.maxSize]`) drawn from a mix of the
+ * hidden solution cycle's edges and the distractor edges just added (see
+ * `pickCollectionEdges`), each requiring roughly half its own edges marked
+ * (see `pickRequiredCount`). Every edge is used in at most one collection —
+ * `used` accumulates across the whole call — so a color/badge on the board
+ * is never ambiguous about which collection it belongs to. Stops early
+ * (returning fewer than `count` collections) once there aren't enough
+ * unused edges left for a meaningful (>=2 edge) collection.
+ * `params.maxCollections <= 0` (`NO_EDGE_COLLECTIONS`, the default) always
+ * returns `[]` without consuming any `rng` calls, so puzzles generated with
+ * the feature off are byte-identical to puzzles from before it existed.
+ */
+export function generateEdgeCollections(cycleEdges: readonly EdgeKey[], distractorEdges: readonly EdgeKey[], params: EdgeCollectionParams, rng: Rng): EdgeCollection[] {
+  if (params.maxCollections <= 0) return [];
+  const count = Math.floor(rng() * (params.maxCollections + 1));
+  const collections: EdgeCollection[] = [];
+  const used = new Set<EdgeKey>();
+  for (let i = 0; i < count; i++) {
+    const lo = Math.min(params.minSize, params.maxSize);
+    const hi = Math.max(params.minSize, params.maxSize);
+    const size = lo + Math.floor(rng() * (hi - lo + 1));
+    const edges = pickCollectionEdges(cycleEdges, distractorEdges, used, size, rng);
+    if (edges.length < 2) break; // not enough unused edges left for a meaningful collection
+    for (const e of edges) used.add(e);
+    collections.push({ id: collections.length, edges, required: pickRequiredCount(edges.length, rng) });
+  }
+  return collections;
 }
 
 /** The number of cells actually in the puzzle — not `W * H`, which is only a bounding box for a non-rectangular shape (some cells inside it may not exist). */
@@ -50,17 +178,20 @@ function makeAdjBuilder() {
  * probability `density`), so the hidden solution isn't the only path
  * visible.
  */
-function assemblePuzzle(shape: Shape, cycle: HamiltonianCycle, density: number, rng: Rng): Puzzle {
+function assemblePuzzle(shape: Shape, cycle: HamiltonianCycle, density: number, rng: Rng, collectionParams: EdgeCollectionParams): Puzzle {
   const { cells, W, H } = cycle;
   const { adj, ensure, addEdge } = makeAdjBuilder();
+  const cycleEdges: EdgeKey[] = [];
 
   for (let i = 0; i < cells.length; i++) {
     const [x1, y1] = cells[i];
     const [x2, y2] = cells[(i + 1) % cells.length];
     addEdge(x1, y1, x2, y2);
+    cycleEdges.push(edgeKeyOf([x1, y1], [x2, y2]));
   }
 
   const exists = (x: number, y: number) => hasBlock(shape, x >> 1, y >> 1);
+  const distractorEdges: EdgeKey[] = [];
 
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) {
@@ -68,12 +199,19 @@ function assemblePuzzle(shape: Shape, cycle: HamiltonianCycle, density: number, 
       ensure(key(x, y));
       const rightK = key(x + 1, y);
       const downK = key(x, y + 1);
-      if (x + 1 < W && exists(x + 1, y) && !adj.get(key(x, y))!.has(rightK) && rng() < density) addEdge(x, y, x + 1, y);
-      if (y + 1 < H && exists(x, y + 1) && !adj.get(key(x, y))!.has(downK) && rng() < density) addEdge(x, y, x, y + 1);
+      if (x + 1 < W && exists(x + 1, y) && !adj.get(key(x, y))!.has(rightK) && rng() < density) {
+        addEdge(x, y, x + 1, y);
+        distractorEdges.push(edgeKeyOf([x, y], [x + 1, y]));
+      }
+      if (y + 1 < H && exists(x, y + 1) && !adj.get(key(x, y))!.has(downK) && rng() < density) {
+        addEdge(x, y, x, y + 1);
+        distractorEdges.push(edgeKeyOf([x, y], [x, y + 1]));
+      }
     }
   }
 
-  return { adj, W, H, startCell: cells[0] };
+  const edgeCollections = generateEdgeCollections(cycleEdges, distractorEdges, collectionParams, rng);
+  return { adj, W, H, startCell: cells[0], edgeCollections };
 }
 
 /**
@@ -84,15 +222,15 @@ function assemblePuzzle(shape: Shape, cycle: HamiltonianCycle, density: number, 
  * `buildRandomShapePuzzle`, which retries on the rare unlucky shape (see
  * `generateShapeAndCycle`).
  */
-export function buildPuzzle(shape: Shape, density: number, rng: Rng): Puzzle {
+export function buildPuzzle(shape: Shape, density: number, rng: Rng, collectionParams: EdgeCollectionParams = NO_EDGE_COLLECTIONS): Puzzle {
   const cycle = generateHamiltonianCycle(shape, rng);
-  return assemblePuzzle(shape, cycle, density, rng);
+  return assemblePuzzle(shape, cycle, density, rng, collectionParams);
 }
 
 /** Builds a puzzle on a random connected polyomino of `m * n` blocks (see `randomShape`). */
-export function buildRandomShapePuzzle(m: number, n: number, density: number, rng: Rng): Puzzle {
+export function buildRandomShapePuzzle(m: number, n: number, density: number, rng: Rng, collectionParams: EdgeCollectionParams = NO_EDGE_COLLECTIONS): Puzzle {
   const { shape, cycle } = generateShapeAndCycle((r) => randomShape(m, n, r), rng);
-  return assemblePuzzle(shape, cycle, density, rng);
+  return assemblePuzzle(shape, cycle, density, rng, collectionParams);
 }
 
 /**
@@ -108,7 +246,7 @@ export function buildRandomShapePuzzle(m: number, n: number, density: number, rn
  * neighbor pair including the wraparound ones (column W-1 to column 0, row
  * H-1 to row 0), so some of the extra paths cross the wraparound too.
  */
-export function buildToroidalPuzzle(m: number, n: number, density: number, rng: Rng): Puzzle {
+export function buildToroidalPuzzle(m: number, n: number, density: number, rng: Rng, collectionParams: EdgeCollectionParams = NO_EDGE_COLLECTIONS): Puzzle {
   const { cycle } = generateShapeAndCycle((r) => randomToroidalShape(m, n, r), rng);
   const W = 2 * m;
   const H = 2 * n;
@@ -116,26 +254,38 @@ export function buildToroidalPuzzle(m: number, n: number, density: number, rng: 
   const wrapY = (y: number) => ((y % H) + H) % H;
 
   const { adj, ensure, addEdge } = makeAdjBuilder();
+  const cycleEdges: EdgeKey[] = [];
 
   for (let i = 0; i < cycle.cells.length; i++) {
     const [x1, y1] = cycle.cells[i];
     const [x2, y2] = cycle.cells[(i + 1) % cycle.cells.length];
-    addEdge(wrapX(x1), wrapY(y1), wrapX(x2), wrapY(y2));
+    const a: Cell = [wrapX(x1), wrapY(y1)];
+    const b: Cell = [wrapX(x2), wrapY(y2)];
+    addEdge(a[0], a[1], b[0], b[1]);
+    cycleEdges.push(edgeKeyOf(a, b));
   }
 
   // The reduction fills the whole rectangle, so every canonical cell exists — no shape-membership check needed here.
+  const distractorEdges: EdgeKey[] = [];
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) {
       ensure(key(x, y));
       const rx = (x + 1) % W;
       const ry = (y + 1) % H;
-      if (!adj.get(key(x, y))!.has(key(rx, y)) && rng() < density) addEdge(x, y, rx, y);
-      if (!adj.get(key(x, y))!.has(key(x, ry)) && rng() < density) addEdge(x, y, x, ry);
+      if (!adj.get(key(x, y))!.has(key(rx, y)) && rng() < density) {
+        addEdge(x, y, rx, y);
+        distractorEdges.push(edgeKeyOf([x, y], [rx, y]));
+      }
+      if (!adj.get(key(x, y))!.has(key(x, ry)) && rng() < density) {
+        addEdge(x, y, x, ry);
+        distractorEdges.push(edgeKeyOf([x, y], [x, ry]));
+      }
     }
   }
 
   const [sx, sy] = cycle.cells[0];
-  return { adj, W, H, startCell: [wrapX(sx), wrapY(sy)], topology: 'torus' };
+  const edgeCollections = generateEdgeCollections(cycleEdges, distractorEdges, collectionParams, rng);
+  return { adj, W, H, startCell: [wrapX(sx), wrapY(sy)], topology: 'torus', edgeCollections };
 }
 
 /**
@@ -163,37 +313,47 @@ export function buildToroidalPuzzle(m: number, n: number, density: number, rng: 
  * original seed cycle is just *a* Hamiltonian cycle in the graph, not
  * necessarily *the* one the player ends up tracing.
  */
-function buildWrappedRectPuzzle(m: number, n: number, density: number, rng: Rng, topology: Topology): Puzzle {
+function buildWrappedRectPuzzle(m: number, n: number, density: number, rng: Rng, topology: Topology, collectionParams: EdgeCollectionParams): Puzzle {
   const cycle = generateHamiltonianCycle(rectShape(m, n), rng);
   const { cells, W, H } = cycle;
   const { adj, ensure, addEdge } = makeAdjBuilder();
+  const cycleEdges: EdgeKey[] = [];
 
   for (let i = 0; i < cells.length; i++) {
     const [x1, y1] = cells[i];
     const [x2, y2] = cells[(i + 1) % cells.length];
     addEdge(x1, y1, x2, y2);
+    cycleEdges.push(edgeKeyOf([x1, y1], [x2, y2]));
   }
 
+  const distractorEdges: EdgeKey[] = [];
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) {
       ensure(key(x, y));
       const right = x + 1 < W ? { x: x + 1, y } : topology.wrapX(x + 1, y, W, H);
       const rightK = key(right.x, right.y);
-      if (!adj.get(key(x, y))!.has(rightK) && rng() < density) addEdge(x, y, right.x, right.y);
+      if (!adj.get(key(x, y))!.has(rightK) && rng() < density) {
+        addEdge(x, y, right.x, right.y);
+        distractorEdges.push(edgeKeyOf([x, y], [right.x, right.y]));
+      }
 
       const down = y + 1 < H ? { x, y: y + 1 } : topology.wrapY(x, y + 1, W, H);
       const downK = key(down.x, down.y);
-      if (!adj.get(key(x, y))!.has(downK) && rng() < density) addEdge(x, y, down.x, down.y);
+      if (!adj.get(key(x, y))!.has(downK) && rng() < density) {
+        addEdge(x, y, down.x, down.y);
+        distractorEdges.push(edgeKeyOf([x, y], [down.x, down.y]));
+      }
     }
   }
 
-  return { adj, W, H, startCell: cells[0], topology: topology.kind };
+  const edgeCollections = generateEdgeCollections(cycleEdges, distractorEdges, collectionParams, rng);
+  return { adj, W, H, startCell: cells[0], topology: topology.kind, edgeCollections };
 }
 
-export function buildKleinBottlePuzzle(m: number, n: number, density: number, rng: Rng): Puzzle {
-  return buildWrappedRectPuzzle(m, n, density, rng, KLEIN_BOTTLE);
+export function buildKleinBottlePuzzle(m: number, n: number, density: number, rng: Rng, collectionParams: EdgeCollectionParams = NO_EDGE_COLLECTIONS): Puzzle {
+  return buildWrappedRectPuzzle(m, n, density, rng, KLEIN_BOTTLE, collectionParams);
 }
 
-export function buildProjectivePlanePuzzle(m: number, n: number, density: number, rng: Rng): Puzzle {
-  return buildWrappedRectPuzzle(m, n, density, rng, PROJECTIVE_PLANE);
+export function buildProjectivePlanePuzzle(m: number, n: number, density: number, rng: Rng, collectionParams: EdgeCollectionParams = NO_EDGE_COLLECTIONS): Puzzle {
+  return buildWrappedRectPuzzle(m, n, density, rng, PROJECTIVE_PLANE, collectionParams);
 }

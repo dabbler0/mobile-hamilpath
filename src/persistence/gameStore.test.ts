@@ -2,6 +2,7 @@ import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createHistory, recordMove, type HistoryState } from '../game/history';
 import { createInitialPath } from '../game/pathEdit';
+import type { EdgeCollectionParams } from '../game/puzzle';
 import { clearAllStoresForTests, putRecord, STORES } from './db';
 import {
   clearInProgress,
@@ -165,6 +166,41 @@ describe('completed games', () => {
     });
     expect(await listCompleted()).toEqual([]);
     expect(await getCompleted(id)).toBeUndefined();
+  });
+
+  it('leaves progress/in-progress/completed keys untouched when collections are off, matching pre-feature behavior', async () => {
+    const id = { day: '2026-07-10', sizeKey: 'mini', shapeMode: RECT, index: 0 };
+    await saveInProgress(id, ['0,0|1,0']);
+    expect(await getInProgress(id.day, id.sizeKey, id.shapeMode)).toBeDefined();
+    expect((await getInProgress(id.day, id.sizeKey, id.shapeMode))?.id).toBe('2026-07-10::mini::rect');
+    await recordCompletion(id, ['0,0|1,0']);
+    expect((await getCompleted(id))?.id).toBe('2026-07-10::mini::rect::0');
+  });
+
+  it('tracks a distinct edge-collections setting as its own independent progression', async () => {
+    const day = '2026-07-10';
+    const on: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
+    await recordCompletion({ day, sizeKey: 'mini', shapeMode: RECT, index: 0, collections: on }, ['0,0|1,0']);
+    expect(await getUnlockedIndex(day, 'mini', RECT, on)).toBe(1);
+    expect(await getUnlockedIndex(day, 'mini', RECT)).toBe(0); // the "off" bucket is unaffected
+  });
+
+  it('distinguishes two different active edge-collections settings from each other', async () => {
+    const day = '2026-07-10';
+    const a: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
+    const b: EdgeCollectionParams = { maxCollections: 3, minSize: 2, maxSize: 4 };
+    await saveInProgress({ day, sizeKey: 'mini', shapeMode: RECT, index: 0, collections: a }, ['0,0|1,0']);
+    expect(await getInProgress(day, 'mini', RECT, b)).toBeUndefined();
+    expect((await getInProgress(day, 'mini', RECT, a))?.edges).toEqual(['0,0|1,0']);
+  });
+
+  it('round-trips the collections params on in-progress and completed records', async () => {
+    const on: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
+    const id = { day: '2026-07-10', sizeKey: 'mini', shapeMode: RECT, index: 0, collections: on };
+    await saveInProgress(id, ['0,0|1,0']);
+    expect((await getInProgress(id.day, id.sizeKey, id.shapeMode, on))?.collections).toEqual(on);
+    await recordCompletion(id, ['0,0|1,0']);
+    expect((await getCompleted(id))?.collections).toEqual(on);
   });
 
   it('defaults a pre-board-shape completed record (no shapeMode) to rect in listCompleted, instead of crashing the history view', async () => {

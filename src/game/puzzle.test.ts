@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import { mulberry32 } from './rng';
 import { rectShape, randomShape, randomToroidalShape } from './shape';
-import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, parseKey, totalCells } from './puzzle';
+import {
+  buildKleinBottlePuzzle,
+  buildProjectivePlanePuzzle,
+  buildPuzzle,
+  buildRandomShapePuzzle,
+  buildToroidalPuzzle,
+  countCollectionEdges,
+  generateEdgeCollections,
+  key,
+  NO_EDGE_COLLECTIONS,
+  parseKey,
+  totalCells,
+  type EdgeCollectionParams,
+} from './puzzle';
 import { KLEIN_BOTTLE, PROJECTIVE_PLANE, type Topology } from './topology';
 
 function manhattan(a: readonly [number, number], b: readonly [number, number]): number {
@@ -221,6 +234,72 @@ describe.each([
         expect(() => build(m, n, 0.28, mulberry32(seed))).not.toThrow();
       }
     }
+  });
+});
+
+describe('edge collections', () => {
+  it('defaults to no collections at all (NO_EDGE_COLLECTIONS)', () => {
+    const puzzle = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(1));
+    expect(puzzle.edgeCollections).toEqual([]);
+  });
+
+  it('leaves adjacency byte-identical whether or not NO_EDGE_COLLECTIONS is passed explicitly (consumes no rng calls when off)', () => {
+    const withDefault = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(7));
+    const explicit = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(7), NO_EDGE_COLLECTIONS);
+    expect([...withDefault.adj.entries()].map(([k, v]) => [k, [...v].sort()])).toEqual([...explicit.adj.entries()].map(([k, v]) => [k, [...v].sort()]));
+  });
+
+  it('produces between 0 and maxCollections collections, each within [minSize, maxSize], for many seeds', () => {
+    const params: EdgeCollectionParams = { maxCollections: 4, minSize: 2, maxSize: 4 };
+    for (let seed = 0; seed < 30; seed++) {
+      const puzzle = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(seed), params);
+      const collections = puzzle.edgeCollections!;
+      expect(collections.length).toBeLessThanOrEqual(params.maxCollections);
+      for (const c of collections) {
+        expect(c.edges.length).toBeGreaterThanOrEqual(params.minSize);
+        expect(c.edges.length).toBeLessThanOrEqual(params.maxSize);
+        expect(c.required).toBeGreaterThanOrEqual(Math.floor(c.edges.length / 2));
+        expect(c.required).toBeLessThanOrEqual(Math.ceil(c.edges.length / 2));
+      }
+    }
+  });
+
+  it('every collection edge is a real edge of the puzzle graph', () => {
+    const puzzle = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(3), { maxCollections: 4, minSize: 2, maxSize: 4 });
+    for (const collection of puzzle.edgeCollections!) {
+      for (const ek of collection.edges) {
+        const [ka, kb] = ek.split('|');
+        expect(puzzle.adj.get(ka)?.has(kb)).toBe(true);
+      }
+    }
+  });
+
+  it('never reuses an edge across two different collections', () => {
+    const puzzle = buildPuzzle(rectShape(6, 9), 0.35, mulberry32(11), { maxCollections: 4, minSize: 2, maxSize: 4 });
+    const seen = new Set<string>();
+    for (const collection of puzzle.edgeCollections!) {
+      for (const ek of collection.edges) {
+        expect(seen.has(ek)).toBe(false);
+        seen.add(ek);
+      }
+    }
+  });
+
+  it('is deterministic for the same seed and params', () => {
+    const params: EdgeCollectionParams = { maxCollections: 3, minSize: 2, maxSize: 4 };
+    const a = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(42), params);
+    const b = buildPuzzle(rectShape(4, 6), 0.3, mulberry32(42), params);
+    expect(a.edgeCollections).toEqual(b.edgeCollections);
+  });
+
+  it('generateEdgeCollections returns [] when maxCollections is 0, regardless of size bounds', () => {
+    expect(generateEdgeCollections(['a|b', 'b|c'], ['a|c'], { maxCollections: 0, minSize: 2, maxSize: 8 }, mulberry32(1))).toEqual([]);
+  });
+
+  it('countCollectionEdges counts only currently-marked edges of one collection', () => {
+    const collection = { id: 0, edges: ['a|b', 'b|c', 'c|d'], required: 2 };
+    expect(countCollectionEdges(collection, new Set(['a|b', 'c|d', 'x|y']))).toBe(2);
+    expect(countCollectionEdges(collection, new Set())).toBe(0);
   });
 });
 

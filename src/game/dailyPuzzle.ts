@@ -1,4 +1,13 @@
-import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, type Puzzle } from './puzzle';
+import {
+  buildKleinBottlePuzzle,
+  buildProjectivePlanePuzzle,
+  buildPuzzle,
+  buildRandomShapePuzzle,
+  buildToroidalPuzzle,
+  NO_EDGE_COLLECTIONS,
+  type EdgeCollectionParams,
+  type Puzzle,
+} from './puzzle';
 import { mulberry32 } from './rng';
 import { rectShape } from './shape';
 
@@ -66,6 +75,16 @@ export interface PuzzleId {
   shapeMode: ShapeMode;
   /** 0-based position in that day+size+shape's infinite sequence. */
   index: number;
+  /**
+   * Random edge-collection generation parameters (see `puzzle.ts`'s
+   * `EdgeCollectionParams`). Optional, defaulting to `NO_EDGE_COLLECTIONS`
+   * (the feature off) wherever read — *not* a distinct identity from
+   * explicitly passing `NO_EDGE_COLLECTIONS` (see `collectionsKeySuffix`),
+   * so every `PuzzleId` from before this feature existed, and every puzzle
+   * generated with the feature left off, keeps exactly the same hash/seed
+   * and storage keys it always had.
+   */
+  collections?: EdgeCollectionParams;
 }
 
 /** The local calendar day, as "YYYY-MM-DD" (not UTC — puzzles roll over at local midnight). */
@@ -76,8 +95,23 @@ export function todayKey(now: Date = new Date()): string {
   return `${year}-${month}-${day}`;
 }
 
+/**
+ * Suffix appended to a puzzle's hash/storage keys for its edge-collection
+ * params — `''` (no suffix at all) whenever collections are off (`params`
+ * absent, or `maxCollections <= 0`), so a puzzle id with the feature untouched
+ * hashes and stores byte-identically to one from before this feature
+ * existed. Only turning the feature on actually changes the key, which is
+ * exactly what makes two different collection configs (or "off" vs "on")
+ * distinct, independently-progressing puzzle sequences — the same trick
+ * `shapeMode` already relies on for board shapes.
+ */
+export function collectionsKeySuffix(params: EdgeCollectionParams | undefined): string {
+  if (!params || params.maxCollections <= 0) return '';
+  return `::c${params.maxCollections}.${params.minSize}.${params.maxSize}`;
+}
+
 export function puzzleIdKey(id: PuzzleId): string {
-  return `${id.day}::${id.sizeKey}::${id.shapeMode}::${id.index}`;
+  return `${id.day}::${id.sizeKey}::${id.shapeMode}::${id.index}${collectionsKeySuffix(id.collections)}`;
 }
 
 /** FNV-1a: a small, deterministic string hash, used to turn a puzzle id into a mulberry32 seed. */
@@ -97,16 +131,17 @@ export function puzzleSeed(id: PuzzleId): number {
 export function generateDailyPuzzle(id: PuzzleId): Puzzle {
   const { m, n } = sizeOption(id.sizeKey);
   const rng = mulberry32(puzzleSeed(id));
+  const collections = id.collections ?? NO_EDGE_COLLECTIONS;
   switch (id.shapeMode) {
     case 'rect':
-      return buildPuzzle(rectShape(m, n), DAILY_PUZZLE_DENSITY, rng);
+      return buildPuzzle(rectShape(m, n), DAILY_PUZZLE_DENSITY, rng, collections);
     case 'random':
-      return buildRandomShapePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+      return buildRandomShapePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng, collections);
     case 'toroidal':
-      return buildToroidalPuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+      return buildToroidalPuzzle(m, n, DAILY_PUZZLE_DENSITY, rng, collections);
     case 'klein':
-      return buildKleinBottlePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+      return buildKleinBottlePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng, collections);
     case 'projective':
-      return buildProjectivePlanePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng);
+      return buildProjectivePlanePuzzle(m, n, DAILY_PUZZLE_DENSITY, rng, collections);
   }
 }
