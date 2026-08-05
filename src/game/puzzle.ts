@@ -92,27 +92,6 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
   return arr;
 }
 
-/**
- * Picks `size` not-yet-`used` edges for one collection out of the two pools,
- * preferring at least one of each (when both have one available) so a
- * collection is usually a genuine mix of "real" solution edges and "fake"
- * distractor edges, per this feature's whole point, rather than by chance
- * landing on all of one kind. Falls back to filling entirely from whichever
- * pool has edges left (e.g. a zero-density puzzle has no distractor edges at
- * all) rather than failing — may return fewer than `size` edges if both
- * pools run dry, which the caller treats as "stop, no more collections fit".
- */
-function pickCollectionEdges(cyclePool: readonly EdgeKey[], distractorPool: readonly EdgeKey[], used: ReadonlySet<EdgeKey>, size: number, rng: Rng): EdgeKey[] {
-  const cycleAvail = shuffled(cyclePool.filter((e) => !used.has(e)), rng);
-  const distractorAvail = shuffled(distractorPool.filter((e) => !used.has(e)), rng);
-  const picked: EdgeKey[] = [];
-  if (cycleAvail.length > 0) picked.push(cycleAvail.shift()!);
-  if (picked.length < size && distractorAvail.length > 0) picked.push(distractorAvail.shift()!);
-  const rest = shuffled([...cycleAvail, ...distractorAvail], rng);
-  while (picked.length < size && rest.length > 0) picked.push(rest.shift()!);
-  return picked;
-}
-
 /** Exactly half of `size` when that's a whole number; otherwise floor or ceil with equal probability. */
 function pickRequiredCount(size: number, rng: Rng): number {
   const lo = Math.floor(size / 2);
@@ -121,12 +100,45 @@ function pickRequiredCount(size: number, rng: Rng): number {
 }
 
 /**
+ * Picks a `size`-edge collection whose cycle/distractor split is *forced* to
+ * match `required`: exactly `required` not-yet-`used` edges drawn from the
+ * cycle pool, and `size - required` from the distractor pool, shuffled
+ * together after. This is what guarantees the generated solution — which
+ * marks all and only its own cycle edges — always marks exactly `required`
+ * of this collection's edges: `required` isn't a number picked independently
+ * of the collection's actual contents (the earlier bug), it's the exact
+ * count of cycle edges the collection is built out of.
+ *
+ * Falls back to fewer edges on either side if a pool has run dry (e.g. a
+ * zero-density puzzle has no distractor edges at all, or an earlier
+ * collection already claimed the last unused cycle edge) rather than padding
+ * from the other side — padding would reintroduce the same mismatch this
+ * fix removes, since a padded-in edge from the "wrong" pool would throw off
+ * the cycle-edge count without changing `required` to match. The caller
+ * reports back how many cycle edges actually made it in (`required`), which
+ * may be less than requested when a pool ran short.
+ */
+function pickCollectionEdges(cyclePool: readonly EdgeKey[], distractorPool: readonly EdgeKey[], used: ReadonlySet<EdgeKey>, size: number, required: number, rng: Rng): { edges: EdgeKey[]; required: number } {
+  const cycleAvail = shuffled(cyclePool.filter((e) => !used.has(e)), rng);
+  const distractorAvail = shuffled(distractorPool.filter((e) => !used.has(e)), rng);
+  const nCycle = Math.min(required, cycleAvail.length);
+  const nDistractor = Math.min(size - required, distractorAvail.length);
+  const edges = shuffled([...cycleAvail.slice(0, nCycle), ...distractorAvail.slice(0, nDistractor)], rng);
+  return { edges, required: nCycle };
+}
+
+/**
  * Builds `Puzzle.edgeCollections`: a random number (uniform in
- * `[0, params.maxCollections]`) of collections, each a random size
- * (uniform in `[params.minSize, params.maxSize]`) drawn from a mix of the
- * hidden solution cycle's edges and the distractor edges just added (see
- * `pickCollectionEdges`), each requiring roughly half its own edges marked
- * (see `pickRequiredCount`). Every edge is used in at most one collection —
+ * `[0, params.maxCollections]`) of collections, each a random size (uniform
+ * in `[params.minSize, params.maxSize]`). For each, `required` is rolled
+ * first (roughly half of `size`, see `pickRequiredCount`), then
+ * `pickCollectionEdges` builds the collection *to match* — drawing exactly
+ * `required` edges from the hidden solution cycle and the rest from
+ * distractor edges — rather than mixing freely and hoping `required` lines
+ * up with whatever composition resulted. This is what guarantees the
+ * generated solution always satisfies every collection, regardless of luck:
+ * the collection's cycle-edge count and its `required` are now the same
+ * number by construction. Every edge is used in at most one collection —
  * `used` accumulates across the whole call — so a color/badge on the board
  * is never ambiguous about which collection it belongs to. Stops early
  * (returning fewer than `count` collections) once there aren't enough
@@ -144,10 +156,11 @@ export function generateEdgeCollections(cycleEdges: readonly EdgeKey[], distract
     const lo = Math.min(params.minSize, params.maxSize);
     const hi = Math.max(params.minSize, params.maxSize);
     const size = lo + Math.floor(rng() * (hi - lo + 1));
-    const edges = pickCollectionEdges(cycleEdges, distractorEdges, used, size, rng);
+    const requiredGoal = pickRequiredCount(size, rng);
+    const { edges, required } = pickCollectionEdges(cycleEdges, distractorEdges, used, size, requiredGoal, rng);
     if (edges.length < 2) break; // not enough unused edges left for a meaningful collection
     for (const e of edges) used.add(e);
-    collections.push({ id: collections.length, edges, required: pickRequiredCount(edges.length, rng) });
+    collections.push({ id: collections.length, edges, required });
   }
   return collections;
 }
