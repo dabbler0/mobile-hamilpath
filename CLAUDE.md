@@ -264,13 +264,20 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   `COLORS.winCometDark` the longer it's been since the comet passed over
   that edge — reaching fully dark right as the comet is about to lap back
   around and relight it, since the fade's duration is deliberately exactly
-  one full lap (`render.ts`'s `computeCometColors`: `cells.length *
+  one full lap (`render.ts`'s `computeCometStyles`: `cells.length *
   RIPPLE_STAGGER_MS`), which is what makes the fade pace scale with board
-  size the way a bigger loop takes a bigger lap. This replaced an earlier,
-  simpler "dot traveling around the loop" animation — the comet reuses the
-  same underlying cell-cycle data (`game/loopOrder.ts`'s `orderLoopCells`,
-  cached in `main.ts`'s `winLoopCells`/`winLoopEdgesRef` exactly as the dot
-  used it) but colors the whole loop instead of drawing a separate marker.
+  size the way a bigger loop takes a bigger lap. Its leading edge also
+  bulges past normal width and back — the exact same `PULSE_MS`
+  duration/`PULSE_BULGE` shape as an ordinary recolor pulse's width bulge,
+  just re-triggered every lap at the comet's current position instead of
+  once at a scheduled delay — so the comet's frontier visibly "grows and
+  shrinks" the same way the pre-comet ripple's did, rather than being a
+  flat-width color fade with no motion of its own. This replaced an
+  earlier, simpler "dot traveling around the loop" animation — the comet
+  reuses the same underlying cell-cycle data (`game/loopOrder.ts`'s
+  `orderLoopCells`, cached in `main.ts`'s `winLoopCells`/`winLoopEdgesRef`
+  exactly as the dot used it) but colors (and locally widens) the whole
+  loop instead of drawing a separate marker.
   - **Waiting for the ripple to actually finish**: the comet must not start
     until the winning ripple above has *completely* finished (not merely
     "the board looks all green," since the ripple's own pulses already make

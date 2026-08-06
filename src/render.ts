@@ -87,7 +87,7 @@ const COLORS = {
   markedWon: '#35c46a',
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
-  /** The far, faded end of the win-comet's tail (see `computeCometColors`) — `markedWon` itself is reused as the comet's bright head color, so a completed puzzle's coloring stays anchored to the same "solved" green it's always been, just animated now. */
+  /** The far, faded end of the win-comet's tail (see `computeCometStyles`) — `markedWon` itself is reused as the comet's bright head color, so a completed puzzle's coloring stays anchored to the same "solved" green it's always been, just animated now. */
   winCometDark: '#173a24',
   /** Badge color for an edge collection whose currently-marked count doesn't match its `required` count — see `drawEdgeCollectionBadges`. */
   collectionError: '#e6483c',
@@ -95,21 +95,35 @@ const COLORS = {
   collectionBadgeText: '#ffffff',
 };
 
+export interface CometStyle {
+  color: string;
+  /** Multiplies the ordinary marked-edge width — 1 well behind the comet's head, bulging up past 1 right at/just behind it (see `computeCometStyles`). */
+  widthMultiplier: number;
+}
+
 /**
- * Colors every edge of a completed loop for the win-comet: a bright head
- * (`COLORS.markedWon`) travels forward around `cells` at a constant pace
- * (`RIPPLE_STAGGER_MS` per hop, same as an ordinary recolor ripple), with
- * each edge fading from bright to `COLORS.winCometDark` the longer it's
- * been since the comet last passed over it — reaching fully dark right as
- * the comet is about to lap back around to it, since the fade's duration
- * is exactly one full lap (`cells.length * RIPPLE_STAGGER_MS`), which is
- * what makes the fade pace scale with board size the way `main.ts`'s doc
- * comment on this feature describes.
+ * Colors (and, right at the comet's head, temporarily widens) every edge of
+ * a completed loop for the win-comet: a bright head (`COLORS.markedWon`)
+ * travels forward around `cells` at a constant pace (`RIPPLE_STAGGER_MS`
+ * per hop, same as an ordinary recolor ripple), with each edge fading from
+ * bright to `COLORS.winCometDark` the longer it's been since the comet last
+ * passed over it — reaching fully dark right as the comet is about to lap
+ * back around to it, since the fade's duration is exactly one full lap
+ * (`cells.length * RIPPLE_STAGGER_MS`), which is what makes the fade pace
+ * scale with board size the way `main.ts`'s doc comment on this feature
+ * describes.
+ *
+ * The width bulge mirrors an ordinary recolor pulse exactly — same
+ * `PULSE_MS` duration and `PULSE_BULGE` shape — just re-triggered every lap
+ * at the comet's current position instead of once at a scheduled delay, so
+ * the comet's leading edge visibly "grows and shrinks" the same way the
+ * pre-comet ripple's frontier does, rather than being a flat-width color
+ * fade with no motion of its own.
  */
-function computeCometColors(cells: ReadonlyArray<readonly [number, number]>, startIndex: number, startTime: number, now: number): Map<EdgeKey, string> {
+function computeCometStyles(cells: ReadonlyArray<readonly [number, number]>, startIndex: number, startTime: number, now: number): Map<EdgeKey, CometStyle> {
   const n = cells.length;
-  const colors = new Map<EdgeKey, string>();
-  if (n < 2) return colors;
+  const styles = new Map<EdgeKey, CometStyle>();
+  if (n < 2) return styles;
   const elapsedHops = (now - startTime) / RIPPLE_STAGGER_MS;
   const cometPos = (((startIndex + elapsedHops) % n) + n) % n;
   for (let i = 0; i < n; i++) {
@@ -117,10 +131,13 @@ function computeCometColors(cells: ReadonlyArray<readonly [number, number]>, sta
     // How many hops ago the comet was at this edge's position, wrapping — 0
     // right under the comet's head, approaching `n` (a full lap) just before
     // it laps back around to relight this edge.
-    const sincePassed = (((cometPos - i) % n) + n) % n;
-    colors.set(ek, lerpColor(COLORS.markedWon, COLORS.winCometDark, sincePassed / n));
+    const sincePassedHops = (((cometPos - i) % n) + n) % n;
+    const color = lerpColor(COLORS.markedWon, COLORS.winCometDark, sincePassedHops / n);
+    const tPulse = (sincePassedHops * RIPPLE_STAGGER_MS) / PULSE_MS;
+    const widthMultiplier = tPulse <= 1 ? 1 + PULSE_BULGE * Math.sin(Math.PI * tPulse) : 1;
+    styles.set(ek, { color, widthMultiplier });
   }
-  return colors;
+  return styles;
 }
 
 /**
@@ -235,10 +252,10 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
  * merge/split ripples past it) bulges *past* normal width and back, swapping
  * from its old color to its live one at the peak — see `AnimationState`'s
  * doc comment for where these come from. Once the win-comet is running
- * (`anim.winComet`), its per-edge colors (`computeCometColors`) take over
- * from the flat "solved" color for every edge that isn't otherwise mid grow
- * or pulse — this can only actually apply once every edge is done pulsing,
- * since that's the same moment `main.ts` starts the comet.
+ * (`anim.winComet`), its per-edge styles (`computeCometStyles`) take over
+ * from the flat "solved" color/width for every edge that isn't otherwise
+ * mid grow or pulse — this can only actually apply once every edge is done
+ * pulsing, since that's the same moment `main.ts` starts the comet.
  */
 function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
@@ -249,10 +266,11 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
   // from the segment palette.
   const components = won ? null : computeEdgeComponents(edges);
   const now = anim?.now ?? 0;
-  const cometColors = anim?.winComet ? computeCometColors(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
+  const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
 
   for (const ek of edges) {
-    const liveColor = cometColors?.get(ek) ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
+    const cometStyle = cometStyles?.get(ek);
+    const liveColor = cometStyle?.color ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
     const [a, b] = parseEdgeKey(ek);
     const [sx1, sy1] = toScreen(a, layout);
     const [sx2, sy2] = toScreen(b, layout);
@@ -261,7 +279,7 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
     const pulse = growStart === undefined ? anim?.pulsing?.get(ek) : undefined;
 
     let strokeStyle = liveColor;
-    let lineWidth = baseWidth;
+    let lineWidth = baseWidth * (cometStyle?.widthMultiplier ?? 1);
     if (growStart !== undefined) {
       lineWidth = baseWidth * smoothstep((now - growStart) / GROW_MS);
     } else if (pulse) {
@@ -490,18 +508,19 @@ function drawWrapped(
   // edge, then reapplied identically to every tile copy below, since the
   // animation's progress doesn't depend on which repeated tile it's drawn in.
   const components = won ? null : computeEdgeComponents(edges);
-  const cometColors = anim?.winComet ? computeCometColors(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
+  const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
   const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
   const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
-    const liveColor = cometColors?.get(ek) ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
+    const cometStyle = cometStyles?.get(ek);
+    const liveColor = cometStyle?.color ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
     const classified = classifyEdge(a, b, topology, W, H);
 
     const growStart = anim?.growing?.get(ek);
     const pulse = growStart === undefined ? anim?.pulsing?.get(ek) : undefined;
     let color = liveColor;
-    let lineWidth = baseMarkedWidth;
+    let lineWidth = baseMarkedWidth * (cometStyle?.widthMultiplier ?? 1);
     if (growStart !== undefined) {
       lineWidth = baseMarkedWidth * smoothstep((now - growStart) / GROW_MS);
     } else if (pulse) {
