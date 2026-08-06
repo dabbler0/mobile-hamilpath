@@ -224,6 +224,61 @@ join — most noticeable as a "hole" right at a moving wave's leading edge.
 Sorting so wider edges always draw last keeps a bulging edge's join on top
 everywhere, regardless of draw order.
 
+### Persistent component colors
+
+`edgeComponents.ts`'s `computeEdgeComponents` numbers each connected
+component by iteration order within a single call — cheap, but that
+numbering is only meaningful for that one call, not stable across edits. A
+naive `segmentColor(component id)` using those raw ids directly, as an
+earlier version of this game did, could make a component's *displayed*
+color change even when nothing touching it changed at all, purely because
+some unrelated component elsewhere merged or vanished and shifted
+everything after it in its numbering.
+
+`game/componentColors.ts`'s `updateComponentColors` fixes this: given a
+`ComponentColorState` (just `color index -> the cells that color's
+component currently spans`, as of the last call) and the current edge set,
+it re-derives this frame's components fresh via `computeEdgeComponents`
+(unavoidable — edges can change from several unrelated call sites, so this
+has to be recomputed every time regardless), then matches each one back to
+whichever old color(s) its cells overlap, instead of just taking the raw
+ids at face value:
+
+- A component that shares cells with exactly one old color (grew, shrank,
+  or is simply unchanged) keeps that color.
+- A **merge** (a component now spans cells from more than one old color)
+  keeps the *lowest* of those colors — "blue wins" — regardless of which
+  side contributed more cells.
+- A **split** (one old color's cells now spread across more than one new
+  component) lets whichever new piece kept the most of those cells keep the
+  color; the other piece is treated as brand new.
+- A component touching no old color at all (brand new, or the losing side
+  of a split) gets the lowest color index not already claimed by anything
+  else *this frame* — so a color that just freed up (its component
+  vanished, or lost a split/merge collision) is exactly what a new
+  component picks up, and every *other* still-live color's assignment is
+  completely undisturbed (a vanished component's neighbor's color doesn't
+  shift down to fill the gap).
+
+`main.ts` owns two `ComponentColorState`s — `liveComponentColors` for the
+live game, `reviewComponentColors` for the review/replay overlay — kept
+entirely separate so switching between them can't cross-contaminate, and
+each explicitly reset (`resetComponentColorState`) only at a genuine
+board-identity boundary (`startPuzzle`, `enterReview`) rather than on every
+edit, since an unrelated old puzzle's component could otherwise
+coincidentally "donate" its color to a new puzzle's component just because
+their cell coordinates happen to line up. `render()` recomputes whichever
+one is active every single frame from the live edge set (cheap and
+idempotent when edges haven't actually changed, exactly like
+`computeEdgeComponents` always was) and threads the result through
+`RenderState.componentColors` — skipped entirely once `won`, since a win is
+one component with the flat "solved" color and there's nothing left to look
+up. `scheduleToggleAnimation` reads the *previous* frame's colors back out
+via `snapshotEdgeColors` (a plain cell-to-color lookup, no recomputation)
+to freeze a shrinking edge's color and set a pulsing edge's `fromColor` —
+valid because `render()` already updated the relevant `ComponentColorState`
+for the pre-toggle edge set on the frame just before the toggle.
+
 - **Grow/shrink**: a region toggle's newly-marked edges "grow" from zero to
   full *width* (drawn at full length the whole time), and newly-unmarked
   edges "shrink" from full width back to zero, over `render.ts`'s
@@ -238,39 +293,55 @@ everywhere, regardless of draw order.
   frozen at the moment of removal (`segmentColor`, exported from `render.ts`
   for this) rather than recomputed live, and `render.ts` draws it as an
   extra edge alongside the live ones for as long as it's still animating.
-- **Recolor ripple**: when a toggle causes a merge or split, some *other*
-  already-marked edge's component (and so its color) can change as a side
-  effect. `game/edgeRipple.ts`'s `computeRecoloredEdges` finds every such
-  edge that's actually graph-reachable from the toggle location in the
-  post-toggle marked-edge graph, together with its hop distance; `main.ts`
-  staggers each one's pulse start by `distance * RIPPLE_STAGGER_MS` (45ms,
-  exported from `render.ts` — see below for why) so the recolor visibly
-  ripples outward rather than flipping everywhere at once. Each pulse
-  (`render.ts`'s `PULSE_MS`, 260ms) bulges the edge's line width up and back
-  down, swapping from its old color to its live one right at the peak —
-  "growing and then shrinking as it changes color". A merge/split can also
-  renumber an entirely *unrelated* component purely because
-  `edgeComponents.ts`'s component ids are assigned by iteration order, not
-  identity (see its doc comment) — `computeRecoloredEdges` deliberately
-  excludes anything not reachable from the toggle, so that case recolors
-  instantly on the next render with no ripple, matching the fact that there's
-  nowhere real for a ripple to travel from.
-  - **The winning move gets a bigger version of the same ripple**: the
-    instant a toggle completes the puzzle, literally every already-marked
-    edge is about to switch to the single "solved" green — so instead of
-    `computeRecoloredEdges`'s "did the component id actually change" filter
-    (which, on a win, would by incidental id-numbering luck leave whichever
-    pre-existing segment kept id 0 jumping straight to green with no
-    animation), `main.ts` uses `edgeRipple.ts`'s `computeReachableEdges`,
-    which ripples *every* reachable edge unconditionally. It uses the exact
-    same `RIPPLE_STAGGER_MS` as an ordinary ripple (an earlier version used a
-    separate, faster stagger so a huge board's sweep wouldn't take too long
-    — but that made the win ripple visibly a *different*, faster animation
-    from the everyday one, which read as inconsistent rather than snappy;
-    it's simplest, and truest to "the same animation, just over more
-    edges", to just let a huge board's win ripple take longer, same as
-    everything else here scales with board size).
-- **Win-comet**: once the winning move's ripple above finishes covering the
+- **Recolor ripple** (midgame): when a toggle causes a merge or split, some
+  *other* already-marked edge's component (and so its persistent color, see
+  above) can change as a side effect. `game/edgeRipple.ts`'s
+  `computeRecoloredEdges` finds every such edge that's actually
+  graph-reachable from the toggle location in the post-toggle marked-edge
+  graph, together with its hop distance; `main.ts` staggers each one's pulse
+  start by `render.ts`'s `midgameRippleDelayMs(distance)` so the recolor
+  visibly ripples outward rather than flipping everywhere at once. Unlike
+  the endgame/postgame ripples below, this delay is **not** linear in hop
+  distance — it's `RIPPLE_STAGGER_MS * log2(distance + 1)`, so it speeds up
+  geometrically as it travels: doubling the remaining distance only costs
+  one more constant-size time increment, rather than one more
+  `RIPPLE_STAGGER_MS` per hop, making the *total* time to sweep an entire
+  connected component logarithmic in that component's size instead of
+  linear. A midgame ripple's whole job is to draw the eye to what just
+  changed, so a huge board's ripple shouldn't take proportionally longer to
+  finish just because there's more board to cover — unlike the win/comet
+  ripples, which are more of a small deliberate celebration where "the same
+  pace as everything else, just possibly longer" is the intended feel
+  instead (see below). Each pulse (`render.ts`'s `PULSE_MS`, 260ms) bulges
+  the edge's line width up and back down, swapping from its old color to its
+  live one right at the peak — "growing and then shrinking as it changes
+  color". A merge/split can also renumber an entirely *unrelated* component
+  in `edgeComponents.ts`'s raw, iteration-order ids (see its doc comment) —
+  `computeRecoloredEdges` deliberately excludes anything not reachable from
+  the toggle, so that case doesn't ripple at all; thanks to persistent
+  component colors (above), it doesn't even *recolor* any more, since the
+  persistent color assignment is keyed by which cells a component actually
+  spans, not by that raw id — matching the fact that nothing about what's
+  on screen actually changed.
+  - **The winning move gets a bigger version of the same ripple, but at
+    constant speed (endgame)**: the instant a toggle completes the puzzle,
+    literally every already-marked edge is about to switch to the single
+    "solved" green — so instead of `computeRecoloredEdges`'s "did the
+    component id actually change" filter (which, on a win, would by
+    incidental id-numbering luck leave whichever pre-existing segment kept
+    id 0 jumping straight to green with no animation), `main.ts` uses
+    `edgeRipple.ts`'s `computeReachableEdges`, which ripples *every*
+    reachable edge unconditionally. It deliberately keeps the ordinary
+    linear `distance * RIPPLE_STAGGER_MS` pace instead of the midgame
+    ripple's geometric speedup above (an earlier version used a separate,
+    even faster stagger so a huge board's sweep wouldn't take too long —
+    but that made the win ripple visibly a *different* animation from the
+    everyday one, which read as inconsistent rather than snappy). Since
+    this is a one-time celebration rather than something that needs to stay
+    snappy on every single edit, it's simplest, and truest to "the same
+    animation, just over more edges", to just let a huge board's win ripple
+    take longer, same as everything else here scales with board size.
+- **Win-comet (postgame)**: once the winning move's ripple above finishes covering the
   whole board in green, a bright-green "comet" starts exactly where that
   ripple last reached (`edgeRipple.ts`'s `computeFarthestCell`) and travels
   forever around the loop in one direction at the same `RIPPLE_STAGGER_MS`
@@ -328,6 +399,30 @@ everywhere, regardless of draw order.
     too would make the whole not-yet-reached arc bulge in width together
     during the first lap, instead of staying one small pulse localized at
     the comet's actual head.
+  - **Investigated for a memory leak, none found**: because the comet
+    "travels forever", it's the one animation here that keeps calling
+    `computeCometStyles` (and rebuilding `drawMarkedEdges`/`drawWrapped`'s
+    per-frame draw list) at 60fps indefinitely rather than for a bounded
+    burst — a plausible place for a slow leak to hide on a long-running tab.
+    It was checked two ways: a Node benchmark reproducing
+    `computeCometStyles` and the draws-array construction verbatim for a
+    "huge" (1120-cell) board's win loop, run for the equivalent of ~16
+    minutes of continuous 60fps animation with forced GC between samples;
+    and the same logic driven by a real `requestAnimationFrame` loop in
+    actual Chromium (via CDP `Performance.getMetrics`), sampled over 90
+    real seconds. Both show heap usage oscillating in an ordinary sawtooth
+    GC pattern (roughly flat/bounded, not trending upward) — i.e. steady
+    per-frame garbage that V8 reclaims normally, not an unbounded leak. Every
+    per-frame allocation in this path (the `Map` from `computeCometStyles`,
+    the `MarkedEdgeDraw[]` array, the lerped color strings) is purely local
+    to that one call and holds no reference anything else retains, so
+    there's no structural reason to expect one either. If a real-device
+    "runs for a long time and eventually crashes" report resurfaces, look
+    first at sustained CPU/GPU cost from redrawing the *entire* board at
+    60fps forever (especially a wraparound board zoomed out to reveal many
+    tile copies) rather than assuming a reference leak — that's a real,
+    measurable cost this investigation didn't rule out, just the "heap grows
+    without bound" leak specifically.
 
 All three share one `requestAnimationFrame` chain, driven entirely by
 `main.ts`'s `render()`: every other call site still just calls `render()`
@@ -338,9 +433,12 @@ only place that decides whether a follow-up frame is needed
 `performance.now()` timestamps rather than a frame counter, so a slow frame
 or a backgrounded tab can't desync an animation from where it should be.
 `render.ts` exports `RIPPLE_STAGGER_MS` (alongside `GROW_MS`/`SHRINK_MS`/
-`PULSE_MS`) so both the ripple's pulse-delay math and the comet's travel
-speed in `main.ts` share the exact same constant as the ripple's own drawing
-code, rather than three places having to be kept in sync by hand.
+`PULSE_MS`) so the endgame ripple's pulse-delay math and the comet's travel
+speed in `main.ts` share the exact same constant-pace constant as their own
+drawing code, rather than three places having to be kept in sync by hand;
+the midgame ripple instead uses `render.ts`'s separately-exported
+`midgameRippleDelayMs` for its geometric speedup (see "Persistent component
+colors" and "Recolor ripple" above).
 
 Only a live tap/keyboard toggle (`setPathState`) starts a grow/shrink/pulse
 animation. Anything that jumps straight to a different state instead — undo,
@@ -627,11 +725,12 @@ calls `enterReview()` which regenerates that puzzle and switches `mode`.
 
 ## Testing notes
 
-250 vitest tests across 17 files, all in `*.test.ts` files next to their
+262 vitest tests across 18 files, all in `*.test.ts` files next to their
 modules. Pure game logic (`src/game/*`), viewport math, and persistence are
 unit tested — including the pure pieces of the animation system
-(`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS), even
-though the animations themselves are visual-only. `render.ts`, `input.ts`,
+(`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS,
+`componentColors.ts`'s persistent color assignment), even though the
+animations themselves are visual-only. `render.ts`, `input.ts`,
 and `keyboard.ts` are not — they're thin DOM/canvas glue verified by hand
 instead. When changing pointer or
 keyboard interaction, the fastest way to sanity-check is a throwaway

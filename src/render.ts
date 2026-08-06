@@ -1,4 +1,3 @@
-import { computeEdgeComponents } from './game/edgeComponents';
 import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
 import { edgeKey, parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { countCollectionEdges, parseKey, type EdgeCollection, type Puzzle } from './game/puzzle';
@@ -15,6 +14,15 @@ export interface RenderState {
   keyboardCursor?: Face | null;
   /** In-flight edge/win-loop animations, owned and scheduled by `main.ts` (see its "Animations" section) — omitted entirely for a plain, static draw (e.g. the review scrubber jumping straight to a frame). */
   anim?: AnimationState;
+  /**
+   * Every marked edge's *persistent* color index (see `game/componentColors.ts`)
+   * — omitted/ignored whenever `won` (a win is one component with the single
+   * flat "solved" color, so there's nothing to look up). `main.ts` owns the
+   * `ComponentColorState` this is derived from and recomputes it once per
+   * render; `render.ts` itself stays a pure function of whatever's handed
+   * to it, same as everything else here.
+   */
+  componentColors?: ReadonlyMap<EdgeKey, number> | null;
 }
 
 /** A single edge growing in from zero width (drawn at full length throughout), keyed by when it started (`main.ts`'s `growingEdges`). */
@@ -49,15 +57,35 @@ export const SHRINK_MS = 220;
 /** How long one edge's recolor "pulse" (width bulge + color swap at its peak) lasts, once its ripple delay has elapsed. */
 export const PULSE_MS = 260;
 /**
- * Stagger between adjacent hops of a recolor ripple, in ms — shared by the
- * ordinary (merge/split) ripple, the winning move's "everything turns
- * green" ripple, and the win-comet's constant travel speed once that
- * ripple hands off to it, so all three read as one consistent pace rather
- * than three different animations. Exported so `main.ts` can use the same
- * value when scheduling ripple pulse delays and computing when the
- * winning ripple (and so the comet) should start.
+ * Per-hop pace, in ms, for the **endgame** (winning move's "everything
+ * turns green") ripple and the **postgame** win-comet's constant travel
+ * speed once that ripple hands off to it — see `midgameRippleDelayMs` for
+ * the ordinary in-game (merge/split) ripple, which does *not* use this
+ * directly any more (see its own doc comment for why). Exported so
+ * `main.ts` can share the exact same value when scheduling the endgame
+ * ripple's pulse delays and computing when it (and so the comet) finishes.
  */
 export const RIPPLE_STAGGER_MS = 45;
+/**
+ * Per-hop delay, in ms, for an ordinary **midgame** recolor ripple (a
+ * merge/split during play, `main.ts`'s `computeRecoloredEdges` case) —
+ * unlike the endgame/postgame ripples above, this speeds up geometrically
+ * as it travels rather than moving at a constant pace, so the *total* time
+ * to sweep an entire connected component is logarithmic in that
+ * component's size instead of linear: doubling the remaining distance only
+ * costs one more constant-size time increment (`RIPPLE_STAGGER_MS` per
+ * doubling, via `log2`), rather than one more `RIPPLE_STAGGER_MS` per hop.
+ * A midgame ripple's whole job is to draw the eye to what just changed —
+ * on a huge board that shouldn't take proportionally longer just because
+ * there's more board to cover, unlike the endgame/postgame ripples, whose
+ * "same pace as everything else, just possibly longer" is the intended
+ * feel for what's more of a deliberate little celebration (see their own
+ * doc comments). `distance === 0` (the toggled edges themselves) never
+ * reaches this — those animate as a grow/shrink instead, not a pulse.
+ */
+export function midgameRippleDelayMs(distance: number): number {
+  return RIPPLE_STAGGER_MS * Math.log2(distance + 1);
+}
 const PULSE_BULGE = 0.85;
 /** Below this a stroke is treated as invisible and skipped — canvas ignores/normalizes `ctx.lineWidth = 0` rather than actually drawing nothing, so a grow/shrink's endpoints would otherwise flash a stray hairline. */
 const MIN_VISIBLE_WIDTH = 0.5;
@@ -189,9 +217,14 @@ function collectionColor(id: number): string {
  * how many separate segments/cycles are on the board and which edges belong
  * to which — a categorical palette (CVD- and contrast-validated against
  * `COLORS.background`), cycling if there are ever more segments than colors.
- * Segments are transient (they merge/split as the player edits), so unlike a
- * data-viz legend this doesn't need per-identity color stability across
- * redraws — a segment can change color when it merges with another.
+ * The *index* passed in here is a persistent color assignment from
+ * `game/componentColors.ts`, not the raw, iteration-order id
+ * `edgeComponents.ts`'s `computeEdgeComponents` returns — a component keeps
+ * showing the same color across edits (merges resolve to the lower-index
+ * "blue wins" color, a vanished component's color stays free rather than
+ * shifting everything after it down) instead of an arbitrary color swap
+ * whenever some unrelated component's numbering happens to shift. See
+ * `componentColors.ts`'s doc comment for the full assignment rules.
  */
 const SEGMENT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
 
@@ -221,12 +254,12 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
 }
 
 function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdgeCollectionHalos(ctx, puzzle, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
-  drawMarkedEdges(ctx, edges, won, layout, anim);
+  drawMarkedEdges(ctx, edges, won, layout, anim, componentColors);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
@@ -320,14 +353,21 @@ function strokeMarkedEdges(ctx: CanvasRenderingContext2D, draws: MarkedEdgeDraw[
  * leading edge. Sorting so wider edges always draw last keeps a bulging
  * edge's join on top everywhere, regardless of `edges`' iteration order.
  */
-function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
+function drawMarkedEdges(
+  ctx: CanvasRenderingContext2D,
+  edges: ReadonlySet<EdgeKey>,
+  won: boolean,
+  layout: Layout,
+  anim?: AnimationState,
+  componentColors?: ReadonlyMap<EdgeKey, number> | null,
+): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineCap = 'round';
 
   // A win is exactly one component covering every cell, so there's nothing to
   // tell apart — keep the single "solved" color instead of an arbitrary one
   // from the segment palette.
-  const components = won ? null : computeEdgeComponents(edges);
+  const components = won ? null : componentColors;
   const now = anim?.now ?? 0;
   const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
 
@@ -516,7 +556,7 @@ function drawWrapped(
   view: Viewport,
   topology: Topology,
 ): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors } = state;
   const { W, H } = puzzle;
   const now = anim?.now ?? 0;
 
@@ -564,7 +604,7 @@ function drawWrapped(
   // doc comment) — `lineWidth`/`color` are resolved once here per logical
   // edge, then reapplied identically to every tile copy below, since the
   // animation's progress doesn't depend on which repeated tile it's drawn in.
-  const components = won ? null : computeEdgeComponents(edges);
+  const components = won ? null : componentColors;
   const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
   const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
   const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
