@@ -4,15 +4,28 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>Loop It</title>
+    <title>Einkreis</title>
   </head>
   <body>
     <div id="app">
+      <!--
+        Shared animated postgame-loop background canvas. It sits behind every
+        `.screen` layer (first child of #app, painted first) but is only
+        actually visible through the screens that opt in via
+        `.menuBgScreen` (mainMenu/freePlay/newGame — every *fixed-size* menu)
+        making their own background transparent; the Resume/Replays lists and
+        the game screen itself keep an opaque background and simply cover it.
+        `main.ts`'s `showScreen` starts/stops the `requestAnimationFrame` loop
+        driving it whenever navigation crosses in or out of that screen set,
+        not on every individual screen change, so it keeps animating
+        uninterrupted while moving between e.g. Free Play and New Game.
+      -->
+      <canvas id="menuCanvas"></canvas>
+
       <!-- Main menu: animated postgame-loop background behind Blitz/Free Play. -->
-      <div id="mainMenuScreen" class="screen">
-        <canvas id="menuCanvas"></canvas>
+      <div id="mainMenuScreen" class="screen menuBgScreen">
         <div class="menuContent mainMenuContent">
-          <h1 class="menuTitle">Loop It</h1>
+          <h1 class="menuTitle">Einkreis</h1>
           <p class="menuTagline">Trace one loop through every cell.</p>
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
@@ -22,7 +35,7 @@
       </div>
 
       <!-- Free Play hub: New Game / Resume / Replays. -->
-      <div id="freePlayMenuScreen" class="screen hidden">
+      <div id="freePlayMenuScreen" class="screen menuBgScreen hidden">
         <div class="menuHeader">
           <button class="secondary backBtn" id="freePlayBackBtn">‹ Menu</button>
           <h2>Free Play</h2>
@@ -37,7 +50,7 @@
       </div>
 
       <!-- New Game: pick size + shape, then start a fresh, randomly-seeded puzzle. -->
-      <div id="newGameMenuScreen" class="screen hidden">
+      <div id="newGameMenuScreen" class="screen menuBgScreen hidden">
         <div class="menuHeader">
           <button class="secondary backBtn" id="newGameBackBtn">‹ Free Play</button>
           <h2>New Game</h2>
@@ -76,18 +89,18 @@
 
       <!-- Resume: every saved in-progress game, resumable or deletable. -->
       <div id="resumeMenuScreen" class="screen hidden">
-        <div class="overlayHeader">
-          <h2>Resume</h2>
+        <div class="menuHeader">
           <button class="secondary backBtn" id="resumeBackBtn">‹ Free Play</button>
+          <h2>Resume</h2>
         </div>
         <div id="resumeListEl" class="listScroll"></div>
       </div>
 
       <!-- Replays: every completed puzzle, reviewable or deletable. -->
       <div id="replaysMenuScreen" class="screen hidden">
-        <div class="overlayHeader">
-          <h2>Replays</h2>
+        <div class="menuHeader">
           <button class="secondary backBtn" id="replaysBackBtn">‹ Free Play</button>
+          <h2>Replays</h2>
         </div>
         <div id="replaysListEl" class="listScroll"></div>
       </div>
@@ -95,7 +108,8 @@
       <!-- The live/reviewed game itself. -->
       <div id="gameScreen" class="screen hidden">
         <header>
-          <h1>Loop It</h1>
+          <button class="secondary backBtn" id="exitBtn">‹ Exit</button>
+          <h1>Einkreis</h1>
           <div id="headerInfo">
             <div id="puzzleLabel"></div>
             <div id="progress">0 / 0</div>
@@ -111,12 +125,13 @@
           <div id="winBanner">Loop complete!</div>
           <div id="toast"></div>
           <div id="reviewBar" class="hidden">
-            <span id="reviewLabel"></span>
             <div id="reviewIdleControls">
+              <button class="secondary backBtn" id="exitReviewBtn">‹ Done</button>
+              <span id="reviewLabel"></span>
               <button class="secondary" id="replayBtn">Replay</button>
-              <button class="secondary" id="exitReviewBtn">Done</button>
             </div>
             <div id="reviewPlaybackControls" class="hidden">
+              <button class="secondary backBtn" id="replayCloseBtn">‹ Done</button>
               <button class="secondary" id="replayPlayPauseBtn">Pause</button>
               <select id="replaySpeedSelect" title="Replay speed">
                 <option value="0.25">0.25×</option>
@@ -126,12 +141,10 @@
               </select>
               <input type="range" id="replayScrubber" min="0" max="0" value="0" step="1" />
               <span id="replayCounter"></span>
-              <button class="secondary" id="replayCloseBtn">Done</button>
             </div>
           </div>
         </div>
         <div class="controls" id="playControls">
-          <button class="secondary" id="exitBtn">Exit</button>
           <div id="activeControls" class="controlGroup">
             <button class="secondary" id="undoBtn" disabled>Undo</button>
             <button class="secondary" id="redoBtn" disabled>Redo</button>

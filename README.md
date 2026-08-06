@@ -1,4 +1,4 @@
-# Loop It
+# Einkreis
 
 A mobile-first Hamiltonian-cycle ("loop") puzzle: drag a path from a single
 starting cell until it visits every cell on the board exactly once and closes

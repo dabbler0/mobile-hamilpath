@@ -843,6 +843,7 @@ function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
   replayBtn.title = hasReplay ? '' : "Replay isn't available — this puzzle was solved before replay support was added.";
   reviewBarEl.classList.remove('hidden');
   playControlsEl.classList.add('hidden');
+  exitBtn.classList.add('hidden');
   showScreen('game');
   resetWinBanner();
   layout();
@@ -861,6 +862,7 @@ function exitReview(): void {
   keyboardCursor = null;
   reviewBarEl.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
+  exitBtn.classList.remove('hidden');
   if (returnToMenu) {
     showScreen('replays');
   } else {
@@ -989,19 +991,36 @@ attachKeyboardHandling(window, keyboardHost);
 // ---- Screen navigation ----
 
 /**
+ * Every screen with a fixed layout (as opposed to a variable-length list)
+ * shows the animated postgame-loop background behind it — see `index.html`'s
+ * `#menuCanvas` doc comment. The Resume/Replays lists and the game screen
+ * itself keep an opaque background instead.
+ */
+const BACKGROUND_SCREENS: readonly Screen[] = ['mainMenu', 'freePlay', 'newGame'];
+
+/**
  * Hides every screen but `next` and runs each screen's enter/leave side
- * effects: the main menu's animated background starts only while it's
- * actually visible (and stops the instant it isn't, so its own
- * `requestAnimationFrame` chain doesn't run forever in the background); the
- * live game's animation loop is likewise force-stopped whenever leaving
- * `'game'` (see `stopLiveAnimationLoop`'s doc comment for why that can't
- * just be left to lapse on its own); Resume/Replays refresh their lists
- * from IndexedDB every time they're shown, so a delete or a just-finished
- * game is always reflected.
+ * effects: the shared animated background starts the instant navigation
+ * enters `BACKGROUND_SCREENS` and stops the instant it leaves that set
+ * (and stays running, uninterrupted, while moving *within* it — e.g. Free
+ * Play to New Game — so its own `requestAnimationFrame` chain doesn't
+ * restart on every menu tap, and doesn't run forever behind a screen that
+ * doesn't show it); the live game's animation loop is likewise
+ * force-stopped whenever leaving `'game'` (see `stopLiveAnimationLoop`'s
+ * doc comment for why that can't just be left to lapse on its own);
+ * Resume/Replays refresh their lists from IndexedDB every time they're
+ * shown, so a delete or a just-finished game is always reflected.
+ *
+ * Whether the background is currently running is read off
+ * `stopMenuBackground` itself (non-null while it's active) rather than off
+ * the previous `screen` value — `screen`'s initial value is `'mainMenu'`
+ * before the very first `showScreen('mainMenu')` call ever runs, which
+ * would otherwise look like "already there, nothing to start".
  */
 function showScreen(next: Screen): void {
-  if (screen === 'mainMenu' && next !== 'mainMenu') {
-    stopMenuBackground?.();
+  const nextIsBackgroundScreen = BACKGROUND_SCREENS.includes(next);
+  if (!nextIsBackgroundScreen && stopMenuBackground) {
+    stopMenuBackground();
     stopMenuBackground = null;
   }
   if (screen === 'game' && next !== 'game') {
@@ -1016,7 +1035,7 @@ function showScreen(next: Screen): void {
   replaysMenuScreenEl.classList.toggle('hidden', next !== 'replays');
   gameScreenEl.classList.toggle('hidden', next !== 'game');
 
-  if (next === 'mainMenu') stopMenuBackground = startMenuBackground(menuCanvas);
+  if (nextIsBackgroundScreen && !stopMenuBackground) stopMenuBackground = startMenuBackground(menuCanvas);
   if (next === 'resume') void refreshResumeList();
   if (next === 'replays') void refreshReplaysList();
 }

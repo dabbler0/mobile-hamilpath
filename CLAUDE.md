@@ -1,6 +1,8 @@
-# Loop It
+# Einkreis
 
-A mobile-first Hamiltonian-cycle ("loop") puzzle game. The board is
+A mobile-first Hamiltonian-cycle ("loop") puzzle game. Formerly called "Loop
+It" — the current name is, like its predecessor, a placeholder and may
+change again; don't read anything permanent into it. The board is
 partitioned into regions; tapping a region toggles all of its boundary
 edges between marked/unmarked, and the goal is to end up with exactly one
 marked edge at every cell — a single loop visiting every cell on the board.
@@ -785,8 +787,8 @@ side effects. Exactly one screen is ever visible at a time.
   overlay) lives here unchanged in substance, just reachable only through
   the menus above instead of being the app's permanent single view.
 
-`showScreen` also owns: starting/stopping the main menu's animated
-background (only running while it's actually visible — see below);
+`showScreen` also owns: starting/stopping the shared animated background
+(see "Main menu background" below for *which* screens show it and why);
 force-stopping the live game's `requestAnimationFrame` animation loop the
 instant `'game'` stops being the visible screen (`stopLiveAnimationLoop` —
 necessary because the win-comet runs *forever* once a puzzle is completed,
@@ -796,12 +798,42 @@ refreshing the Resume/Replays lists from IndexedDB every time either is
 shown, so a delete (or a game just finished elsewhere) is always reflected
 without a stale cached list.
 
+### Back/exit/done buttons are always top-left
+
+Every screen that isn't the main menu has some way back to where it came
+from, and that control is always the leftmost thing in that screen's own
+header row, styled `.secondary.backBtn` (small, `‹ Label` text) — never on
+the right, and never living in a bottom control bar instead. This is a
+deliberate, enforced convention, not a coincidence of each screen's markup:
+Free Play's "‹ Menu", New Game's "‹ Free Play", Resume's "‹ Free Play", and
+Replays' "‹ Free Play" all share the same `.menuHeader` markup (button
+first, then a centered `<h2>` — Resume/Replays used to have their own
+`.overlayHeader` with the button *last*, which is what put their back
+button in the top-right corner; that class is gone now, replaced by reusing
+`.menuHeader` like every other submenu). The in-game **Exit** button
+(`#exitBtn`) follows the same rule despite living in a very different part
+of the DOM: it's the first element in `header` (game screen), positioned
+exactly like a back button, rather than sitting in `#playControls`' bottom
+bar the way it used to. Because it moved out of `#playControls`, it no
+longer inherits that container's hidden/shown state for free — `enterReview`
+and `exitReview` (see below) explicitly toggle `#exitBtn`'s own `.hidden`
+class in lockstep with `#playControls`, so it still disappears the instant
+`#reviewBar`'s own "‹ Done" takes over. `#reviewBar` itself follows the same
+pattern once more: each of its two states (`#reviewIdleControls` for a
+static review, `#reviewPlaybackControls` for an active replay) puts its own
+"‹ Done" button first, ahead of the review label / playback widgets, so
+whichever one is visible always has Done at the top-left — see "Review, and
+where 'Done' goes back to" below.
+
 ### In-game controls
 
-`#playControls` (hidden outright while reviewing — see below) always shows
-**Exit**; the rest of it swaps between two button groups depending on
-whether the current live attempt is decided (`refreshControlBar`, called
-from every place that can change `pathState.won`/`gaveUp`):
+**Exit** (`#exitBtn`) lives in the game screen's `header`, not in
+`#playControls` — see "Back/exit/done buttons are always top-left" above for
+why, and how its visibility still tracks `#playControls`'s even though it's
+no longer a child of it. `#playControls` itself (hidden outright while
+reviewing — see below) swaps between two button groups depending on whether
+the current live attempt is decided (`refreshControlBar`, called from every
+place that can change `pathState.won`/`gaveUp`):
 
 - **Not yet decided** (`#activeControls`): **Undo**, **Redo**, **Give Up** —
   same as before, just without the old Reset/History/Next-Puzzle buttons
@@ -837,18 +869,71 @@ on how review was entered: back to the live, now-solved game
 to the Replays list it was opened from (`origin: 'menu'`, since there might
 be no live game underneath at all — Replays is reachable straight from the
 Free Play hub without ever having played anything this session).
-`enterReview` hides `#playControls` and shows `#reviewBar` in its place
-(the reverse on `exitReview`) regardless of `origin`, since the control bar
-Undo/Redo/Give Up/Rematch/Replay buttons are never meaningful while
-reviewing — a review is always read-only (`inputPathState()` reports
+`enterReview` hides `#playControls` (and `#exitBtn` alongside it — see
+"Back/exit/done buttons are always top-left" above) and shows `#reviewBar`
+in its place (the reverse on `exitReview`) regardless of `origin`, since the
+control bar Undo/Redo/Give Up/Rematch/Replay buttons are never meaningful
+while reviewing — a review is always read-only (`inputPathState()` reports
 `won: true` unconditionally while `mode === 'reviewing'`, which is what
 makes the input layer refuse edits and only allow pan/zoom for free,
 without any extra guarding in `input.ts`/`keyboard.ts`).
 
+`#reviewBar` itself holds two mutually-exclusive rows, `#reviewIdleControls`
+(static review: "‹ Done" / the puzzle's summary label / **Replay**) and
+`#reviewPlaybackControls` (active replay: "‹ Done" / Play-Pause / speed
+select / scrubber / frame counter) — `startReplay`/`closeReplay` toggle
+which one is visible, exactly as before. Each row's own "‹ Done" button
+(`exitReviewBtn` in the idle row, `replayCloseBtn` in the playback row) does
+something different — `exitReview()` leaves review entirely (back to the
+live game or the Replays list, per `origin` above), while `closeReplay()`
+only stops playback and drops back to the static idle row, still inside
+review — the two are deliberately kept as separate buttons/handlers rather
+than unified into one context-sensitive button, so that nesting (stop
+playback → still-reviewing idle view → actually leave review) still works
+exactly as it did before the repositioning. `#reviewLabel` (the puzzle
+summary/date) only appears in the idle row now, not the playback row — it
+used to be a permanent sibling of both — since dropping it from the
+playback row is both one fewer thing needing to fit at replay speed-picker
+width, and consistent with "Replay" itself being a static-review-only
+concept.
+
+Both rows, and `#reviewBar` generally, are `flex-wrap: wrap` with every
+child a `min-width: 0` flex item (`#replayScrubber` in particular, which
+used to have a hard `max-width: 200px` fighting for room against
+Play/Pause + the speed `<select>` + the frame counter): on a narrow phone
+viewport, whichever controls don't fit the first line wrap to a second
+instead of forcing the bar wider than the screen — this is what fixes the
+playback controls overflowing horizontally off small screens (see also
+`#reviewLabel`'s `text-overflow: ellipsis` for the same reasoning applied to
+a long puzzle-summary string in the idle row).
+
 ### Main menu background
 
-`src/menuBackground.ts`'s `startMenuBackground(canvas)` drives
-`#mainMenuScreen`'s `#menuCanvas`: a fixed, arbitrary `PuzzleId` — always
+`#menuCanvas` is a *shared* background, not exclusive to the main menu
+despite the name: it's `index.html`'s first child of `#app`, a sibling of
+every `.screen` rather than nested inside `#mainMenuScreen`, positioned
+behind all of them (plain DOM order — no explicit `z-index` needed, since
+every `.screen` is opaque unless it opts out). Every *fixed-size* menu
+screen — main menu, Free Play hub, New Game (`BACKGROUND_SCREENS` in
+`main.ts`) — carries a `.menuBgScreen` class that makes its own background
+transparent so the canvas shows through, with `.menuHeader`/`.menuContent`
+given a translucent dark backdrop of their own for text legibility over the
+busy animated board underneath. Resume and Replays deliberately do *not*
+get `.menuBgScreen` — they're variable-length lists rather than fixed
+layouts, and the animated board would be a distracting backdrop for reading
+a list — so they keep the plain opaque `.screen` background, same as the
+game screen itself (not a "menu" at all). `showScreen` starts/stops the
+background exactly once per crossing *into*/*out of* `BACKGROUND_SCREENS`
+as a set (tracked by whether `stopMenuBackground` is currently non-null,
+not by comparing screens directly — see its function doc comment for why:
+`screen`'s own initial value is `'mainMenu'`, so a naive "did the screen
+change into the set" check misses the very first `showScreen('mainMenu')`
+call at startup), so navigating *within* the set (e.g. Free Play → New
+Game) leaves the animation running uninterrupted rather than restarting it.
+
+`src/menuBackground.ts`'s `startMenuBackground(canvas)` drives whatever
+canvas it's handed (`#menuCanvas` in practice, but the module itself has no
+knowledge of which screen owns it): a fixed, arbitrary `PuzzleId` — always
 the *huge* size, *toroidal* shape (`MENU_PUZZLE_ID`, a hardcoded seed so the
 same showcase puzzle appears every time rather than regenerating a fresh
 1120-cell board on every menu visit) — generated once via `generatePuzzle`/
@@ -876,7 +961,8 @@ keeps the arithmetic (and any long-run floating-point drift) bounded
 regardless of session length.
 
 `startMenuBackground` returns a teardown function; `showScreen` calls it the
-instant the main menu stops being the visible screen, so its own
+instant navigation leaves `BACKGROUND_SCREENS` entirely (not on every
+individual screen change within it — see above), so its own
 `requestAnimationFrame` chain — like the live game's win-comet, this one
 also runs forever by design — doesn't keep drawing to a hidden canvas after
 the player has navigated away.

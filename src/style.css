@@ -21,7 +21,10 @@ body {
 /* ---- Screens ---- */
 /* Every top-level screen (main menu, the Free Play hub, its three submenus,
    and the game itself) is a full-bleed layer stacked in #app; exactly one is
-   ever un-hidden at a time (main.ts's `showScreen`). */
+   ever un-hidden at a time (main.ts's `showScreen`). Screens are stacked in
+   DOM order (all `position: absolute; inset: 0;`, so later paints over
+   earlier) with #menuCanvas first/lowest — see its doc comment in
+   index.html. */
 .screen {
   position: absolute;
   inset: 0;
@@ -33,7 +36,13 @@ body {
   display: none !important;
 }
 
-#mainMenuScreen {
+/* Every fixed-size menu (main menu, Free Play hub, New Game) leaves its own
+   background transparent so the shared #menuCanvas showing through behind it
+   reads as one persistent backdrop rather than restarting per screen. The
+   Resume/Replays lists and the game screen itself are NOT `.menuBgScreen` —
+   they keep the plain opaque `.screen` background above. */
+.menuBgScreen {
+  background: transparent;
   overflow: hidden;
 }
 #menuCanvas {
@@ -54,6 +63,10 @@ body {
   gap: 10px;
   padding: 24px;
   text-align: center;
+  /* Legibility over the animated background canvas showing through
+     `.menuBgScreen` — the main menu's own gradient below is just a fancier
+     version of the same idea. */
+  background: rgba(20, 21, 26, 0.68);
 }
 .mainMenuContent {
   background: radial-gradient(ellipse at center, rgba(20, 21, 26, 0.35) 0%, rgba(20, 21, 26, 0.72) 70%, rgba(20, 21, 26, 0.86) 100%);
@@ -112,6 +125,11 @@ body {
   gap: 10px;
   padding: 14px 14px 10px;
   border-bottom: 1px solid #2a2c34;
+  /* Legibility over the animated background canvas showing through
+     `.menuBgScreen` (freePlay/newGame use this header too — see
+     `.menuContent`'s matching rule above). Harmless on screens without the
+     background (Resume/Replays), which sit on their own opaque `.screen`. */
+  background: rgba(20, 21, 26, 0.72);
 }
 .menuHeader h2 {
   font-size: 1rem;
@@ -149,15 +167,31 @@ header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 10px;
+}
+/* Exit is the game screen's own back button — top-left like every other
+   screen's, instead of living in the bottom control bar. It's a direct
+   sibling of `#playControls`/`#reviewBar` in visibility: `enterReview`/
+   `exitReview` (main.ts) hide/show it in lockstep with `#playControls`,
+   since it should disappear behind `#reviewBar`'s own "Done" exactly the
+   way the rest of `#playControls` does. */
+header .backBtn {
+  flex: 0 0 auto;
 }
 h1 {
+  flex: 1;
+  min-width: 0;
   font-size: 1.05rem;
   margin: 0;
   font-weight: 700;
   color: #f5f5f7;
   letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #headerInfo {
+  flex: 0 0 auto;
   text-align: right;
 }
 #puzzleLabel {
@@ -304,44 +338,60 @@ button:disabled {
 #toast.show {
   transform: translateX(-50%) translateY(0);
 }
+/*
+ * Review bar: whichever of `#reviewIdleControls`/`#reviewPlaybackControls`
+ * is un-hidden fills the bar as one `flex-wrap` row, each with its own
+ * "‹ Done" back button first/left (same top-left placement as every other
+ * screen's back button). `flex-wrap: wrap` on the playback row is the fix
+ * for it overflowing the screen edge on narrow phones: with five controls
+ * (Done, Play/Pause, speed select, scrubber, counter) all `min-width: 0`
+ * flex children, whichever ones don't fit the first line wrap to a second
+ * rather than forcing the row wider than the viewport.
+ */
 #reviewBar {
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   padding: 8px 12px;
   background: rgba(20, 21, 26, 0.9);
   border-bottom: 1px solid #2a2c34;
   z-index: 6;
 }
 #reviewLabel {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 0.8rem;
   font-weight: 700;
   color: #c8c8d0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 #reviewBar button {
   padding: 6px 12px;
   font-size: 0.8rem;
+  flex: 0 0 auto;
 }
 #reviewIdleControls,
 #reviewPlaybackControls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  width: 100%;
 }
-#reviewPlaybackControls {
-  flex: 1;
-  justify-content: flex-end;
+#replaySpeedSelect {
+  flex: 0 0 auto;
+  min-width: 0;
 }
 #replayScrubber {
-  flex: 1;
-  max-width: 200px;
+  flex: 1 1 100px;
+  min-width: 60px;
   accent-color: #4f7cff;
 }
 #replayCounter {
+  flex: 0 0 auto;
   font-size: 0.75rem;
   color: #9a9aa4;
   font-variant-numeric: tabular-nums;
@@ -349,18 +399,8 @@ button:disabled {
 }
 
 /* ---- Resume / Replays lists ---- */
-.overlayHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 14px 10px;
-  border-bottom: 1px solid #2a2c34;
-}
-.overlayHeader h2 {
-  font-size: 1rem;
-  margin: 0;
-  color: #f5f5f7;
-}
+/* Headers are `.menuHeader` (shared with Free Play/New Game) for the same
+   back-button-top-left layout everywhere; see that rule above. */
 .listScroll {
   flex: 1;
   overflow-y: auto;
