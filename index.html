@@ -29,7 +29,71 @@
           <p class="menuTagline">Trace one loop through every cell.</p>
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
-            <button class="menuBtn menuBtnSecondary" id="blitzEntryBtn">Blitz<span class="menuBtnBadge">Coming soon</span></button>
+            <button class="menuBtn menuBtnSecondary" id="blitzEntryBtn">Blitz</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Blitz hub: Play / Leaderboard. -->
+      <div id="blitzMenuScreen" class="screen menuBgScreen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="blitzMenuBackBtn">‹ Menu</button>
+          <h2>Blitz</h2>
+        </div>
+        <div class="menuContent">
+          <div class="menuButtonStack">
+            <button class="menuBtn menuBtnPrimary" id="blitzPlayEntryBtn">Play</button>
+            <button class="menuBtn menuBtnSecondary" id="blitzLeaderboardEntryBtn">Leaderboard</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Blitz setup: pick starting time + time back per edge, then start a fresh, randomly-seeded run. -->
+      <div id="blitzSetupScreen" class="screen menuBgScreen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="blitzSetupBackBtn">‹ Blitz</button>
+          <h2>New Run</h2>
+        </div>
+        <div class="menuContent newGameForm">
+          <label
+            >Starting time (seconds)
+            <input type="number" id="blitzStartingTimeInput" min="10" max="900" step="5" value="60" />
+          </label>
+          <label
+            >Time back per edge (seconds)
+            <input type="number" id="blitzTimeBackInput" min="0.05" max="5" step="0.05" value="0.3" />
+          </label>
+          <button class="menuBtn menuBtnPrimary" id="blitzStartBtn">Start</button>
+        </div>
+      </div>
+
+      <!-- Blitz leaderboard: every difficulty setting the player has completed a run at. -->
+      <div id="blitzLeaderboardScreen" class="screen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="blitzLeaderboardBackBtn">‹ Blitz</button>
+          <h2>Leaderboard</h2>
+        </div>
+        <div id="blitzLeaderboardListEl" class="listScroll"></div>
+      </div>
+
+      <!-- Blitz leaderboard runs: every run recorded at one specific difficulty, sorted by score. -->
+      <div id="blitzLeaderboardRunsScreen" class="screen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="blitzLeaderboardRunsBackBtn">‹ Leaderboard</button>
+          <h2 id="blitzLeaderboardRunsTitle">Runs</h2>
+        </div>
+        <div id="blitzLeaderboardRunsListEl" class="listScroll"></div>
+      </div>
+
+      <!-- Blitz game over: final score + Play Again / back to Blitz menu. -->
+      <div id="blitzGameOverScreen" class="screen menuBgScreen hidden">
+        <div class="menuContent">
+          <h1 class="menuTitle">Time's up!</h1>
+          <p class="menuTagline" id="blitzGameOverScore"></p>
+          <div class="menuButtonStack">
+            <button class="menuBtn menuBtnPrimary" id="blitzPlayAgainBtn">Play Again</button>
+            <button class="menuBtn menuBtnSecondary" id="blitzGameOverReplayBtn">Watch Replay</button>
+            <button class="menuBtn menuBtnSecondary" id="blitzGameOverMenuBtn">‹ Blitz Menu</button>
           </div>
         </div>
       </div>
@@ -105,14 +169,29 @@
         <div id="replaysListEl" class="listScroll"></div>
       </div>
 
-      <!-- The live/reviewed game itself. -->
+      <!--
+        The live/reviewed/Blitz game itself — one shared canvas + board
+        layout for all three (`main.ts`'s `mode: 'playing' | 'reviewing' |
+        'blitz' | 'blitzReplay'`). `#exitBtn`/`#headerInfo`/`#playControls`
+        are Free Play's own; `#reviewBar` is the ordinary per-puzzle review
+        overlay; `#blitzExitBtn`/`#blitzHeaderInfo`/`#blitzBar` are Blitz's
+        live-run equivalents, and `#blitzReplayBar` is a Blitz *run's*
+        real-time replay (distinct from `#reviewBar`'s single-puzzle replay)
+        — exactly one of these sets is ever visible, toggled by `main.ts`'s
+        `mode`.
+      -->
       <div id="gameScreen" class="screen hidden">
         <header>
           <button class="secondary backBtn" id="exitBtn">‹ Exit</button>
+          <button class="secondary backBtn hidden" id="blitzExitBtn">‹ Forfeit</button>
           <h1>Einkreis</h1>
           <div id="headerInfo">
             <div id="puzzleLabel"></div>
             <div id="progress">0 / 0</div>
+          </div>
+          <div id="blitzHeaderInfo" class="hidden">
+            <div id="blitzTimer">0:00</div>
+            <div id="blitzStats"></div>
           </div>
         </header>
         <div id="boardWrap">
@@ -142,6 +221,19 @@
               <input type="range" id="replayScrubber" min="0" max="0" value="0" step="1" />
               <span id="replayCounter"></span>
             </div>
+          </div>
+          <!-- Blitz run replay: plays the whole recorded run back at real pace (see game/blitz.ts's BlitzEvent). Distinct from #reviewBar, which replays one puzzle's move log. -->
+          <div id="blitzReplayBar" class="hidden">
+            <button class="secondary backBtn" id="blitzReplayCloseBtn">‹ Close</button>
+            <button class="secondary" id="blitzReplayPlayPauseBtn">Pause</button>
+            <select id="blitzReplaySpeedSelect" title="Replay speed">
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+              <option value="4">4×</option>
+            </select>
+            <input type="range" id="blitzReplayScrubber" min="0" max="0" value="0" step="1" />
+            <span id="blitzReplayCounter"></span>
           </div>
         </div>
         <div class="controls" id="playControls">

@@ -160,6 +160,16 @@ body {
   margin-top: 8px;
   width: min(280px, 80vw);
 }
+/* Blitz setup's two number inputs (starting time / time back per edge) reuse `.newGameForm`'s layout — matching `select`'s own look so the form reads as one consistent style regardless of control type. */
+.newGameForm input[type='number'] {
+  width: 100%;
+  padding: 10px 8px;
+  font-size: 0.95rem;
+  background: #24262e;
+  border: 1px solid #3a3c46;
+  color: #e8e8ea;
+  border-radius: 6px;
+}
 
 /* ---- Game screen ---- */
 header {
@@ -200,6 +210,27 @@ h1 {
   font-weight: 700;
 }
 #progress {
+  font-size: 0.75rem;
+  color: #9a9aa4;
+  font-variant-numeric: tabular-nums;
+}
+/* Blitz's own header readout — a live countdown plus a short status line — replacing #headerInfo while `mode === 'blitz'`/`'blitzReplay'` (see index.html's doc comment on #gameScreen). */
+#blitzHeaderInfo {
+  flex: 0 0 auto;
+  text-align: right;
+}
+#blitzTimer {
+  font-size: 1.1rem;
+  font-weight: 800;
+  color: #f5f5f7;
+  font-variant-numeric: tabular-nums;
+  transition: color 0.15s ease;
+}
+/* The last few seconds read as urgent — a plain countdown alone is easy to miss mid-tap. */
+#blitzTimer.low {
+  color: #ff5a5a;
+}
+#blitzStats {
   font-size: 0.75rem;
   color: #9a9aa4;
   font-variant-numeric: tabular-nums;
@@ -347,8 +378,16 @@ button:disabled {
  * (Done, Play/Pause, speed select, scrubber, counter) all `min-width: 0`
  * flex children, whichever ones don't fit the first line wrap to a second
  * rather than forcing the row wider than the viewport.
+ *
+ * `#blitzReplayBar` (a Blitz *run's* real-time replay, see
+ * `game/blitz.ts`'s `BlitzEvent`) is a single always-one-row equivalent of
+ * `#reviewPlaybackControls` — sharing every one of these rules rather than
+ * duplicating them, since it's the exact same layout problem (Close,
+ * Play/Pause, speed select, scrubber, counter, all needing to fit or wrap
+ * on a narrow phone).
  */
-#reviewBar {
+#reviewBar,
+#blitzReplayBar {
   position: absolute;
   top: 0;
   left: 0;
@@ -368,29 +407,34 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-#reviewBar button {
+#reviewBar button,
+#blitzReplayBar button {
   padding: 6px 12px;
   font-size: 0.8rem;
   flex: 0 0 auto;
 }
 #reviewIdleControls,
-#reviewPlaybackControls {
+#reviewPlaybackControls,
+#blitzReplayBar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   width: 100%;
 }
-#replaySpeedSelect {
+#replaySpeedSelect,
+#blitzReplaySpeedSelect {
   flex: 0 0 auto;
   min-width: 0;
 }
-#replayScrubber {
+#replayScrubber,
+#blitzReplayScrubber {
   flex: 1 1 100px;
   min-width: 60px;
   accent-color: #4f7cff;
 }
-#replayCounter {
+#replayCounter,
+#blitzReplayCounter {
   flex: 0 0 auto;
   font-size: 0.75rem;
   color: #9a9aa4;
