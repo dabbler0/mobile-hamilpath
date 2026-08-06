@@ -13,6 +13,44 @@ export interface RenderState {
   focusedRegion?: Region | null;
   /** The keyboard-control cursor's exact face, if keyboard navigation is in use — drawn on top of the (possibly larger) focused-region fill so movement within one region is still visible. */
   keyboardCursor?: Face | null;
+  /** In-flight edge/win-loop animations, owned and scheduled by `main.ts` (see its "Animations" section) — omitted entirely for a plain, static draw (e.g. the review scrubber jumping straight to a frame). */
+  anim?: AnimationState;
+}
+
+/** A single edge growing in from zero width (drawn at full length throughout), keyed by when it started (`main.ts`'s `growingEdges`). */
+export type GrowingEdges = ReadonlyMap<EdgeKey, number>;
+/** A single edge shrinking back to zero width after being unmarked, with the color it had at the moment it was removed (it's no longer part of any *live* component to re-derive a color from) — `main.ts`'s `shrinkingEdges`. */
+export type ShrinkingEdges = ReadonlyMap<EdgeKey, { start: number; color: string }>;
+/** An edge whose component recolored as a side effect of a toggle elsewhere (a merge/split), rippling out from the toggle location — `delay` staggers its pulse by graph distance, `fromColor` is the color to show until the wave "arrives" (`main.ts`'s `pulsingEdges`, `edgeRipple.ts`'s `computeRecoloredEdges`). */
+export type PulsingEdges = ReadonlyMap<EdgeKey, { start: number; delay: number; fromColor: string }>;
+
+export interface AnimationState {
+  /** `performance.now()` at the moment this frame is being drawn. */
+  now: number;
+  growing?: GrowingEdges;
+  shrinking?: ShrinkingEdges;
+  pulsing?: PulsingEdges;
+  /** The cell cycle a completed puzzle's win-loop dot travels along, and when it started — `null`/absent whenever the board isn't currently in a completed state. */
+  winLoop?: { cells: ReadonlyArray<readonly [number, number]>; startTime: number } | null;
+}
+
+/** How long a newly-marked edge takes to grow from zero to full *width* (drawn full-length the whole time), and a newly-unmarked one to shrink back to zero width — `pathEdit.ts`'s `toggleRegion` is the only thing that starts one (see `main.ts`'s `scheduleToggleAnimation`). */
+export const GROW_MS = 220;
+export const SHRINK_MS = 220;
+/** How long one edge's recolor "pulse" (width bulge + color swap at its peak) lasts, once its ripple delay has elapsed. */
+export const PULSE_MS = 260;
+const PULSE_BULGE = 0.85;
+/** Below this a stroke is treated as invisible and skipped — canvas ignores/normalizes `ctx.lineWidth = 0` rather than actually drawing nothing, so a grow/shrink's endpoints would otherwise flash a stray hairline. */
+const MIN_VISIBLE_WIDTH = 0.5;
+
+function smoothstep(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return c * c * (3 - 2 * c);
+}
+
+/** How long one full lap of the win-loop dot animation takes, scaled by loop length but clamped so a tiny board isn't dizzying and a huge one doesn't crawl. */
+function winDotPeriodMs(cellCount: number): number {
+  return Math.max(2500, Math.min(9000, cellCount * 60));
 }
 
 const COLORS = {
@@ -22,6 +60,8 @@ const COLORS = {
   markedWon: '#35c46a',
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
+  /** The dot that travels around a completed puzzle's loop, see `drawWinLoopDot`. */
+  winDot: '#ffffff',
   /** Badge color for an edge collection whose currently-marked count doesn't match its `required` count — see `drawEdgeCollectionBadges`. */
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
@@ -53,7 +93,8 @@ function collectionColor(id: number): string {
  */
 const SEGMENT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
 
-function segmentColor(component: number): string {
+/** Exported so `main.ts` can freeze the same color a component was showing at the moment an animation starts (a shrinking edge's last color, a pulse's `fromColor`) — see its "Animations" section. */
+export function segmentColor(component: number): string {
   return SEGMENT_COLORS[component % SEGMENT_COLORS.length];
 }
 
@@ -78,13 +119,14 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
 }
 
 function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdgeCollectionHalos(ctx, puzzle, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
-  drawMarkedEdges(ctx, edges, won, layout);
+  drawMarkedEdges(ctx, edges, won, layout, anim);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
+  if (anim?.winLoop) drawWinLoopDot(ctx, anim.winLoop, anim.now, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
@@ -129,25 +171,96 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
   }
 }
 
-function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout): void {
-  ctx.lineWidth = Math.max(3, layout.cellSize * 0.32);
+/**
+ * Draws every currently-marked edge, plus any edge still mid-`shrink` after
+ * being unmarked (not in `edges` any more, but not done animating out yet —
+ * see `main.ts`'s `shrinkingEdges`). A `growing` edge is drawn at full
+ * length throughout, its *width* ramping from 0 up to normal over
+ * `GROW_MS`; a `shrinking` one is the mirror image, its width ramping back
+ * down to 0. A `pulsing` edge (present the whole time, just recoloring as a
+ * merge/split ripples past it) bulges *past* normal width and back, swapping
+ * from its old color to its live one at the peak — see `AnimationState`'s
+ * doc comment for where these come from.
+ */
+function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
+  const baseWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineCap = 'round';
 
   // A win is exactly one component covering every cell, so there's nothing to
   // tell apart — keep the single "solved" color instead of an arbitrary one
   // from the segment palette.
   const components = won ? null : computeEdgeComponents(edges);
+  const now = anim?.now ?? 0;
 
   for (const ek of edges) {
-    ctx.strokeStyle = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
+    const liveColor = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
     const [a, b] = parseEdgeKey(ek);
     const [sx1, sy1] = toScreen(a, layout);
     const [sx2, sy2] = toScreen(b, layout);
+
+    const growStart = anim?.growing?.get(ek);
+    const pulse = growStart === undefined ? anim?.pulsing?.get(ek) : undefined;
+
+    let strokeStyle = liveColor;
+    let lineWidth = baseWidth;
+    if (growStart !== undefined) {
+      lineWidth = baseWidth * smoothstep((now - growStart) / GROW_MS);
+    } else if (pulse) {
+      const t = (now - pulse.start - pulse.delay) / PULSE_MS;
+      if (t < 0) {
+        strokeStyle = pulse.fromColor; // ripple hasn't reached this edge yet
+      } else if (t <= 1) {
+        lineWidth = baseWidth * (1 + PULSE_BULGE * Math.sin(Math.PI * t));
+        strokeStyle = t < 0.5 ? pulse.fromColor : liveColor;
+      }
+    }
+
+    if (lineWidth < MIN_VISIBLE_WIDTH) continue;
+    ctx.strokeStyle = strokeStyle;
+    ctx.lineWidth = lineWidth;
     ctx.beginPath();
     ctx.moveTo(sx1, sy1);
     ctx.lineTo(sx2, sy2);
     ctx.stroke();
   }
+
+  if (anim?.shrinking) {
+    for (const [ek, shrink] of anim.shrinking) {
+      if (edges.has(ek)) continue; // shouldn't happen — a re-marked edge is dropped from `shrinking` by `main.ts`
+      const lineWidth = baseWidth * (1 - smoothstep((now - shrink.start) / SHRINK_MS));
+      if (lineWidth < MIN_VISIBLE_WIDTH) continue;
+      const [a, b] = parseEdgeKey(ek);
+      const [sx1, sy1] = toScreen(a, layout);
+      const [sx2, sy2] = toScreen(b, layout);
+      ctx.strokeStyle = shrink.color;
+      ctx.lineWidth = lineWidth;
+      ctx.beginPath();
+      ctx.moveTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.stroke();
+    }
+  }
+}
+
+/** Draws the traveling dot that marks a completed puzzle's loop, walking `winLoop.cells` in order and looping forever (see `winDotPeriodMs`). */
+function drawWinLoopDot(ctx: CanvasRenderingContext2D, winLoop: NonNullable<AnimationState['winLoop']>, now: number, layout: Layout): void {
+  const { cells, startTime } = winLoop;
+  if (cells.length < 2) return;
+  const periodMs = winDotPeriodMs(cells.length);
+  const frac = (((now - startTime) % periodMs) + periodMs) % periodMs / periodMs;
+  const pos = frac * cells.length;
+  const i = Math.floor(pos) % cells.length;
+  const localT = pos - Math.floor(pos);
+  const [sx1, sy1] = toScreen(cells[i], layout);
+  const [sx2, sy2] = toScreen(cells[(i + 1) % cells.length], layout);
+  const r = Math.max(4, layout.cellSize * 0.24);
+  ctx.beginPath();
+  ctx.fillStyle = COLORS.winDot;
+  ctx.arc(sx1 + (sx2 - sx1) * localT, sy1 + (sy2 - sy1) * localT, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+  ctx.stroke();
 }
 
 /**
@@ -290,8 +403,9 @@ function drawWrapped(
   view: Viewport,
   topology: Topology,
 ): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim } = state;
   const { W, H } = puzzle;
+  const now = anim?.now ?? 0;
 
   ctx.save();
   ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
@@ -333,12 +447,44 @@ function drawWrapped(
     }
   }
 
+  // Mirrors `drawMarkedEdges`'s grow/shrink/pulse handling (see its doc
+  // comment) — `lineWidth` is resolved once here per logical edge, then
+  // reapplied identically to every tile copy below, since the animation's
+  // progress doesn't depend on which repeated tile it's drawn in.
   const components = won ? null : computeEdgeComponents(edges);
-  const tiledMarkedEdges: Array<TiledEdge & { color: string }> = [];
+  const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
+  const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
-    const color = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
-    tiledMarkedEdges.push({ ...classifyEdge(a, b, topology, W, H), color });
+    const liveColor = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
+    const classified = classifyEdge(a, b, topology, W, H);
+
+    const growStart = anim?.growing?.get(ek);
+    const pulse = growStart === undefined ? anim?.pulsing?.get(ek) : undefined;
+    let color = liveColor;
+    let lineWidth = baseMarkedWidth;
+    if (growStart !== undefined) {
+      lineWidth = baseMarkedWidth * smoothstep((now - growStart) / GROW_MS);
+    } else if (pulse) {
+      const t = (now - pulse.start - pulse.delay) / PULSE_MS;
+      if (t < 0) {
+        color = pulse.fromColor;
+      } else if (t <= 1) {
+        lineWidth = baseMarkedWidth * (1 + PULSE_BULGE * Math.sin(Math.PI * t));
+        color = t < 0.5 ? pulse.fromColor : liveColor;
+      }
+    }
+    if (lineWidth >= MIN_VISIBLE_WIDTH) tiledMarkedEdges.push({ ...classified, color, lineWidth });
+  }
+  if (anim?.shrinking) {
+    for (const [ek, shrink] of anim.shrinking) {
+      if (edges.has(ek)) continue;
+      const lineWidth = baseMarkedWidth * (1 - smoothstep((now - shrink.start) / SHRINK_MS));
+      if (lineWidth < MIN_VISIBLE_WIDTH) continue;
+      const [a, b] = parseEdgeKey(ek);
+      const classified = classifyEdge(a, b, topology, W, H);
+      tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth });
+    }
   }
 
   // Same "one entry per collection edge" shape as `tiledMarkedEdges`, computed
@@ -429,16 +575,16 @@ function drawWrapped(
     }
   });
 
-  ctx.lineWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineCap = 'round';
   forEachTile((tileX, tileY) => {
     const oFrom = topology.tileOrientation(tileX, tileY);
-    for (const { from, to, tileDX, tileDY, color } of tiledMarkedEdges) {
+    for (const { from, to, tileDX, tileDY, color, lineWidth } of tiledMarkedEdges) {
       const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
       const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
       const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
       const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
       ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);
       ctx.lineTo(sx2, sy2);
@@ -460,6 +606,34 @@ function drawWrapped(
         const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
         drawBadge(ctx, (sx1 + sx2) / 2, (sy1 + sy2) / 2, r, text, fill);
       }
+    });
+  }
+
+  if (anim?.winLoop && anim.winLoop.cells.length >= 2) {
+    const { cells, startTime } = anim.winLoop;
+    const periodMs = winDotPeriodMs(cells.length);
+    const frac = (((now - startTime) % periodMs) + periodMs) % periodMs / periodMs;
+    const pos = frac * cells.length;
+    const i = Math.floor(pos) % cells.length;
+    const localT = pos - Math.floor(pos);
+    // `classifyEdge` returns `from`/`to` by reference to whichever of `a`/`b` it
+    // picked as the canonical near endpoint — reference-compare against `a` to
+    // know whether `localT` (a's-side-first) needs flipping to match.
+    const a = cells[i];
+    const b = cells[(i + 1) % cells.length];
+    const classified = classifyEdge(a, b, topology, W, H);
+    const dotT = classified.from === a ? localT : 1 - localT;
+    const r = Math.max(4, layout.cellSize * 0.24);
+    ctx.fillStyle = COLORS.winDot;
+    forEachTile((tileX, tileY) => {
+      const oFrom = topology.tileOrientation(tileX, tileY);
+      const [sx1, sy1] = toScreenTiled(classified.from, layout, tileX, tileY, W, H, oFrom);
+      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, classified.tileDX, classified.tileDY);
+      const oTo = classified.tileDX === 0 && classified.tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+      const [sx2, sy2] = toScreenTiled(classified.to, layout, toTileX, toTileY, W, H, oTo);
+      ctx.beginPath();
+      ctx.arc(sx1 + (sx2 - sx1) * dotT, sy1 + (sy2 - sy1) * dotT, r, 0, Math.PI * 2);
+      ctx.fill();
     });
   }
 
