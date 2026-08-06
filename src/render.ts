@@ -17,9 +17,9 @@ export interface RenderState {
   anim?: AnimationState;
 }
 
-/** A single edge growing in from zero length, keyed by when it started (`main.ts`'s `growingEdges`). */
+/** A single edge growing in from zero width (drawn at full length throughout), keyed by when it started (`main.ts`'s `growingEdges`). */
 export type GrowingEdges = ReadonlyMap<EdgeKey, number>;
-/** A single edge shrinking back to zero length after being unmarked, with the color it had at the moment it was removed (it's no longer part of any *live* component to re-derive a color from) — `main.ts`'s `shrinkingEdges`. */
+/** A single edge shrinking back to zero width after being unmarked, with the color it had at the moment it was removed (it's no longer part of any *live* component to re-derive a color from) — `main.ts`'s `shrinkingEdges`. */
 export type ShrinkingEdges = ReadonlyMap<EdgeKey, { start: number; color: string }>;
 /** An edge whose component recolored as a side effect of a toggle elsewhere (a merge/split), rippling out from the toggle location — `delay` staggers its pulse by graph distance, `fromColor` is the color to show until the wave "arrives" (`main.ts`'s `pulsingEdges`, `edgeRipple.ts`'s `computeRecoloredEdges`). */
 export type PulsingEdges = ReadonlyMap<EdgeKey, { start: number; delay: number; fromColor: string }>;
@@ -34,12 +34,14 @@ export interface AnimationState {
   winLoop?: { cells: ReadonlyArray<readonly [number, number]>; startTime: number } | null;
 }
 
-/** How long a newly-marked edge takes to grow from zero to full length, and a newly-unmarked one to shrink back to zero — `pathEdit.ts`'s `toggleRegion` is the only thing that starts one (see `main.ts`'s `scheduleToggleAnimation`). */
+/** How long a newly-marked edge takes to grow from zero to full *width* (drawn full-length the whole time), and a newly-unmarked one to shrink back to zero width — `pathEdit.ts`'s `toggleRegion` is the only thing that starts one (see `main.ts`'s `scheduleToggleAnimation`). */
 export const GROW_MS = 220;
 export const SHRINK_MS = 220;
 /** How long one edge's recolor "pulse" (width bulge + color swap at its peak) lasts, once its ripple delay has elapsed. */
 export const PULSE_MS = 260;
 const PULSE_BULGE = 0.85;
+/** Below this a stroke is treated as invisible and skipped — canvas ignores/normalizes `ctx.lineWidth = 0` rather than actually drawing nothing, so a grow/shrink's endpoints would otherwise flash a stray hairline. */
+const MIN_VISIBLE_WIDTH = 0.5;
 
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
@@ -172,13 +174,13 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
 /**
  * Draws every currently-marked edge, plus any edge still mid-`shrink` after
  * being unmarked (not in `edges` any more, but not done animating out yet —
- * see `main.ts`'s `shrinkingEdges`). A `growing` edge is drawn as a partial
- * line from its lower-keyed endpoint (`parseEdgeKey`'s `a`) toward `b`,
- * lengthening to full over `GROW_MS`; a `shrinking` one is the mirror image,
- * collapsing back toward `a`. A `pulsing` edge (present the whole time, just
- * recoloring as a merge/split ripples past it) stays full-length but bulges
- * in width and swaps from its old color to its live one at the peak — see
- * `AnimationState`'s doc comment for where these come from.
+ * see `main.ts`'s `shrinkingEdges`). A `growing` edge is drawn at full
+ * length throughout, its *width* ramping from 0 up to normal over
+ * `GROW_MS`; a `shrinking` one is the mirror image, its width ramping back
+ * down to 0. A `pulsing` edge (present the whole time, just recoloring as a
+ * merge/split ripples past it) bulges *past* normal width and back, swapping
+ * from its old color to its live one at the peak — see `AnimationState`'s
+ * doc comment for where these come from.
  */
 function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
@@ -201,9 +203,8 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
 
     let strokeStyle = liveColor;
     let lineWidth = baseWidth;
-    let fraction = 1;
     if (growStart !== undefined) {
-      fraction = smoothstep((now - growStart) / GROW_MS);
+      lineWidth = baseWidth * smoothstep((now - growStart) / GROW_MS);
     } else if (pulse) {
       const t = (now - pulse.start - pulse.delay) / PULSE_MS;
       if (t < 0) {
@@ -214,28 +215,28 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
       }
     }
 
+    if (lineWidth < MIN_VISIBLE_WIDTH) continue;
     ctx.strokeStyle = strokeStyle;
     ctx.lineWidth = lineWidth;
     ctx.beginPath();
     ctx.moveTo(sx1, sy1);
-    ctx.lineTo(fraction >= 1 ? sx2 : sx1 + (sx2 - sx1) * fraction, fraction >= 1 ? sy2 : sy1 + (sy2 - sy1) * fraction);
+    ctx.lineTo(sx2, sy2);
     ctx.stroke();
   }
 
   if (anim?.shrinking) {
-    ctx.lineWidth = baseWidth;
     for (const [ek, shrink] of anim.shrinking) {
       if (edges.has(ek)) continue; // shouldn't happen — a re-marked edge is dropped from `shrinking` by `main.ts`
-      const t = smoothstep((now - shrink.start) / SHRINK_MS);
-      if (t >= 1) continue;
+      const lineWidth = baseWidth * (1 - smoothstep((now - shrink.start) / SHRINK_MS));
+      if (lineWidth < MIN_VISIBLE_WIDTH) continue;
       const [a, b] = parseEdgeKey(ek);
       const [sx1, sy1] = toScreen(a, layout);
       const [sx2, sy2] = toScreen(b, layout);
-      const fraction = 1 - t;
       ctx.strokeStyle = shrink.color;
+      ctx.lineWidth = lineWidth;
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);
-      ctx.lineTo(sx1 + (sx2 - sx1) * fraction, sy1 + (sy2 - sy1) * fraction);
+      ctx.lineTo(sx2, sy2);
       ctx.stroke();
     }
   }
@@ -447,12 +448,12 @@ function drawWrapped(
   }
 
   // Mirrors `drawMarkedEdges`'s grow/shrink/pulse handling (see its doc
-  // comment) — `fraction`/`lineWidth` are resolved once here per logical
-  // edge, then reapplied identically to every tile copy below, since the
-  // animation's progress doesn't depend on which repeated tile it's drawn in.
+  // comment) — `lineWidth` is resolved once here per logical edge, then
+  // reapplied identically to every tile copy below, since the animation's
+  // progress doesn't depend on which repeated tile it's drawn in.
   const components = won ? null : computeEdgeComponents(edges);
   const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
-  const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number; fraction: number }> = [];
+  const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
     const liveColor = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
@@ -462,9 +463,8 @@ function drawWrapped(
     const pulse = growStart === undefined ? anim?.pulsing?.get(ek) : undefined;
     let color = liveColor;
     let lineWidth = baseMarkedWidth;
-    let fraction = 1;
     if (growStart !== undefined) {
-      fraction = smoothstep((now - growStart) / GROW_MS);
+      lineWidth = baseMarkedWidth * smoothstep((now - growStart) / GROW_MS);
     } else if (pulse) {
       const t = (now - pulse.start - pulse.delay) / PULSE_MS;
       if (t < 0) {
@@ -474,16 +474,16 @@ function drawWrapped(
         color = t < 0.5 ? pulse.fromColor : liveColor;
       }
     }
-    tiledMarkedEdges.push({ ...classified, color, lineWidth, fraction });
+    if (lineWidth >= MIN_VISIBLE_WIDTH) tiledMarkedEdges.push({ ...classified, color, lineWidth });
   }
   if (anim?.shrinking) {
     for (const [ek, shrink] of anim.shrinking) {
       if (edges.has(ek)) continue;
-      const t = smoothstep((now - shrink.start) / SHRINK_MS);
-      if (t >= 1) continue;
+      const lineWidth = baseMarkedWidth * (1 - smoothstep((now - shrink.start) / SHRINK_MS));
+      if (lineWidth < MIN_VISIBLE_WIDTH) continue;
       const [a, b] = parseEdgeKey(ek);
       const classified = classifyEdge(a, b, topology, W, H);
-      tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth: baseMarkedWidth, fraction: 1 - t });
+      tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth });
     }
   }
 
@@ -578,7 +578,7 @@ function drawWrapped(
   ctx.lineCap = 'round';
   forEachTile((tileX, tileY) => {
     const oFrom = topology.tileOrientation(tileX, tileY);
-    for (const { from, to, tileDX, tileDY, color, lineWidth, fraction } of tiledMarkedEdges) {
+    for (const { from, to, tileDX, tileDY, color, lineWidth } of tiledMarkedEdges) {
       const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
       const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
       const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
@@ -587,7 +587,7 @@ function drawWrapped(
       ctx.lineWidth = lineWidth;
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);
-      ctx.lineTo(fraction >= 1 ? sx2 : sx1 + (sx2 - sx1) * fraction, fraction >= 1 ? sy2 : sy1 + (sy2 - sy1) * fraction);
+      ctx.lineTo(sx2, sy2);
       ctx.stroke();
     }
   });

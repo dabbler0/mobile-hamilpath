@@ -211,16 +211,19 @@ instant of it (its `AnimationState`, threaded through `RenderState.anim`)
 for both the ordinary and wraparound (`drawWrapped`) render paths.
 
 - **Grow/shrink**: a region toggle's newly-marked edges "grow" from zero to
-  full length, and newly-unmarked edges "shrink" back to zero, over
-  `render.ts`'s `GROW_MS`/`SHRINK_MS` (220ms each, eased with `smoothstep`).
-  `main.ts`'s `scheduleToggleAnimation` (called only from `setPathState`,
-  the single funnel every pointer/keyboard toggle already goes through)
-  diffs the op's edges against the previous state to decide grow vs. shrink
-  per edge. A shrinking edge is no longer in `pathState.edges` at all, so
-  its color is frozen at the moment of removal (`segmentColor`, exported
-  from `render.ts` for this) rather than recomputed live, and `render.ts`
-  draws it as an extra edge alongside the live ones for as long as it's
-  still animating.
+  full *width* (drawn at full length the whole time), and newly-unmarked
+  edges "shrink" from full width back to zero, over `render.ts`'s
+  `GROW_MS`/`SHRINK_MS` (220ms each, eased with `smoothstep`). A stroke
+  below `MIN_VISIBLE_WIDTH` is skipped outright rather than drawn at
+  `ctx.lineWidth` near 0, since canvas normalizes/ignores an actual `0` and
+  would otherwise flash a stray hairline at the very start/end. `main.ts`'s
+  `scheduleToggleAnimation` (called only from `setPathState`, the single
+  funnel every pointer/keyboard toggle already goes through) diffs the op's
+  edges against the previous state to decide grow vs. shrink per edge. A
+  shrinking edge is no longer in `pathState.edges` at all, so its color is
+  frozen at the moment of removal (`segmentColor`, exported from `render.ts`
+  for this) rather than recomputed live, and `render.ts` draws it as an
+  extra edge alongside the live ones for as long as it's still animating.
 - **Recolor ripple**: when a toggle causes a merge or split, some *other*
   already-marked edge's component (and so its color) can change as a side
   effect. `game/edgeRipple.ts`'s `computeRecoloredEdges` finds every such
