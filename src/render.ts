@@ -113,12 +113,21 @@ export interface CometStyle {
  * scale with board size the way `main.ts`'s doc comment on this feature
  * describes.
  *
- * The width bulge mirrors an ordinary recolor pulse exactly — same
- * `PULSE_MS` duration and `PULSE_BULGE` shape — just re-triggered every lap
- * at the comet's current position instead of once at a scheduled delay, so
- * the comet's leading edge visibly "grows and shrinks" the same way the
- * pre-comet ripple's frontier does, rather than being a flat-width color
- * fade with no motion of its own.
+ * The width bulge peaks *at* the comet's exact head (`sincePassedHops ===
+ * 0`) and eases back down to normal width over the trailing
+ * `PULSE_MS`-ish window behind it — deliberately not the symmetric
+ * grow-then-shrink shape an ordinary recolor pulse uses (which is zero at
+ * *both* ends of its own window, since it's a one-shot event with nothing
+ * before or after it to stay connected to). The comet's frontier has
+ * nothing analogous to "before" — it's *always* mid-motion — so if it used
+ * that same symmetric shape, its bulge would have to ramp up from zero
+ * every time it (re)starts, which is exactly what caused a visible stutter
+ * right at the ripple-to-comet handoff (the ripple's own bulge fading to
+ * nothing as it runs out of new edges to animate, at the same moment the
+ * comet's would still be ramping up from zero). Peaking immediately at the
+ * head instead means the frontier is *always* at full bulge somewhere,
+ * continuously, with nothing to hand off to — see `main.ts`'s doc comment
+ * on `pendingCometStart` for how the timing lines up with the ripple.
  *
  * `colorAgeHops` (used only for color, never for the width bulge — see
  * below) is capped at `elapsedHops`: every edge the comet hasn't actually
@@ -155,7 +164,7 @@ function computeCometStyles(cells: ReadonlyArray<readonly [number, number]>, sta
     // age), instead of the bulge staying a single small pulse localized right
     // at the comet's actual head.
     const tPulse = (sincePassedHops * RIPPLE_STAGGER_MS) / PULSE_MS;
-    const widthMultiplier = tPulse <= 1 ? 1 + PULSE_BULGE * Math.sin(Math.PI * tPulse) : 1;
+    const widthMultiplier = 1 + PULSE_BULGE * (1 - smoothstep(tPulse));
     styles.set(ek, { color, widthMultiplier });
   }
   return styles;
@@ -263,6 +272,28 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
   }
 }
 
+interface MarkedEdgeDraw {
+  sx1: number;
+  sy1: number;
+  sx2: number;
+  sy2: number;
+  color: string;
+  lineWidth: number;
+}
+
+/** Draws a batch of marked-edge segments, widest last — see `drawMarkedEdges`'s doc comment for why draw order matters here. */
+function strokeMarkedEdges(ctx: CanvasRenderingContext2D, draws: MarkedEdgeDraw[]): void {
+  draws.sort((a, b) => a.lineWidth - b.lineWidth);
+  for (const { sx1, sy1, sx2, sy2, color, lineWidth } of draws) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.beginPath();
+    ctx.moveTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+  }
+}
+
 /**
  * Draws every currently-marked edge, plus any edge still mid-`shrink` after
  * being unmarked (not in `edges` any more, but not done animating out yet —
@@ -277,6 +308,17 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
  * from the flat "solved" color/width for every edge that isn't otherwise
  * mid grow or pulse — this can only actually apply once every edge is done
  * pulsing, since that's the same moment `main.ts` starts the comet.
+ *
+ * Every edge is collected first and stroked in ascending-width order
+ * (`strokeMarkedEdges`) rather than drawn immediately in `edges`' arbitrary
+ * iteration order: two edges sharing a vertex both get rounded end caps
+ * there, and whichever is drawn *second* paints over the first's cap at
+ * that point — normally invisible since same-width neighbors' caps align,
+ * but a temporarily-widened edge (grow/pulse/comet) drawn *before* an
+ * ordinary-width neighbor lets that neighbor's thinner cap visibly bite
+ * into the wide edge's join, reading as a notch right at a moving wave's
+ * leading edge. Sorting so wider edges always draw last keeps a bulging
+ * edge's join on top everywhere, regardless of `edges`' iteration order.
  */
 function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
@@ -288,6 +330,8 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
   const components = won ? null : computeEdgeComponents(edges);
   const now = anim?.now ?? 0;
   const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
+
+  const draws: MarkedEdgeDraw[] = [];
 
   for (const ek of edges) {
     const cometStyle = cometStyles?.get(ek);
@@ -314,12 +358,7 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
     }
 
     if (lineWidth < MIN_VISIBLE_WIDTH) continue;
-    ctx.strokeStyle = strokeStyle;
-    ctx.lineWidth = lineWidth;
-    ctx.beginPath();
-    ctx.moveTo(sx1, sy1);
-    ctx.lineTo(sx2, sy2);
-    ctx.stroke();
+    draws.push({ sx1, sy1, sx2, sy2, color: strokeStyle, lineWidth });
   }
 
   if (anim?.shrinking) {
@@ -330,14 +369,11 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
       const [a, b] = parseEdgeKey(ek);
       const [sx1, sy1] = toScreen(a, layout);
       const [sx2, sy2] = toScreen(b, layout);
-      ctx.strokeStyle = shrink.color;
-      ctx.lineWidth = lineWidth;
-      ctx.beginPath();
-      ctx.moveTo(sx1, sy1);
-      ctx.lineTo(sx2, sy2);
-      ctx.stroke();
+      draws.push({ sx1, sy1, sx2, sy2, color: shrink.color, lineWidth });
     }
   }
+
+  strokeMarkedEdges(ctx, draws);
 }
 
 /**
@@ -565,6 +601,10 @@ function drawWrapped(
       tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth });
     }
   }
+  // Widest last, same reasoning (and same fix) as `drawMarkedEdges`'s own
+  // `strokeMarkedEdges` — a bulging edge's rounded join should never get
+  // painted over by a normal-width neighbor sharing its vertex.
+  tiledMarkedEdges.sort((a, b) => a.lineWidth - b.lineWidth);
 
   // Same "one entry per collection edge" shape as `tiledMarkedEdges`, computed
   // once up front so `forEachTile` below only has to re-project (not
