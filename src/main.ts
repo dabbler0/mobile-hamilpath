@@ -1,5 +1,5 @@
 import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
-import { computeEdgeComponents } from './game/edgeComponents';
+import { createComponentColorState, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
@@ -10,7 +10,7 @@ import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
-import { draw, GROW_MS, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
+import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -128,10 +128,23 @@ let toastTimerId: number | null = null;
  *   continued redraws while anything above is active; `render()` reschedules
  *   itself as long as `edgeAnimsActive() || winLoopCells !== null`, and lets
  *   the loop lapse the moment neither is true.
+ * - `liveComponentColors`/`reviewComponentColors` (`game/componentColors.ts`)
+ *   are *not* cleared by `clearEdgeAnimations` — they track persistent
+ *   per-component colors across ordinary edits (undo/redo included), which
+ *   is the whole point (see that module's doc comment). `render()` updates
+ *   whichever one is active every frame (cheap and idempotent when edges
+ *   haven't changed, same as `computeEdgeComponents` always was); only a
+ *   genuine switch to a *different* board (`startPuzzle`, `enterReview`)
+ *   explicitly resets one, so an unrelated old component's color can't
+ *   spuriously "persist" onto a new puzzle just because cell coordinates
+ *   happen to coincide.
  */
 const growingEdges = new Map<EdgeKey, number>();
 const shrinkingEdges = new Map<EdgeKey, { start: number; color: string }>();
 const pulsingEdges = new Map<EdgeKey, { start: number; delay: number; fromColor: string }>();
+
+const liveComponentColors: ComponentColorState = createComponentColorState();
+const reviewComponentColors: ComponentColorState = createComponentColorState();
 
 let winLoopCells: ReadonlyArray<readonly [number, number]> | null = null;
 /** Reference (not deep-equality) to whichever edge set `winLoopCells` was computed from, so a *different* already-won puzzle (e.g. opening another completed puzzle in review) recomputes instead of keeping a stale cycle — see `render()`. */
@@ -191,18 +204,25 @@ function clearEdgeAnimations(): void {
  * win means every remaining edge is now one single component about to
  * switch to the solved color, filtering by "did the id change" would (by
  * incidental id-numbering luck) leave a chunk of the board jumping straight
- * to green with no animation — so every reachable edge ripples instead,
- * using the *same* `RIPPLE_STAGGER_MS` pace as an ordinary ripple (just
- * potentially over many more edges, since it's not filtered), so a win
- * visibly reads as the same animation, not a different one. On a win, this
- * also arranges for the win-comet to pick up exactly where that ripple
- * leaves off — see `pendingCometStart`'s doc comment.
+ * to green with no animation — so every reachable edge ripples instead, so a
+ * win visibly reads as the same animation, not a different one. The winning
+ * ripple keeps `RIPPLE_STAGGER_MS`'s ordinary constant per-hop pace; an
+ * ordinary (non-winning) ripple instead speeds up geometrically via
+ * `midgameRippleDelayMs` — see its doc comment for why the two use different
+ * timing. On a win, this also arranges for the win-comet to pick up exactly
+ * where that ripple leaves off — see `pendingCometStart`'s doc comment.
+ *
+ * `colorState` is whichever `ComponentColorState` actually reflects
+ * `prevEdges` right now (`liveComponentColors` for a live toggle,
+ * `reviewComponentColors` for a replay step) — see `main.ts`'s "Animations"
+ * doc comment for why that's always true without this function having to
+ * recompute anything itself.
  */
-function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>, justWon: boolean): void {
+function scheduleToggleAnimation(colorState: ComponentColorState, prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>, justWon: boolean): void {
   if (toggledEdges.size === 0) return;
 
   const now = performance.now();
-  const prevComponents = computeEdgeComponents(prevEdges);
+  const prevColors = snapshotEdgeColors(colorState, prevEdges);
 
   for (const ek of toggledEdges) {
     growingEdges.delete(ek);
@@ -211,14 +231,15 @@ function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: Rea
     if (nextEdges.has(ek) && !prevEdges.has(ek)) {
       growingEdges.set(ek, now);
     } else if (prevEdges.has(ek) && !nextEdges.has(ek)) {
-      shrinkingEdges.set(ek, { start: now, color: segmentColor(prevComponents.get(ek)!) });
+      shrinkingEdges.set(ek, { start: now, color: segmentColor(prevColors.get(ek)!) });
     }
   }
 
   const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggledEdges) : computeRecoloredEdges(prevEdges, nextEdges, toggledEdges);
   for (const { edge, distance } of rippleEdges) {
     if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
-    pulsingEdges.set(edge, { start: now, delay: distance * RIPPLE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
+    const delay = justWon ? distance * RIPPLE_STAGGER_MS : midgameRippleDelayMs(distance);
+    pulsingEdges.set(edge, { start: now, delay, fromColor: segmentColor(prevColors.get(edge)!) });
   }
 
   if (justWon) {
@@ -290,6 +311,10 @@ function render(): void {
         keyboardCursor,
       };
 
+  // A win has nothing to color (one component, the flat "solved" color) --
+  // skip the update entirely rather than computing colors nothing will use.
+  const componentColors = state.won ? null : updateComponentColors(reviewing ? reviewComponentColors : liveComponentColors, state.edges);
+
   const completed = reviewing ? reviewWon : pathState.won;
   if (completed) {
     if (winLoopEdgesRef !== state.edges) {
@@ -326,7 +351,7 @@ function render(): void {
     winComet: winLoopCells && cometActive ? { cells: winLoopCells, startIndex: cometStartIndex, startTime: cometStartTime } : undefined,
   };
 
-  draw(ctx, canvas.width, canvas.height, { ...state, anim }, LAYOUT, view);
+  draw(ctx, canvas.width, canvas.height, { ...state, anim, componentColors }, LAYOUT, view);
 
   if (animFrameId === null && (edgeAnimsActive() || winLoopCells !== null)) {
     animFrameId = requestAnimationFrame(() => {
@@ -419,7 +444,7 @@ function setPathState(next: PathState, ops: PathOp[]): void {
   const justWon = next.won && !prev.won;
   const toggled = new Set<EdgeKey>();
   for (const op of ops) for (const ek of op.edges) toggled.add(ek);
-  scheduleToggleAnimation(prev.edges, next.edges, toggled, justWon);
+  scheduleToggleAnimation(liveComponentColors, prev.edges, next.edges, toggled, justWon);
   pathState = next;
   history = recordMove(history, prev, ops);
   updateProgress();
@@ -587,6 +612,7 @@ const REPLAY_SPEED_OPTIONS = [0.25, 0.5, 1, 2];
  */
 async function startPuzzle(sizeKey: string, shapeMode: ShapeMode): Promise<void> {
   clearEdgeAnimations();
+  resetComponentColorState(liveComponentColors);
   localStorage.setItem(LAST_SIZE_STORAGE_KEY, sizeKey);
   localStorage.setItem(LAST_SHAPE_STORAGE_KEY, shapeMode);
   const collections = NO_EDGE_COLLECTIONS;
@@ -675,6 +701,7 @@ function closeHistory(): void {
 async function enterReview(item: CompletedRecord): Promise<void> {
   closeHistory();
   clearEdgeAnimations();
+  resetComponentColorState(reviewComponentColors);
   const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index, collections: item.collections };
   reviewPuzzle = generateDailyPuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
@@ -748,7 +775,7 @@ function showReplayFrame(index: number, animate = false): void {
   const frame = replayFrames[replayIndex];
 
   if (animate && replayAnimationsEnabled() && prevFrame) {
-    scheduleToggleAnimation(prevFrame.edges, frame.edges, symmetricDifference(prevFrame.edges, frame.edges), frame.won && !prevFrame.won);
+    scheduleToggleAnimation(reviewComponentColors, prevFrame.edges, frame.edges, symmetricDifference(prevFrame.edges, frame.edges), frame.won && !prevFrame.won);
   } else {
     clearEdgeAnimations();
   }
