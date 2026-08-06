@@ -10,8 +10,11 @@ Original proof of concept was a single HTML file; it was rewritten into
 this project structure with unit tests, then went through several major
 redesigns: a multi-segment pointer-drag path editor (now removed —
 superseded by the current region-toggle interaction), a deterministic daily
-puzzle sequence, IndexedDB persistence, non-rectangular/wraparound board
-shapes, and edge collections.
+puzzle sequence (now also removed — superseded by the current seed-based
+puzzle identity, see "Puzzle identity and generation" below), IndexedDB
+persistence, non-rectangular/wraparound board shapes, edge collections, and
+a menu-driven shell wrapped around what used to be a single always-visible
+game screen (see "Menus and screen navigation" below).
 
 ## Running things
 
@@ -63,9 +66,10 @@ exists). The generation pipeline (`src/game/`):
 
 `adj` is intentionally the only puzzle representation kept at runtime —
 nothing else stores "the solution"; the cycle is discarded after distractor
-edges are added (except that `dailyPuzzle.ts`'s `generateDailySolutionCells`
-can always recompute it on demand from the same seed, for the Give Up
-button — see below). A completed puzzle's win loop is just *some*
+edges are added (except that `puzzleGen.ts`'s `generateSolutionCells` can
+always recompute it on demand from the same seed, for the Give Up button and
+the main menu's animated background — see below). A completed puzzle's win
+loop is just *some*
 Hamiltonian cycle through `adj`, not necessarily the original generated one
 (the player can solve it differently if distractor edges allow).
 
@@ -74,7 +78,7 @@ needs determinism.
 
 ### Board shapes and topologies
 
-Orthogonal to board *size* is board *shape* (`dailyPuzzle.ts`'s
+Orthogonal to board *size* is board *shape* (`puzzleGen.ts`'s
 `ShapeMode`): `rect` (the plain `m x n` rectangle), `random` (a random
 connected polyomino of the same area, `shape.ts`'s `randomShape`), or one of
 three wraparound surfaces built by gluing a rectangle's edges together
@@ -98,17 +102,17 @@ ongoing source of subtle bugs (wraparound-corner edge cases in
 history), and getting them fully right has proven too hard for now. The
 code (`topology.ts`'s `KLEIN_BOTTLE`/`PROJECTIVE_PLANE`, `puzzle.ts`'s
 `buildKleinBottlePuzzle`/`buildProjectivePlanePuzzle`, and
-`dailyPuzzle.ts`'s handling of those `ShapeMode` values) is deliberately
-left in place rather than deleted — `dailyPuzzle.test.ts` still exercises
-it, and `generateDailyPuzzle`/`generateDailySolutionCells` still handle
-those shape modes so that a puzzle completed back when they *were*
-selectable keeps regenerating correctly for the history/review view. Only
-the *picker* is disabled: `dailyPuzzle.ts`'s `SHAPE_MODE_OPTIONS` marks
-those two entries `disabled: true`, `SELECTABLE_SHAPE_MODE_OPTIONS` filters
-them out for anything UI-facing (the `<select>` in `index.html` simply
-doesn't have `<option>`s for them any more), and `shapeModeOption()` still
-looks them up in the full `SHAPE_MODE_OPTIONS` list so old completed
-records can still show a label. May be revisited later.
+`puzzleGen.ts`'s handling of those `ShapeMode` values) is deliberately
+left in place rather than deleted — `puzzleGen.test.ts` still exercises
+it, and `generatePuzzle`/`generateSolutionCells` still handle those shape
+modes so that a puzzle completed back when they *were* selectable keeps
+regenerating correctly for the Replays/review view. Only the *picker* is
+disabled: `puzzleGen.ts`'s `SHAPE_MODE_OPTIONS` marks those two entries
+`disabled: true`, `SELECTABLE_SHAPE_MODE_OPTIONS` filters them out for
+anything UI-facing (the New Game `<select>` in `index.html` simply doesn't
+have `<option>`s for them any more), and `shapeModeOption()` still looks
+them up in the full `SHAPE_MODE_OPTIONS` list so old completed records can
+still show a label. May be revisited later.
 
 A wraparound board (`puzzle.topology` set) renders as a genuinely,
 seamlessly infinite repeating tiling rather than a single fixed bitmap —
@@ -174,8 +178,11 @@ shared by touch, mouse wheel, the +/-/Fit buttons, and the keyboard.
 
 `src/keyboard.ts` (`attachKeyboardHandling`) is the keyboard-only path
 editor, wired onto `window` (not the canvas — no `tabindex` juggling
-needed) and gated off while a native form control has focus or the history
-overlay is open. It holds a `cursor: Face | null` (there's no "held" state
+needed) and gated off while a native form control has focus, or the app
+isn't actually on the `'game'` screen showing a live (not reviewed) puzzle
+(`main.ts`'s `keyboardHost.isEnabled`, `screen === 'game' && mode ===
+'playing'` — see "Menus and screen navigation" below). It holds a `cursor:
+Face | null` (there's no "held" state
 any more — toggling is a single action, not a drag) and reports it back to
 `main.ts` via `KeyboardInputHost.setKeyboardCursor`, along with the region
 the cursor sits in (`setFocusedRegion`, for the same highlight a
@@ -264,7 +271,7 @@ ids at face value:
 live game, `reviewComponentColors` for the review/replay overlay — kept
 entirely separate so switching between them can't cross-contaminate, and
 each explicitly reset (`resetComponentColorState`) only at a genuine
-board-identity boundary (`startPuzzle`, `enterReview`) rather than on every
+board-identity boundary (`beginPuzzle`, `enterReview`) rather than on every
 edit, since an unrelated old puzzle's component could otherwise
 coincidentally "donate" its color to a new puzzle's component just because
 their cell coordinates happen to line up. `render()` recomputes whichever
@@ -481,13 +488,13 @@ removed.** In practice a puzzle's links turned out not to affect its
 difficulty much — optimal play mostly ignores them, since the grid's own
 "visit every cell" constraint is almost always enough to force the same
 loop a link would additionally require. Every puzzle is now generated with
-`NO_EDGE_COLLECTIONS` (`main.ts`'s `startPuzzle` hardcodes it, no UI reads
+`NO_EDGE_COLLECTIONS` (`main.ts`'s `startNewGame` hardcodes it, no UI reads
 it back), so `index.html`'s three number inputs, and `main.ts`'s
 `currentCollectionParams`/`reflectCollectionParams`/`onCollectionsInputChange`
 and their `localStorage` keys, are gone. The generation code above is
 deliberately untouched — `EdgeCollectionParams`/`generateEdgeCollections`/
 `pickCollectionEdges`/`countCollectionEdges` all still work exactly as
-described, `dailyPuzzle.ts`/`gameStore.ts` still handle a `PuzzleId` whose
+described, `puzzleGen.ts`/`gameStore.ts` still handle a `PuzzleId` whose
 `collections` isn't `NO_EDGE_COLLECTIONS` (so an old completed puzzle that
 *was* played with links on still regenerates and reviews correctly), and
 the balance question may get revisited later — it's just not something a
@@ -496,12 +503,12 @@ player can currently opt into from the UI.
 ## Give Up
 
 The "Give Up" button (`main.ts`'s `revealSolution`) reveals the puzzle's
-intended solution — `dailyPuzzle.ts`'s `generateDailySolutionCells`/
-`generateDailySolutionEdges`, which mirror `generateDailyPuzzle`'s exact
-sequence of shape/cycle generation calls from a freshly-seeded rng with the
-same seed, so they reproduce the identical hidden cycle regardless of what
-distractor-edge/edge-collection generation `generateDailyPuzzle` goes on to
-do with the rng afterward (a seeded rng's output only depends on the calls
+intended solution — `puzzleGen.ts`'s `generateSolutionCells`/
+`generateSolutionEdges`, which mirror `generatePuzzle`'s exact sequence of
+shape/cycle generation calls from a freshly-seeded rng with the same seed,
+so they reproduce the identical hidden cycle regardless of what
+distractor-edge/edge-collection generation `generatePuzzle` goes on to do
+with the rng afterward (a seeded rng's output only depends on the calls
 made so far). This is *a* valid win loop through `adj`, not necessarily the
 only one, and if the puzzle has edge collections it isn't guaranteed to
 satisfy every collection's `required` count (collections are generated with
@@ -511,9 +518,14 @@ button still shows it anyway, since it's the intended answer regardless.
 Giving up sets `gaveUp = true` and blocks further editing exactly like a
 real win does (`inputPathState()` reports `won: true` to the input layer
 whenever `gaveUp`), but is deliberately *not* a win: no `recordCompletion`,
-no `unlockedIndex` advance, and — unlike every other path mutation — never
-persisted, so a reload resumes whatever was actually in progress before
-Give Up was pressed, as if it never happened.
+and — unlike every other path mutation — never persisted, so a reload
+resumes whatever was actually in progress before Give Up was pressed, as if
+it never happened. Giving up still counts as the puzzle being "complete" for
+the in-game control bar (`refreshControlBar`, see "Menus and screen
+navigation" below) — Rematch appears immediately, letting the player bail
+into a fresh attempt — but Replay doesn't, since a given-up puzzle was never
+recorded and so has no move log to replay (`viewReplayBtn` stays hidden
+whenever `!pathState.won`, gave-up or not).
 
 ## Undo/redo and replay (game history)
 
@@ -565,10 +577,19 @@ should not erase it from the movie.
   `toggleRegion` call already produces through to `setPathState`.
   `performUndo`/`performRedo` call `history.ts`'s `undo`/`redo` and apply
   the returned state exactly like any other path update. Undo/redo are only
-  ever enabled while `mode === 'playing' && !pathState.won && !gaveUp`
-  (`undoRedoAllowed()`). **Reset** (`resetPath`) starts a fresh `history`
-  too — otherwise an eventual win's replay would confusingly interleave an
-  earlier abandoned attempt with the one that actually finished.
+  ever enabled while `!pathState.won && !gaveUp` (`undoRedoAllowed()`) —
+  there's no separate `mode`/`screen` check needed here any more, since the
+  Undo/Redo buttons themselves only exist inside the live game's control
+  bar, which is hidden outright while reviewing (see "Menus and screen
+  navigation" below). Every fresh puzzle (New Game, Resume, Rematch) starts
+  a brand-new `history` too (`beginPuzzle`) — a resumed save restores its
+  own saved `history` instead, but a *fresh* start never inherits a
+  previous attempt's, since an eventual win's replay would otherwise
+  confusingly interleave an earlier abandoned attempt with the one that
+  actually finished. (There's no "Reset" button any more — see "Menus and
+  screen navigation" below; abandoning an attempt now means Exit, and
+  either Resume it again later or start a genuinely fresh one via New
+  Game/Rematch.)
 - **Backward compatibility**: `history` on `InProgressRecord` and
   `moveLog` on `CompletedRecord` (`gameStore.ts`) are both optional.
   Resuming an old in-progress save with no `history` field falls back to a
@@ -612,26 +633,45 @@ should not erase it from the movie.
   `PathOp[]` so both call sites (`setPathState` and `showReplayFrame`) can
   feed it.
 
-## Daily puzzle sequence
+## Puzzle identity and generation
 
-`src/game/dailyPuzzle.ts`: a puzzle is identified by `PuzzleId { day,
-sizeKey, shapeMode, index, collections? }` — `day` is the player's local
-calendar date (`YYYY-MM-DD`, see `todayKey()`), `sizeKey` is one of the
-fixed `SIZE_OPTIONS` (tiny/mini/small/medium/large/huge — the `key` field is
-a storage identifier, never rename it once puzzles have been played),
+`src/game/puzzleGen.ts`: a puzzle is identified by `PuzzleId { sizeKey,
+shapeMode, seed, collections? }` — `sizeKey` is one of the fixed
+`SIZE_OPTIONS` (tiny/mini/small/medium/large/huge — the `key` field is a
+storage identifier, never rename it once puzzles have been played),
 `shapeMode` is one of `SHAPE_MODE_OPTIONS` (see "Board shapes and
 topologies" above — `klein`/`projective` are disabled from selection but
-still valid `PuzzleId` values for old data), `index` is 0-based position in
-that day+size+shape(+collections)'s infinite sequence, and `collections` is
-the optional `EdgeCollectionParams` (see "Edge collections" above).
-`puzzleSeed()` hashes `puzzleIdKey(id)` (FNV-1a) into a mulberry32 seed, so
-the same id always reproduces the exact same puzzle. `DAILY_PUZZLE_DENSITY`
-(0.28) is fixed — density is not a player-facing setting.
+still valid `PuzzleId` values for old data), `seed` is an arbitrary 32-bit
+integer that, together with the rest of the id, fully determines the
+puzzle, and `collections` is the optional `EdgeCollectionParams` (see "Edge
+collections" above). `puzzleSeed()` hashes `puzzleIdKey(id)` (FNV-1a) into
+the actual mulberry32 seed the generator runs on — deliberately *not*
+`id.seed` directly, so two puzzles that happen to share a raw `seed` but
+differ in size/shape/collections can't accidentally share so much as a PRNG
+stream prefix. `PUZZLE_DENSITY` (0.28, formerly `DAILY_PUZZLE_DENSITY`) is
+fixed — density is not a player-facing setting. `generatePuzzle(id)` builds
+the `Puzzle`; `generateSolutionCells`/`generateSolutionEdges(id)` recompute
+the hidden cycle on demand (Give Up, the main menu background — see their
+own sections).
 
-Progression resets every calendar day: each day+size+shape+collections
-combo starts back at index 0, and completing index N unlocks index N+1 *for
-that combo*. This gating lives in persistence (below), not in
-`dailyPuzzle.ts` itself, which is pure/stateless.
+**There is no more daily rotation or unlock gating.** An earlier version of
+this game identified a puzzle by `{ day, sizeKey, shapeMode, index,
+collections? }` — the player's local calendar date plus a 0-based position
+in that day+size+shape's sequence — and persistence tracked an
+`unlockedIndex` per combo that only advanced by completing puzzles in
+order, resetting to 0 every calendar day. The New Game/Resume/Replays menu
+system (see "Menus and screen navigation" below) replaced this outright:
+`randomSeed()` mints a fresh, genuinely random 32-bit seed
+(`crypto.getRandomValues`, falling back to `Math.random` outside a browser)
+every time New Game or Rematch starts a puzzle, with nothing gating which
+sizes/shapes are available or when — a player can have any number of
+puzzles of the same kind in progress at once, each independently seeded,
+which is exactly what lets Rematch (and New Game generally) start a fresh
+puzzle "of the same kind" as one already in progress. `todayKey`/`day` are
+gone entirely; nothing in the current code needs the concept of "today" at
+all. See "Persistence (IndexedDB)" below for how this reshaped storage, and
+"Things to know before changing size/shape/puzzle identity" for the
+backward-compatibility consequences.
 
 ## Persistence (IndexedDB)
 
@@ -639,39 +679,59 @@ that combo*. This gating lives in persistence (below), not in
 API (db name `loopit`, version 1, three stores — no external library).
 `src/persistence/gameStore.ts` has the actual domain logic:
 
-- **`progress`** store, keyed by `day::sizeKey::shapeMode[::c...]` (see
-  `dayAndSizeId`/`collectionsKeySuffix` — the suffix is empty whenever
-  collections are off, so a puzzle id with the feature untouched hashes and
-  stores byte-identically to one from before the feature existed) →
-  `{ unlockedIndex }`. The next playable index for that combo (defaults to
-  0 via `getUnlockedIndex` when no record exists).
-- **`inProgress`** store, same key → current marked `edges` (plus the
-  undo/redo `history`, see above) for whichever puzzle is active. `main.ts`
-  autosaves here on every path change (`saveInProgress`) and reads it back
-  on load/size-or-shape-switch (`getInProgress`) to resume exactly where
-  you left off, undo stack included. Cleared on win.
-- **`completed`** store, keyed by `puzzleIdKey(id)` (shared with
-  `dailyPuzzle.ts` so the two never drift apart) → the final winning
-  `edges` + timestamp + the game's `moveLog` (for replay, see above).
-  `recordCompletion()` is the one function that does all three on a win:
-  records the completed game, clears in-progress, and advances
-  `unlockedIndex` (only if the completed index *was* the
-  currently-unlocked one — a safety check, not normally reachable any
-  other way since the UI only ever lets you play the unlocked index).
+- **`progress`** store is **vestigial** — it used to hold the daily-puzzle
+  unlock gate (`ProgressRecord { unlockedIndex }`), which no longer exists
+  now that every puzzle is independently seeded with nothing to gate (see
+  "Puzzle identity and generation" above). Nothing reads or writes it any
+  more; it's left defined in `db.ts`'s `STORES` (rather than dropped, which
+  would need an IndexedDB version bump + an `onupgradeneeded` migration
+  just to delete an empty, harmless object store) purely so a future
+  cleanup has somewhere to start from.
+- **`inProgress`** store, keyed by `puzzleIdKey(id)` (the *whole* id —
+  size, shape, seed, and collections together, not just size+shape+day the
+  way it used to be, since there's no more "the currently active puzzle of
+  this day+size+shape" — now there can be any number of independently
+  seeded puzzles of the same size/shape in progress at once) → the current
+  marked `edges`, the undo/redo `history` (see above), and `updatedAt`
+  (used to sort the Resume menu, most-recently-played first). `main.ts`
+  autosaves here on every path change (`saveInProgress`) and reads a
+  specific one back by id (`getInProgress`) or lists every one of them
+  (`listInProgress`, feeding the Resume menu). Cleared on win
+  (`clearInProgress`, also directly wired to the Resume menu's per-item
+  Delete button).
+- **`completed`** store, same `puzzleIdKey(id)` keying (shared with
+  `puzzleGen.ts` so the two never drift apart) → the final winning `edges`
+  + timestamp + the game's `moveLog` (for replay, see above).
+  `recordCompletion()` records the completed game and clears in-progress —
+  there's no unlock gate left to advance any more. `deleteCompleted` is the
+  Replays menu's per-item Delete button.
 
 Puzzles are *not* stored in full — only `PuzzleId` + final `edges`. The
-puzzle graph is always regenerated on demand via `generateDailyPuzzle(id)`
-for review, relying on determinism. (Tradeoff: if the generation algorithm
-ever changes, old stored completions would regenerate a different puzzle
-than what was actually solved. Acceptable for this project's scope.)
+puzzle graph is always regenerated on demand via `generatePuzzle(id)` for
+review, relying on determinism (`gameStore.ts`'s `puzzleIdOf` rebuilds a
+full `PuzzleId` from any stored record, so callers never have to
+hand-assemble one from a record's individual fields). (Tradeoff: if the
+generation algorithm ever changes, old stored completions would regenerate
+a different puzzle than what was actually solved. Acceptable for this
+project's scope.)
 
-Two backward-compatibility helpers in `gameStore.ts` are worth knowing
-about: `hasEdges` rejects a record saved before the region-toggle rewrite
-(which stored `segments`, not `edges` — structurally incompatible, so it's
-simply treated as unusable rather than migrated) wherever a record is read;
-`withShapeModeDefault` defaults a `completed` record with no `shapeMode` at
-all (i.e. from before board shapes existed) to `'rect'`, since every such
-puzzle genuinely was a plain rectangle.
+Backward-compatibility helpers in `gameStore.ts`, applied to every record
+read (`isUsable`, combining both): `hasEdges` rejects a record saved before
+the region-toggle rewrite (which stored `segments`, not `edges` —
+structurally incompatible, so it's simply treated as unusable rather than
+migrated); `hasSeed` rejects a record saved before the seed-based `PuzzleId`
+restructuring (keyed by `day`/`index` instead, with no `seed` field to
+regenerate its puzzle graph from at all) the same way — an old in-progress
+or completed daily-puzzle save simply stops showing up in the Resume/Replays
+menus, rather than crashing them. Both are "accept the loss, don't migrate"
+per this project's established policy for breaking storage-format changes.
+(An earlier version of `gameStore.ts` also had a `withShapeModeDefault`
+helper defaulting a `completed` record with no `shapeMode` at all — from
+before board shapes existed — to `'rect'` rather than dropping it, since
+every such puzzle genuinely was a plain rectangle. That helper is gone now:
+a record that old also predates `seed`, so `hasSeed` already excludes it
+same as any other pre-restructuring record: nothing left for a
+shape-specific default to apply to.)
 
 Tests use `fake-indexeddb/auto` (import it at the top of the test file) and
 `clearAllStoresForTests()` between tests — *not* `indexedDB.deleteDatabase`,
@@ -680,31 +740,174 @@ caches a single open connection (`resetDbConnectionForTests()` exists but
 is rarely what you want; clearing stores is simpler and doesn't require
 re-opening).
 
+## Menus and screen navigation
+
+The app is a small stack of full-screen "pages" rather than the single
+always-visible game view it used to be. `src/main.ts`'s `Screen` type —
+`'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game'` —
+names them; `showScreen(next)` is the *only* place that toggles `.hidden`
+on their root elements (`index.html` gives each one its own top-level
+`<div class="screen">` inside `#app`) and runs each screen's enter/leave
+side effects. Exactly one screen is ever visible at a time.
+
+- **Main menu** (`#mainMenuScreen`): the animated postgame-loop background
+  (see "Main menu background" below) behind two buttons — **Free Play** and
+  **Blitz**. Blitz has no mode behind it yet (`blitzEntryBtn` just shows a
+  toast, "Blitz mode is coming soon!" — a deliberate placeholder, not a
+  disabled/dead button, so it still reads as "a real button that does
+  something," just not implemented yet); a future change will give it its
+  own screen the same way Free Play has one.
+- **Free Play hub** (`#freePlayMenuScreen`): three buttons — **New Game**,
+  **Resume**, **Replays** — each opening its own screen. "‹ Menu" goes back
+  to the main menu.
+- **New Game** (`#newGameMenuScreen`): picks `sizeKey`/`shapeMode` (the
+  same `<select>` options `index.html` used to have directly on the game
+  screen, just moved here) and starts a brand-new, randomly-seeded puzzle
+  on Start (`startNewGame` → `beginPuzzle`, see below). "‹ Free Play" goes
+  back to the hub without starting anything.
+- **Resume** (`#resumeMenuScreen`): every saved `InProgressRecord`
+  (`listInProgress()`, most-recently-played first), each row showing its
+  size/shape, a rough progress readout (edge count — not a fraction, since
+  computing "of how many total" would mean regenerating every listed
+  puzzle's full graph just to render the list), and when it was last
+  played. Tapping a row resumes it exactly (`beginPuzzle` with that
+  record's `edges`/`history`); a separate Delete (✕) button removes it
+  (`clearInProgress`, behind a confirm dialog) without opening it — the two
+  are physically distinct buttons in `renderListItem` specifically so a
+  Delete tap can never be misread as "open".
+- **Replays** (`#replaysMenuScreen`, the renamed/restructured former
+  `#historyOverlay`): every `CompletedRecord` (`listCompleted()`, most
+  recent first), same row shape as Resume — tapping opens it in the review
+  overlay (`enterReview(item, 'menu')`, see below), Delete removes it
+  (`deleteCompleted`, confirm-gated) without opening it.
+- **Game** (`#gameScreen`): the live/reviewed puzzle itself — everything
+  described elsewhere in this file (the board, the control bar, the review
+  overlay) lives here unchanged in substance, just reachable only through
+  the menus above instead of being the app's permanent single view.
+
+`showScreen` also owns: starting/stopping the main menu's animated
+background (only running while it's actually visible — see below);
+force-stopping the live game's `requestAnimationFrame` animation loop the
+instant `'game'` stops being the visible screen (`stopLiveAnimationLoop` —
+necessary because the win-comet runs *forever* once a puzzle is completed,
+so `render()`'s own "reschedule while anything's active" check would never
+naturally lapse on a screen the player has since navigated away from); and
+refreshing the Resume/Replays lists from IndexedDB every time either is
+shown, so a delete (or a game just finished elsewhere) is always reflected
+without a stale cached list.
+
+### In-game controls
+
+`#playControls` (hidden outright while reviewing — see below) always shows
+**Exit**; the rest of it swaps between two button groups depending on
+whether the current live attempt is decided (`refreshControlBar`, called
+from every place that can change `pathState.won`/`gaveUp`):
+
+- **Not yet decided** (`#activeControls`): **Undo**, **Redo**, **Give Up** —
+  same as before, just without the old Reset/History/Next-Puzzle buttons
+  and the size/shape `<select>`s, all of which moved to the menus above (or
+  were removed outright — see "Undo/redo and replay" above for why there's
+  no Reset any more).
+- **Complete, won or given up** (`#completeControls`): **Rematch** —
+  `main.ts`'s `rematch()`, which immediately starts a fresh puzzle with the
+  exact same `sizeKey`/`shapeMode`/`collections` as the one just finished
+  but a brand-new `randomSeed()` (`beginPuzzle`) — and **Replay**, hidden
+  unless the puzzle was actually won (`viewReplayBtn`'s visibility is keyed
+  to `pathState.won` specifically, not the broader "complete" — a given-up
+  puzzle has no move log to replay, see "Give Up" above).
+  `viewReplayFromGame()` `await`s `pendingPersist` (so it never reads back
+  a stale pre-`recordCompletion` record), fetches the just-recorded
+  `CompletedRecord` for `currentPuzzleId`, and opens it via
+  `enterReview(record, 'game')` followed immediately by `startReplay()` —
+  landing the player straight into their own solve's replay rather than
+  routing them through the Replays list.
+
+**Exit** (`exitGame`) always returns to the Free Play hub — whatever's in
+progress is already autosaved on every edit (`persistLiveState`), so there's
+nothing to confirm or lose.
+
+### Review, and where "Done" goes back to
+
+`enterReview(item, origin)` — opened either from the Replays list or from
+the just-completed live game's own Replay button — takes an explicit
+`origin: 'game' | 'menu'`, stored in `reviewOrigin`, because "Done"
+(`exitReview`) needs to go back to two genuinely different places depending
+on how review was entered: back to the live, now-solved game
+(`origin: 'game'`, the common case right after finishing a puzzle) or back
+to the Replays list it was opened from (`origin: 'menu'`, since there might
+be no live game underneath at all — Replays is reachable straight from the
+Free Play hub without ever having played anything this session).
+`enterReview` hides `#playControls` and shows `#reviewBar` in its place
+(the reverse on `exitReview`) regardless of `origin`, since the control bar
+Undo/Redo/Give Up/Rematch/Replay buttons are never meaningful while
+reviewing — a review is always read-only (`inputPathState()` reports
+`won: true` unconditionally while `mode === 'reviewing'`, which is what
+makes the input layer refuse edits and only allow pan/zoom for free,
+without any extra guarding in `input.ts`/`keyboard.ts`).
+
+### Main menu background
+
+`src/menuBackground.ts`'s `startMenuBackground(canvas)` drives
+`#mainMenuScreen`'s `#menuCanvas`: a fixed, arbitrary `PuzzleId` — always
+the *huge* size, *toroidal* shape (`MENU_PUZZLE_ID`, a hardcoded seed so the
+same showcase puzzle appears every time rather than regenerating a fresh
+1120-cell board on every menu visit) — generated once via `generatePuzzle`/
+`generateSolutionEdges` exactly like any other puzzle, then handed to
+`render.ts`'s `draw()` already marked `won: true` with its win-comet
+(`AnimationState.winComet`) running from the moment the background starts.
+This reuses the entire postgame win-comet animation (see "Win-comet
+(postgame)" above) completely unchanged — the background is quite literally
+"the postgame ripple of a solved huge toroidal puzzle", not a separate
+reimplementation of anything that looks similar.
+
+The **constant diagonal panning** on top of that is the one genuinely new
+piece: each frame computes a `Viewport` whose `tx`/`ty` advance linearly
+with elapsed time (`PAN_SPEED_X`/`PAN_SPEED_Y`, board pixels/second) and
+feeds it to the same `draw()` call — since the puzzle is toroidal,
+`render.ts`'s `drawWrapped` already recomputes the entire visible tiling
+fresh from whatever `view` it's given on every call (see "Board shapes and
+topologies" above), so panning "for free" here is exactly the same
+mechanism a real wraparound game board's pan/zoom already relies on, not
+new rendering logic. `tx`/`ty` are wrapped modulo one tile's on-screen pixel
+size rather than left to grow without bound for as long as the main menu
+happens to stay open — for a seamlessly repeating tiling, panning by
+exactly one tile is visually identical to not panning at all, and wrapping
+keeps the arithmetic (and any long-run floating-point drift) bounded
+regardless of session length.
+
+`startMenuBackground` returns a teardown function; `showScreen` calls it the
+instant the main menu stops being the visible screen, so its own
+`requestAnimationFrame` chain — like the live game's win-comet, this one
+also runs forever by design — doesn't keep drawing to a hidden canvas after
+the player has navigated away.
+
 ## `main.ts` orchestration
 
-Holds the mutable app state: `mode: 'playing' | 'reviewing'`,
-`currentPuzzleId`, `puzzle`, `regionMap` (`computeRegions(puzzle)`,
-recomputed whenever the puzzle changes), `pathState`, `gaveUp` (see "Give
-Up" above), `history` (undo/redo + move log, see above), plus separate
+Holds the mutable app state: `screen` (above), `mode: 'playing' |
+'reviewing'`, `currentPuzzleId`, `puzzle`, `regionMap`
+(`computeRegions(puzzle)`, recomputed whenever the puzzle changes),
+`pathState`, `gaveUp` (see "Give Up" above), `history` (undo/redo + move
+log, see above), plus separate
 `reviewPuzzle`/`reviewRegionMap`/`reviewEdges`/`reviewWon`/
-`currentReviewItem` for the read-only history viewer (kept apart from the
-live game so opening a review can't disturb an in-progress puzzle), and
-`focusedRegionId`/`keyboardCursor` for the current press/keyboard
-highlight. `activePuzzle()`/`activeRegionMap()` and the `GameInputHost`
-given to `attachPointerHandling` all branch on `mode` — reviewing reports
-`won: true` unconditionally (`inputPathState()`), which is what makes the
-input layer refuse edits and only allow pan/zoom for free, without any
-extra guarding in `input.ts`/`keyboard.ts`.
+`currentReviewItem`/`reviewOrigin` for the read-only review overlay (kept
+apart from the live game so opening a review can't disturb an in-progress
+puzzle), and `focusedRegionId`/`keyboardCursor` for the current
+press/keyboard highlight. `activePuzzle()`/`activeRegionMap()` and the
+`GameInputHost` given to `attachPointerHandling` all branch on `mode` —
+reviewing reports `won: true` unconditionally (`inputPathState()`), which is
+what makes the input layer refuse edits and only allow pan/zoom for free,
+without any extra guarding in `input.ts`/`keyboard.ts`.
 
-`startPuzzle(sizeKey, shapeMode, collections)` is the one place that
-decides which puzzle to show: reads `unlockedIndex` and any `inProgress`
-record for `(todayKey(), sizeKey, shapeMode, collections)`, resumes if they
-match, otherwise starts fresh at `unlockedIndex`. Also persists `sizeKey`/
-`shapeMode`/the three collection numbers to `localStorage` purely so a page
-reload reopens the same configuration — separate from the IndexedDB game
-state, and why `SELECTABLE_SHAPE_MODE_OPTIONS` (not the full
-`SHAPE_MODE_OPTIONS`, which still includes the disabled klein/projective
-entries) gates whether a stored `lastShape` is honored on reload.
+`beginPuzzle(id, resume?)` is the one place that actually starts showing a
+puzzle — shared by New Game (`startNewGame`, no `resume`), Resume (passing
+the saved record's `edges`/`history`), and Rematch (a fresh `randomSeed()`,
+no `resume`, same as New Game). It switches to the `'game'` screen itself
+(`showScreen('game')`), so none of its three callers need to. Also persists
+`sizeKey`/`shapeMode` to `localStorage` purely so New Game's `<select>`s
+default to the last-used configuration on a future visit — separate from
+the IndexedDB game state, and why `SELECTABLE_SHAPE_MODE_OPTIONS` (not the
+full `SHAPE_MODE_OPTIONS`, which still includes the disabled
+klein/projective entries) gates whether a stored `lastShape` is honored.
 
 A wraparound board (`puzzle.topology`) is panned/zoomed differently from an
 ordinary one: an ordinary board's canvas is a fixed-size bitmap moved via a
@@ -714,50 +917,57 @@ every view change, since the content genuinely tiles infinitely and there's
 no fixed bitmap a CSS transform could pan across (`layout()`/
 `applyTransform()` both branch on this).
 
-`pendingPersist` tracks the latest in-flight IndexedDB write; the "Next
-Puzzle" button `await`s it before reloading, so a fast click right after
-winning can't race ahead of `recordCompletion()` and re-read a stale
-`unlockedIndex`.
-
-History UI: `#historyOverlay` lists `listCompleted()`; clicking an entry
-calls `enterReview()` which regenerates that puzzle and switches `mode`.
-`exitReview()` restores the live game — nothing about it was touched.
+`pendingPersist` tracks the latest in-flight IndexedDB write; both the
+"Replay" control-bar button (`viewReplayFromGame`) and the (removed) old
+"Next Puzzle" button's replacement flows `await` it before reading
+persisted state back, so a fast click right after winning can't race ahead
+of `recordCompletion()`.
 
 ## Testing notes
 
-262 vitest tests across 18 files, all in `*.test.ts` files next to their
+Vitest tests across 18 files, all in `*.test.ts` files next to their
 modules. Pure game logic (`src/game/*`), viewport math, and persistence are
 unit tested — including the pure pieces of the animation system
 (`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS,
 `componentColors.ts`'s persistent color assignment), even though the
 animations themselves are visual-only. `render.ts`, `input.ts`,
-and `keyboard.ts` are not — they're thin DOM/canvas glue verified by hand
-instead. When changing pointer or
-keyboard interaction, the fastest way to sanity-check is a throwaway
-Playwright script against `npm run dev` (pre-installed Chromium at
-`/opt/pw-browsers/chromium-1194/chrome-linux/chrome` in this environment)
-rather than trying to unit test DOM event sequencing — e.g. driving
-`#sizeSelect`/keyboard arrow presses and reading back `#canvas`'s
-`style.transform` is how the keyboard-cursor viewport auto-scroll
-(`panToKeepVisible`) was manually verified.
+`keyboard.ts`, and `menuBackground.ts` are not — they're thin DOM/canvas
+glue verified by hand instead. When changing pointer, keyboard, or
+menu/screen-navigation interaction, the fastest way to sanity-check is a
+throwaway Playwright script against `npm run dev` (pre-installed Chromium
+at `/opt/pw-browsers/chromium-1194/chrome-linux/chrome` in this
+environment) rather than trying to unit test DOM event sequencing — e.g.
+driving `#newGameSizeSelect`/keyboard arrow presses and reading back
+`#canvas`'s `style.transform` is how the keyboard-cursor viewport
+auto-scroll (`panToKeepVisible`) was manually verified, and the same
+approach (clicking through New Game → Exit → Resume → the resumed row,
+watching which `.screen` ends up without `.hidden`) is how the menu system
+itself was verified end to end, including seeding IndexedDB directly via
+`page.evaluate` to test the Resume/Replays lists' Delete buttons and the
+Replays-vs-in-game "Done" destinations without first having to solve a
+puzzle in the browser.
 
 To compute an exact solution path for a given `PuzzleId` for scripted
-end-to-end testing, use `dailyPuzzle.ts`'s `generateDailySolutionCells(id)`
-directly (it mirrors `generateDailyPuzzle`'s exact rng call sequence for
-every shape mode, including toroidal's mod-reduction — see "Give Up"
-above) rather than trying to reverse-engineer a solution from `adj` or
-blindly raster-sweeping the face grid.
+end-to-end testing, use `puzzleGen.ts`'s `generateSolutionCells(id)`
+directly (it mirrors `generatePuzzle`'s exact rng call sequence for every
+shape mode, including toroidal's mod-reduction — see "Give Up" above)
+rather than trying to reverse-engineer a solution from `adj` or blindly
+raster-sweeping the face grid.
 
 ## Things to know before changing size/shape/puzzle identity
 
 `SIZE_OPTIONS[].key`, `SHAPE_MODE_OPTIONS[].key`, and the id hash
-(`puzzleIdKey`: `day::sizeKey::shapeMode::index` plus the optional
-collections suffix) are load-bearing storage/identity strings — renaming a
-size or shape key, or changing the hash input format, invalidates existing
-players' `unlockedIndex`/`inProgress`/`completed` records (they'd just
-silently reset to fresh, no crash, but progress and history would appear to
-vanish). If that's ever needed, it's a one-time migration problem, not
-something currently handled. This includes `klein`/`projective`: even
-though they're disabled from the picker, their `ShapeMode` keys must stay
-exactly as they are for as long as any player might have completed puzzles
-of those shapes sitting in their `completed` store.
+(`puzzleIdKey`: `sizeKey::shapeMode::seed` plus the optional collections
+suffix) are load-bearing storage/identity strings — renaming a size or
+shape key, or changing the hash input format, invalidates existing players'
+`inProgress`/`completed` records (they'd just silently stop showing up in
+Resume/Replays, no crash — see `hasSeed`/`isUsable` in "Persistence
+(IndexedDB)" above). If that's ever needed, it's a one-time migration
+problem, not something currently handled. This includes `klein`/
+`projective`: even though they're disabled from the picker, their
+`ShapeMode` keys must stay exactly as they are for as long as any player
+might have completed puzzles of those shapes sitting in their `completed`
+store. The main menu's animated background (`menuBackground.ts`'s
+`MENU_PUZZLE_ID`) also pins a specific `seed` for its showcase puzzle —
+changing it just picks a different (still huge/toroidal) board to display,
+harmless, but pointless busywork with no player-visible benefit.

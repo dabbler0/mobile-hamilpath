@@ -1,4 +1,3 @@
-import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
 import { createComponentColorState, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
@@ -6,10 +5,12 @@ import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as red
 import { orderLoopCells } from './game/loopOrder';
 import { createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
+import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
-import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
+import { startMenuBackground } from './menuBackground';
+import { clearInProgress, deleteCompleted, getCompleted, listCompleted, listInProgress, puzzleIdOf, recordCompletion, saveInProgress, type CompletedRecord, type InProgressRecord } from './persistence/gameStore';
 import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
@@ -34,6 +35,42 @@ function byId<T extends HTMLElement>(id: string): T {
   return el as T;
 }
 
+// ---- Screens ----
+// The app is a small stack of full-screen "pages" — see CLAUDE.md's "Menus
+// and screen navigation" section. Exactly one is ever visible at a time;
+// `showScreen` is the only place that toggles `.hidden` on their roots and
+// runs each screen's enter/leave side effects (starting/stopping the main
+// menu's animated background, refreshing the Resume/Replays lists, halting
+// the live game's animation loop when it's no longer on screen).
+type Screen = 'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game';
+let screen: Screen = 'mainMenu';
+
+const mainMenuScreenEl = byId<HTMLDivElement>('mainMenuScreen');
+const menuCanvas = byId<HTMLCanvasElement>('menuCanvas');
+const freePlayEntryBtn = byId<HTMLButtonElement>('freePlayEntryBtn');
+const blitzEntryBtn = byId<HTMLButtonElement>('blitzEntryBtn');
+
+const freePlayMenuScreenEl = byId<HTMLDivElement>('freePlayMenuScreen');
+const freePlayBackBtn = byId<HTMLButtonElement>('freePlayBackBtn');
+const newGameEntryBtn = byId<HTMLButtonElement>('newGameEntryBtn');
+const resumeEntryBtn = byId<HTMLButtonElement>('resumeEntryBtn');
+const replaysEntryBtn = byId<HTMLButtonElement>('replaysEntryBtn');
+
+const newGameMenuScreenEl = byId<HTMLDivElement>('newGameMenuScreen');
+const newGameBackBtn = byId<HTMLButtonElement>('newGameBackBtn');
+const newGameSizeSelect = byId<HTMLSelectElement>('newGameSizeSelect');
+const newGameShapeSelect = byId<HTMLSelectElement>('newGameShapeSelect');
+const newGameStartBtn = byId<HTMLButtonElement>('newGameStartBtn');
+
+const resumeMenuScreenEl = byId<HTMLDivElement>('resumeMenuScreen');
+const resumeBackBtn = byId<HTMLButtonElement>('resumeBackBtn');
+const resumeListEl = byId<HTMLDivElement>('resumeListEl');
+
+const replaysMenuScreenEl = byId<HTMLDivElement>('replaysMenuScreen');
+const replaysBackBtn = byId<HTMLButtonElement>('replaysBackBtn');
+const replaysListEl = byId<HTMLDivElement>('replaysListEl');
+
+const gameScreenEl = byId<HTMLDivElement>('gameScreen');
 const wrapEl = byId<HTMLDivElement>('boardWrap');
 const canvas = byId<HTMLCanvasElement>('canvas');
 const maybeCtx = canvas.getContext('2d');
@@ -42,13 +79,15 @@ const ctx: CanvasRenderingContext2D = maybeCtx;
 const progressEl = byId<HTMLDivElement>('progress');
 const puzzleLabelEl = byId<HTMLDivElement>('puzzleLabel');
 const winBannerEl = byId<HTMLDivElement>('winBanner');
-const sizeSelect = byId<HTMLSelectElement>('sizeSelect');
-const shapeSelect = byId<HTMLSelectElement>('shapeSelect');
-const nextBtn = byId<HTMLButtonElement>('nextBtn');
+const playControlsEl = byId<HTMLDivElement>('playControls');
+const exitBtn = byId<HTMLButtonElement>('exitBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
 const giveUpBtn = byId<HTMLButtonElement>('giveUpBtn');
-const playControlsEl = byId<HTMLDivElement>('playControls');
+const activeControlsEl = byId<HTMLDivElement>('activeControls');
+const completeControlsEl = byId<HTMLDivElement>('completeControls');
+const rematchBtn = byId<HTMLButtonElement>('rematchBtn');
+const viewReplayBtn = byId<HTMLButtonElement>('viewReplayBtn');
 const reviewBarEl = byId<HTMLDivElement>('reviewBar');
 const reviewLabelEl = byId<HTMLSpanElement>('reviewLabel');
 const reviewIdleControlsEl = byId<HTMLDivElement>('reviewIdleControls');
@@ -59,8 +98,6 @@ const replaySpeedSelect = byId<HTMLSelectElement>('replaySpeedSelect');
 const replayScrubberEl = byId<HTMLInputElement>('replayScrubber');
 const replayCounterEl = byId<HTMLSpanElement>('replayCounter');
 const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
-const historyOverlayEl = byId<HTMLDivElement>('historyOverlay');
-const historyListEl = byId<HTMLDivElement>('historyList');
 const toastEl = byId<HTMLDivElement>('toast');
 
 type Mode = 'playing' | 'reviewing';
@@ -74,13 +111,13 @@ let pathState: PathState;
  * True once the player has hit Give Up on the current live puzzle attempt
  * and its `pathState.edges` holds the revealed intended solution rather
  * than anything the player actually marked. Deliberately *not* folded into
- * `pathState.won`: giving up is not a win (no `recordCompletion`, no
- * `unlockedIndex` advance, nothing persisted — see `revealSolution`), but
- * input still needs blocking exactly like a real win does, which is why
- * `host.getPathState()` below reports `won: true` whenever this is set.
+ * `pathState.won`: giving up is not a win (no `recordCompletion`, nothing
+ * persisted — see `revealSolution`), but input still needs blocking exactly
+ * like a real win does, which is why `host.getPathState()` below reports
+ * `won: true` whenever this is set.
  */
 let gaveUp = false;
-/** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed puzzle and on Reset. */
+/** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed/rematched puzzle. */
 let history: HistoryState = createHistory();
 let reviewPuzzle: Puzzle | null = null;
 let reviewRegionMap: RegionMap | null = null;
@@ -89,8 +126,16 @@ let reviewEdges: PathState['edges'] = new Set();
 let reviewWon = true;
 /** The completed-game record currently open in the review overlay, so Replay can read its move log and Done/close-replay can restore the final solved view. */
 let currentReviewItem: CompletedRecord | null = null;
+/**
+ * Where "Done" (`exitReview`) should return to: `'game'` when review was
+ * opened via the just-completed live game's own Replay button (in which
+ * case Done resumes showing that live, solved game), or `'menu'` when it
+ * was opened from the Replays list (in which case Done goes back to that
+ * list instead of surfacing whatever the live game happens to be).
+ */
+let reviewOrigin: 'game' | 'menu' = 'game';
 let view: Viewport = { scale: 1, tx: 0, ty: 0 };
-/** Tracks the latest in-flight IndexedDB write so "Next Puzzle" can wait for a completion to land before re-reading the unlock gate. */
+/** Tracks the latest in-flight IndexedDB write so a screen change can wait for a completion to land before reading persisted state back. */
 let pendingPersist: Promise<void> = Promise.resolve();
 /** Id of whichever region is currently focused (press-candidate under a pointer, or the keyboard cursor's region), for highlighting. Reset on any mode/puzzle change. */
 let focusedRegionId: number | null = null;
@@ -102,6 +147,9 @@ let replayTimerId: number | null = null;
 /** Playback speed multiplier — `REPLAY_FRAME_MS / replaySpeed` is the actual per-frame interval. Read from/written to `replaySpeedSelect`, and persisted the same way size/shape are. */
 let replaySpeed = 1;
 let toastTimerId: number | null = null;
+
+/** Teardown for the main menu's animated background loop (`menuBackground.ts`), running only while `screen === 'mainMenu'` — see `showScreen`. */
+let stopMenuBackground: (() => void) | null = null;
 
 /**
  * ## Animations
@@ -115,7 +163,7 @@ let toastTimerId: number | null = null;
  *
  * - `growingEdges`/`shrinkingEdges`/`pulsingEdges` are populated by
  *   `scheduleToggleAnimation`, called only from `setPathState` — i.e. only a
- *   live tap/keyboard toggle animates. Undo, redo, reset, Give Up, and
+ *   live tap/keyboard toggle animates. Undo, redo, Give Up, and
  *   entering/leaving review all jump straight to a new state instead
  *   (`clearEdgeAnimations`), which is simplest and keeps this file from
  *   having to reconcile an in-flight animation with a state it no longer
@@ -127,14 +175,17 @@ let toastTimerId: number | null = null;
  * - `animFrameId` is the single `requestAnimationFrame` handle driving
  *   continued redraws while anything above is active; `render()` reschedules
  *   itself as long as `edgeAnimsActive() || winLoopCells !== null`, and lets
- *   the loop lapse the moment neither is true.
+ *   the loop lapse the moment neither is true. Because the win-comet runs
+ *   *forever* once a puzzle is completed, leaving the game screen
+ *   (`exitGame`) explicitly cancels this loop rather than waiting for it to
+ *   lapse on its own — see `stopLiveAnimationLoop`.
  * - `liveComponentColors`/`reviewComponentColors` (`game/componentColors.ts`)
  *   are *not* cleared by `clearEdgeAnimations` — they track persistent
  *   per-component colors across ordinary edits (undo/redo included), which
  *   is the whole point (see that module's doc comment). `render()` updates
  *   whichever one is active every frame (cheap and idempotent when edges
  *   haven't changed, same as `computeEdgeComponents` always was); only a
- *   genuine switch to a *different* board (`startPuzzle`, `enterReview`)
+ *   genuine switch to a *different* board (`beginPuzzle`, `enterReview`)
  *   explicitly resets one, so an unrelated old component's color can't
  *   spuriously "persist" onto a new puzzle just because cell coordinates
  *   happen to coincide.
@@ -179,12 +230,29 @@ function pruneFinishedEdgeAnims(now: number): void {
   for (const [ek, a] of pulsingEdges) if (now - a.start - a.delay >= PULSE_MS) pulsingEdges.delete(ek);
 }
 
-/** Called by every "jump straight to a new state" mutation (undo/redo/reset/Give Up/review navigation) so a leftover in-flight animation never gets reinterpreted against a state it no longer describes. */
+/** Called by every "jump straight to a new state" mutation (undo/redo/Give Up/review navigation) so a leftover in-flight animation never gets reinterpreted against a state it no longer describes. */
 function clearEdgeAnimations(): void {
   growingEdges.clear();
   shrinkingEdges.clear();
   pulsingEdges.clear();
   pendingCometStart = null;
+}
+
+/**
+ * Cancels the live game's `requestAnimationFrame` chain outright, rather
+ * than waiting for `render()`'s own "reschedule while anything's active"
+ * check to lapse naturally — necessary because the win-comet (once a puzzle
+ * is completed) runs forever, so that check alone would never stop firing
+ * on a screen the player has since navigated away from (`exitGame`). Safe
+ * to call even when nothing is running. The win-loop/comet cache heals
+ * itself the next time `render()` actually runs against a fresh state (see
+ * its own doc comment), so there's nothing else to reset here.
+ */
+function stopLiveAnimationLoop(): void {
+  if (animFrameId !== null) {
+    cancelAnimationFrame(animFrameId);
+    animFrameId = null;
+  }
 }
 
 /**
@@ -267,11 +335,12 @@ function activeRegionMap(): RegionMap {
 /**
  * Draws the current frame and, if any edge/win-loop animation is still in
  * flight, reschedules itself via `requestAnimationFrame` to keep going —
- * every other call site just calls `render()` once, same as before
+ * every other call site just calls `render()` once, exactly as before
  * animations existed; this function is the only place that decides whether
  * a *follow-up* frame is needed. `animFrameId` guards against ever having
  * more than one such chain running at once (harmless either way, since
- * every frame just redraws the same live state, but wasteful).
+ * every frame just redraws the same live state, but wasteful). Only ever
+ * called while `screen === 'game'` — see each call site.
  *
  * Also owns the win-loop cycle cache and the win-comet built on it:
  * `completed` is `reviewWon` while reviewing (deliberately excluding
@@ -407,26 +476,35 @@ function updatePuzzleLabel(): void {
   const shapeSuffix = currentPuzzleId.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
   const collectionCount = puzzle.edgeCollections?.length ?? 0;
   const collectionSuffix = collectionCount > 0 ? ` · ${collectionCount} link${collectionCount > 1 ? 's' : ''}` : '';
-  puzzleLabelEl.textContent = `${opt.label}${shapeSuffix} #${currentPuzzleId.index + 1}${collectionSuffix}`;
+  puzzleLabelEl.textContent = `${opt.label}${shapeSuffix}${collectionSuffix}`;
 }
 
-function updateNextButton(): void {
-  nextBtn.disabled = !pathState.won;
-}
-
-/** Give Up only makes sense on a live, not-yet-decided game: not while reviewing, not once the player has actually won, and not a second time once the solution is already showing. */
-function updateGiveUpButton(): void {
-  giveUpBtn.disabled = mode !== 'playing' || pathState.won || gaveUp;
+/** Give Up only makes sense on a live, not-yet-decided game: not once the player has actually won, and not a second time once the solution is already showing. */
+function giveUpAllowed(): boolean {
+  return !pathState.won && !gaveUp;
 }
 
 /** Undo/Redo only ever act on the live, not-yet-won game — once a puzzle is won, editing (and so undoing) is already blocked everywhere else (input.ts/keyboard.ts refuse edits when `won`), so there's no "undo the winning move" case to reconcile with `recordCompletion` having already fired. Giving up blocks editing the same way a win does (see `gaveUp`'s doc comment), so it's excluded here too — there's nothing to undo back into a revealed solution. */
 function undoRedoAllowed(): boolean {
-  return mode === 'playing' && !pathState.won && !gaveUp;
+  return !pathState.won && !gaveUp;
 }
 
-function updateUndoRedoButtons(): void {
+/**
+ * A puzzle is "complete" — Undo/Redo/Give Up give way to Rematch/Replay in
+ * the control bar — the instant it's either genuinely won or given up on;
+ * see CLAUDE.md's "In-game controls" section for the exact button set in
+ * each state. `viewReplayBtn` is further restricted to a real win: giving
+ * up was never recorded (`revealSolution`'s doc comment), so there's no
+ * move log to replay.
+ */
+function refreshControlBar(): void {
+  const complete = pathState.won || gaveUp;
+  activeControlsEl.classList.toggle('hidden', complete);
+  completeControlsEl.classList.toggle('hidden', !complete);
   undoBtn.disabled = !undoRedoAllowed() || !canUndo(history);
   redoBtn.disabled = !undoRedoAllowed() || !canRedo(history);
+  giveUpBtn.disabled = !giveUpAllowed();
+  viewReplayBtn.classList.toggle('hidden', !pathState.won);
 }
 
 function persistLiveState(): void {
@@ -448,9 +526,7 @@ function setPathState(next: PathState, ops: PathOp[]): void {
   pathState = next;
   history = recordMove(history, prev, ops);
   updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
+  refreshControlBar();
   render();
   if (justWon) winBannerEl.classList.add('show');
   persistLiveState();
@@ -465,9 +541,7 @@ function performUndo(): void {
   pathState = result.state;
   focusedRegionId = null;
   updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
+  refreshControlBar();
   render();
   persistLiveState();
 }
@@ -481,42 +555,38 @@ function performRedo(): void {
   pathState = result.state;
   focusedRegionId = null;
   updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
+  refreshControlBar();
   render();
   persistLiveState();
 }
 
 /**
  * Reveals the puzzle's intended solution (the hidden Hamiltonian cycle it
- * was generated from — `dailyPuzzle.ts`'s `generateDailySolutionEdges`) and
- * blocks further editing, without treating it as a win: no `recordCompletion`,
- * no `unlockedIndex` advance, and — unlike every other path mutation in this
- * file — nothing written to `persistLiveState`, so a reload resumes whatever
- * was actually in progress before Give Up was pressed, exactly as if it had
- * never happened. `pathState.won` deliberately stays `false` (it wasn't a
- * real win); `gaveUp` is what blocks input instead (see its doc comment).
+ * was generated from — `puzzleGen.ts`'s `generateSolutionEdges`) and blocks
+ * further editing, without treating it as a win: no `recordCompletion`, and
+ * — unlike every other path mutation in this file — nothing written to
+ * `persistLiveState`, so a reload resumes whatever was actually in progress
+ * before Give Up was pressed, exactly as if it had never happened.
+ * `pathState.won` deliberately stays `false` (it wasn't a real win);
+ * `gaveUp` is what blocks input instead (see its doc comment).
  *
  * A puzzle with edge collections may not have this exact cycle as a valid
- * win at all (`generateDailySolutionEdges`'s doc comment) — the button still
- * shows it, since it's the intended answer regardless of whether the
+ * win at all (`generateSolutionEdges`'s doc comment) — the button still
+ * shows it anyway, since it's the intended answer regardless of whether the
  * player's particular collection constraints happen to also accept it.
  */
 function revealSolution(): void {
-  if (mode !== 'playing' || pathState.won || gaveUp) return;
+  if (!giveUpAllowed()) return;
   const confirmed = window.confirm('Give up and reveal the intended solution? This puzzle will no longer count as solved.');
   if (!confirmed) return;
 
   clearEdgeAnimations();
-  pathState = { edges: generateDailySolutionEdges(currentPuzzleId), won: false };
+  pathState = { edges: generateSolutionEdges(currentPuzzleId), won: false };
   gaveUp = true;
   focusedRegionId = null;
   keyboardCursor = null;
   updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
+  refreshControlBar();
   winBannerEl.textContent = 'Here’s the solution';
   winBannerEl.classList.add('gaveUp', 'show');
   render();
@@ -578,24 +648,6 @@ function layout(): void {
   render();
 }
 
-function resetPath(): void {
-  clearEdgeAnimations();
-  pathState = createInitialPath();
-  // Reset starts a fresh attempt, so its move history starts fresh too — otherwise a
-  // later win's replay would confusingly interleave an earlier abandoned attempt.
-  history = createHistory();
-  gaveUp = false;
-  resetWinBanner();
-  focusedRegionId = null;
-  keyboardCursor = null;
-  updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
-  pendingPersist = saveInProgress(currentPuzzleId, [...pathState.edges], history).catch((err: unknown) => console.error('failed to save progress', err));
-  render();
-}
-
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
 const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
 const LAST_REPLAY_SPEED_KEY = 'loopit:replaySpeed';
@@ -603,131 +655,204 @@ const LAST_REPLAY_SPEED_KEY = 'loopit:replaySpeed';
 const REPLAY_SPEED_OPTIONS = [0.25, 0.5, 1, 2];
 
 /**
- * Loads whichever puzzle is current for this size+shape today: a resumed
- * in-progress game, or the next unlocked one. Edge collections are
- * generated with `NO_EDGE_COLLECTIONS` (the UI for tuning them was removed —
- * see CLAUDE.md's "Edge collections" section; the generation code itself is
- * still there for `dailyPuzzle`/history to reproduce old completed puzzles
- * that were played with collections enabled).
+ * Puts a fresh (or resumed) puzzle on screen and switches to the `'game'`
+ * screen — the one place `main.ts` actually starts playing something,
+ * shared by New Game, Resume, and Rematch. `resume`, when given, is an
+ * exact prior save (edges + its undo/redo history) to restore instead of
+ * starting from an empty board; New Game and Rematch never pass it (a
+ * random `seed` is a *fresh* puzzle even if it happens to be the same
+ * size/shape as one already in progress — see `puzzleGen.ts`'s
+ * `randomSeed`).
  */
-async function startPuzzle(sizeKey: string, shapeMode: ShapeMode): Promise<void> {
+function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: HistoryState }): void {
+  stopLiveAnimationLoop();
   clearEdgeAnimations();
   resetComponentColorState(liveComponentColors);
-  localStorage.setItem(LAST_SIZE_STORAGE_KEY, sizeKey);
-  localStorage.setItem(LAST_SHAPE_STORAGE_KEY, shapeMode);
-  const collections = NO_EDGE_COLLECTIONS;
-  const day = todayKey();
-  const unlockedIndex = await getUnlockedIndex(day, sizeKey, shapeMode, collections);
-  const existing = await getInProgress(day, sizeKey, shapeMode, collections);
-  const resuming = existing && existing.index === unlockedIndex;
-  const index = resuming ? existing.index : unlockedIndex;
+  localStorage.setItem(LAST_SIZE_STORAGE_KEY, id.sizeKey);
+  localStorage.setItem(LAST_SHAPE_STORAGE_KEY, id.shapeMode);
 
-  currentPuzzleId = { day, sizeKey, shapeMode, index, collections };
-  puzzle = generateDailyPuzzle(currentPuzzleId);
+  currentPuzzleId = id;
+  puzzle = generatePuzzle(id);
   regionMap = computeRegions(puzzle);
-  pathState = resuming ? { edges: new Set(existing.edges), won: false } : createInitialPath();
+  pathState = resume ? { edges: new Set(resume.edges), won: false } : createInitialPath();
 
-  if (resuming && existing.history) {
-    history = existing.history;
+  if (resume?.history) {
+    history = resume.history;
   } else {
     // Graceful fallback for a save written before undo/redo existed (or a fresh puzzle,
     // which never had history to begin with): start with empty undo/redo/move-log rather
     // than crashing on the missing field. Only worth telling the player about in the
     // resumed-old-save case — a brand-new puzzle having no history yet is completely normal.
     history = createHistory();
-    if (resuming) showToast("This saved game predates undo history, so it isn't available for it.");
+    if (resume) showToast("This saved game predates undo history, so it isn't available for it.");
   }
 
   gaveUp = false;
   resetWinBanner();
   focusedRegionId = null;
   keyboardCursor = null;
+  mode = 'playing';
   updatePuzzleLabel();
   updateProgress();
-  updateNextButton();
-  updateGiveUpButton();
-  updateUndoRedoButtons();
+  refreshControlBar();
+  showScreen('game');
   layout();
 }
 
-function formatCompletedAt(ts: number): string {
+function startNewGame(sizeKey: string, shapeMode: ShapeMode): void {
+  beginPuzzle({ sizeKey, shapeMode, seed: randomSeed(), collections: NO_EDGE_COLLECTIONS });
+}
+
+/** Immediately starts a fresh puzzle with the exact same size/shape/collections as the one just finished, but a brand-new random seed — only available once the current puzzle is complete (see `refreshControlBar`). */
+function rematch(): void {
+  if (!(pathState.won || gaveUp)) return;
+  beginPuzzle({ sizeKey: currentPuzzleId.sizeKey, shapeMode: currentPuzzleId.shapeMode, seed: randomSeed(), collections: currentPuzzleId.collections });
+}
+
+/** Jumps directly from the just-completed live game into replaying it — waits for the winning move's `recordCompletion` write to actually land (see `pendingPersist`) so the move log it reads back is never stale. */
+async function viewReplayFromGame(): Promise<void> {
+  if (!pathState.won) return;
+  await pendingPersist;
+  const record = await getCompleted(currentPuzzleId);
+  if (!record) return;
+  enterReview(record, 'game');
+  startReplay();
+}
+
+function formatDate(ts: number): string {
   return new Date(ts).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
 
-function renderHistoryItem(item: CompletedRecord): HTMLButtonElement {
-  const opt = sizeOption(item.sizeKey);
-  const shapeOpt = shapeModeOption(item.shapeMode);
-  const shapeSuffix = item.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
-  const btn = document.createElement('button');
-  btn.className = 'historyItem';
+function puzzleSummaryLabel(record: { sizeKey: string; shapeMode: ShapeMode }): string {
+  const opt = sizeOption(record.sizeKey);
+  const shapeOpt = shapeModeOption(record.shapeMode);
+  const shapeSuffix = record.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
+  return `${opt.label}${shapeSuffix}`;
+}
 
+/** A generic Resume/Replays row: a clickable main area plus a separate delete button, so tapping the delete icon can never be mistaken for opening the item (`stopPropagation` isn't needed since they're already two distinct elements). */
+function renderListItem(title: string, dateText: string, onOpen: () => void, onDelete: () => void): HTMLDivElement {
+  const row = document.createElement('div');
+  row.className = 'listItem';
+
+  const main = document.createElement('button');
+  main.className = 'listItemMain';
   const info = document.createElement('span');
-  const title = document.createElement('span');
-  title.className = 'historyItemTitle';
-  title.textContent = `${opt.label}${shapeSuffix} #${item.index + 1}`;
+  const titleEl = document.createElement('span');
+  titleEl.className = 'listItemTitle';
+  titleEl.textContent = title;
   const dateEl = document.createElement('span');
-  dateEl.className = 'historyItemDate';
-  dateEl.textContent = `${item.day} · ${formatCompletedAt(item.completedAt)}`;
-  info.append(title, document.createElement('br'), dateEl);
-
+  dateEl.className = 'listItemDate';
+  dateEl.textContent = dateText;
+  info.append(titleEl, document.createElement('br'), dateEl);
   const chevron = document.createElement('span');
   chevron.textContent = '›';
+  main.append(info, chevron);
+  main.addEventListener('click', onOpen);
 
-  btn.append(info, chevron);
-  btn.addEventListener('click', () => {
-    void enterReview(item);
-  });
-  return btn;
+  const del = document.createElement('button');
+  del.className = 'listItemDelete';
+  del.textContent = '✕';
+  del.title = 'Delete';
+  del.setAttribute('aria-label', 'Delete');
+  del.addEventListener('click', onDelete);
+
+  row.append(main, del);
+  return row;
 }
 
-async function openHistory(): Promise<void> {
-  const items = await listCompleted();
-  historyListEl.replaceChildren();
+async function refreshResumeList(): Promise<void> {
+  const items = await listInProgress();
+  resumeListEl.replaceChildren();
   if (items.length === 0) {
     const empty = document.createElement('div');
-    empty.className = 'historyEmpty';
-    empty.textContent = 'No completed puzzles yet.';
-    historyListEl.appendChild(empty);
-  } else {
-    for (const item of items) historyListEl.appendChild(renderHistoryItem(item));
+    empty.className = 'listEmpty';
+    empty.textContent = 'No saved games in progress.';
+    resumeListEl.appendChild(empty);
+    return;
   }
-  historyOverlayEl.classList.remove('hidden');
+  for (const item of items) resumeListEl.appendChild(renderResumeItem(item));
 }
 
-function closeHistory(): void {
-  historyOverlayEl.classList.add('hidden');
+function renderResumeItem(record: InProgressRecord): HTMLDivElement {
+  return renderListItem(
+    puzzleSummaryLabel(record),
+    `${record.edges.length} edges marked · ${formatDate(record.updatedAt)}`,
+    () => beginPuzzle(puzzleIdOf(record), { edges: record.edges, history: record.history }),
+    () => {
+      void (async () => {
+        if (!window.confirm('Delete this saved game? This cannot be undone.')) return;
+        await clearInProgress(puzzleIdOf(record));
+        await refreshResumeList();
+      })();
+    },
+  );
 }
 
-async function enterReview(item: CompletedRecord): Promise<void> {
-  closeHistory();
+async function refreshReplaysList(): Promise<void> {
+  const items = await listCompleted();
+  replaysListEl.replaceChildren();
+  if (items.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'listEmpty';
+    empty.textContent = 'No completed puzzles yet.';
+    replaysListEl.appendChild(empty);
+    return;
+  }
+  for (const item of items) replaysListEl.appendChild(renderReplayItem(item));
+}
+
+function renderReplayItem(record: CompletedRecord): HTMLDivElement {
+  return renderListItem(
+    puzzleSummaryLabel(record),
+    formatDate(record.completedAt),
+    () => enterReview(record, 'menu'),
+    () => {
+      void (async () => {
+        if (!window.confirm('Delete this replay? This cannot be undone.')) return;
+        await deleteCompleted(puzzleIdOf(record));
+        await refreshReplaysList();
+      })();
+    },
+  );
+}
+
+/**
+ * Opens a completed puzzle in the read-only review overlay. `origin`
+ * decides what "Done" (`exitReview`) returns to afterward — see
+ * `reviewOrigin`'s doc comment.
+ */
+function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
+  stopLiveAnimationLoop();
   clearEdgeAnimations();
   resetComponentColorState(reviewComponentColors);
-  const id: PuzzleId = { day: item.day, sizeKey: item.sizeKey, shapeMode: item.shapeMode, index: item.index, collections: item.collections };
-  reviewPuzzle = generateDailyPuzzle(id);
+  const id = puzzleIdOf(item);
+  reviewPuzzle = generatePuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
   reviewEdges = new Set(item.edges);
   reviewWon = true;
   currentReviewItem = item;
+  reviewOrigin = origin;
   mode = 'reviewing';
   focusedRegionId = null;
   keyboardCursor = null;
 
-  const opt = sizeOption(item.sizeKey);
-  const shapeOpt = shapeModeOption(item.shapeMode);
-  const shapeSuffix = item.shapeMode === 'rect' ? '' : ` (${shapeOpt.label})`;
-  reviewLabelEl.textContent = `${opt.label}${shapeSuffix} #${item.index + 1} · ${item.day}`;
+  reviewLabelEl.textContent = `${puzzleSummaryLabel(item)} · ${formatDate(item.completedAt)}`;
   const hasReplay = Boolean(item.moveLog && item.moveLog.length > 0);
   replayBtn.disabled = !hasReplay;
   replayBtn.title = hasReplay ? '' : "Replay isn't available — this puzzle was solved before replay support was added.";
   reviewBarEl.classList.remove('hidden');
   playControlsEl.classList.add('hidden');
+  showScreen('game');
   resetWinBanner();
   layout();
 }
 
+/** Leaves review mode: back to the live completed game (`reviewOrigin === 'game'`) or back to the Replays list it was opened from (`'menu'`) — see `reviewOrigin`'s doc comment. */
 function exitReview(): void {
   closeReplay();
   clearEdgeAnimations();
+  const returnToMenu = reviewOrigin === 'menu';
   mode = 'playing';
   reviewPuzzle = null;
   reviewRegionMap = null;
@@ -736,7 +861,11 @@ function exitReview(): void {
   keyboardCursor = null;
   reviewBarEl.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
-  layout();
+  if (returnToMenu) {
+    showScreen('replays');
+  } else {
+    layout();
+  }
 }
 
 function stopReplayTimer(): void {
@@ -852,35 +981,75 @@ const keyboardHost: KeyboardInputHost = {
   setPathState,
   setFocusedRegion,
   setKeyboardCursor,
-  isEnabled: () => mode === 'playing' && historyOverlayEl.classList.contains('hidden'),
+  isEnabled: () => screen === 'game' && mode === 'playing',
 };
 
 attachKeyboardHandling(window, keyboardHost);
 
-byId('resetBtn').addEventListener('click', resetPath);
+// ---- Screen navigation ----
+
+/**
+ * Hides every screen but `next` and runs each screen's enter/leave side
+ * effects: the main menu's animated background starts only while it's
+ * actually visible (and stops the instant it isn't, so its own
+ * `requestAnimationFrame` chain doesn't run forever in the background); the
+ * live game's animation loop is likewise force-stopped whenever leaving
+ * `'game'` (see `stopLiveAnimationLoop`'s doc comment for why that can't
+ * just be left to lapse on its own); Resume/Replays refresh their lists
+ * from IndexedDB every time they're shown, so a delete or a just-finished
+ * game is always reflected.
+ */
+function showScreen(next: Screen): void {
+  if (screen === 'mainMenu' && next !== 'mainMenu') {
+    stopMenuBackground?.();
+    stopMenuBackground = null;
+  }
+  if (screen === 'game' && next !== 'game') {
+    stopLiveAnimationLoop();
+  }
+
+  screen = next;
+  mainMenuScreenEl.classList.toggle('hidden', next !== 'mainMenu');
+  freePlayMenuScreenEl.classList.toggle('hidden', next !== 'freePlay');
+  newGameMenuScreenEl.classList.toggle('hidden', next !== 'newGame');
+  resumeMenuScreenEl.classList.toggle('hidden', next !== 'resume');
+  replaysMenuScreenEl.classList.toggle('hidden', next !== 'replays');
+  gameScreenEl.classList.toggle('hidden', next !== 'game');
+
+  if (next === 'mainMenu') stopMenuBackground = startMenuBackground(menuCanvas);
+  if (next === 'resume') void refreshResumeList();
+  if (next === 'replays') void refreshReplaysList();
+}
+
+/** Leaves the live game back to the Free Play hub — the "Exit" button. Whatever's in progress is already autosaved on every edit (`persistLiveState`), so there's nothing extra to do here. */
+function exitGame(): void {
+  showScreen('freePlay');
+}
+
+freePlayEntryBtn.addEventListener('click', () => showScreen('freePlay'));
+blitzEntryBtn.addEventListener('click', () => showToast('Blitz mode is coming soon!'));
+freePlayBackBtn.addEventListener('click', () => showScreen('mainMenu'));
+newGameEntryBtn.addEventListener('click', () => showScreen('newGame'));
+resumeEntryBtn.addEventListener('click', () => showScreen('resume'));
+replaysEntryBtn.addEventListener('click', () => showScreen('replays'));
+newGameBackBtn.addEventListener('click', () => showScreen('freePlay'));
+resumeBackBtn.addEventListener('click', () => showScreen('freePlay'));
+replaysBackBtn.addEventListener('click', () => showScreen('freePlay'));
+newGameStartBtn.addEventListener('click', () => {
+  startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode);
+});
+
+exitBtn.addEventListener('click', exitGame);
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 giveUpBtn.addEventListener('click', revealSolution);
-sizeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+rematchBtn.addEventListener('click', rematch);
+viewReplayBtn.addEventListener('click', () => {
+  void viewReplayFromGame();
 });
-shapeSelect.addEventListener('change', () => {
-  void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
-});
-nextBtn.addEventListener('click', () => {
-  if (!pathState.won) return;
-  void (async () => {
-    await pendingPersist;
-    await startPuzzle(currentPuzzleId.sizeKey, currentPuzzleId.shapeMode);
-  })();
-});
-byId('historyBtn').addEventListener('click', () => {
-  void openHistory();
-});
-byId('closeHistoryBtn').addEventListener('click', closeHistory);
-byId('exitReviewBtn').addEventListener('click', exitReview);
 replayBtn.addEventListener('click', startReplay);
 replayCloseBtn.addEventListener('click', closeReplay);
+byId('exitReviewBtn').addEventListener('click', exitReview);
 replayPlayPauseBtn.addEventListener('click', () => {
   if (replayTimerId !== null) stopReplayTimer();
   else playReplay();
@@ -896,12 +1065,12 @@ replaySpeedSelect.addEventListener('change', () => {
   if (replayTimerId !== null) playReplay();
 });
 
-/** Tag names for controls where ctrl+z/y should keep its native text-editing meaning instead of undo/redo-ing the puzzle. Deliberately narrower than `keyboard.ts`'s equivalent list (which also excludes SELECT/BUTTON, since arrow keys and Enter/Space *do* conflict with those) — ctrl+z has no native behavior on a focused button or select, and excluding BUTTON here would mean clicking Undo/Redo/Reset (which keeps focus on the button afterward) silently breaks the ctrl+z shortcut until focus moves elsewhere. */
+/** Tag names for controls where ctrl+z/y should keep its native text-editing meaning instead of undo/redo-ing the puzzle. Deliberately narrower than `keyboard.ts`'s equivalent list (which also excludes SELECT/BUTTON, since arrow keys and Enter/Space *do* conflict with those) — ctrl+z has no native behavior on a focused button or select, and excluding BUTTON here would mean clicking Undo/Redo (which keeps focus on the button afterward) silently breaks the ctrl+z shortcut until focus moves elsewhere. */
 const TEXT_EDITING_TAGS = new Set(['INPUT', 'TEXTAREA']);
 
 window.addEventListener('keydown', (evt) => {
   if (!(evt.ctrlKey || evt.metaKey)) return;
-  if (mode !== 'playing' || !historyOverlayEl.classList.contains('hidden')) return;
+  if (screen !== 'game' || mode !== 'playing') return;
   const targetTag = (evt.target as HTMLElement | null)?.tagName;
   if (targetTag && TEXT_EDITING_TAGS.has(targetTag)) return;
 
@@ -924,7 +1093,7 @@ byId('zoomOutBtn').addEventListener('click', () => {
   setView(computeZoomAt(view, wrapEl.clientWidth / 2, wrapEl.clientHeight / 2, view.scale / 1.4, VIEW_BOUNDS));
 });
 window.addEventListener('resize', () => {
-  if (puzzle) layout();
+  if (screen === 'game' && puzzle) layout();
 });
 
 wrapEl.addEventListener(
@@ -942,15 +1111,16 @@ wrapEl.addEventListener(
 
 const lastSize = localStorage.getItem(LAST_SIZE_STORAGE_KEY);
 if (lastSize && SIZE_OPTIONS.some((opt) => opt.key === lastSize)) {
-  sizeSelect.value = lastSize;
+  newGameSizeSelect.value = lastSize;
 }
 const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
 if (lastShape && SELECTABLE_SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
-  shapeSelect.value = lastShape;
+  newGameShapeSelect.value = lastShape;
 }
 const lastReplaySpeed = Number(localStorage.getItem(LAST_REPLAY_SPEED_KEY));
 if (REPLAY_SPEED_OPTIONS.includes(lastReplaySpeed)) {
   replaySpeed = lastReplaySpeed;
   replaySpeedSelect.value = String(lastReplaySpeed);
 }
-void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);
+
+showScreen('mainMenu');

@@ -2,6 +2,15 @@ const DB_NAME = 'loopit';
 const DB_VERSION = 1;
 
 export const STORES = {
+  /**
+   * Vestigial: used to hold the daily-puzzle unlock gate (`ProgressRecord`)
+   * before the seed-based `PuzzleId` restructuring removed the whole
+   * daily-rotation/unlock-gating mechanic (see `puzzleGen.ts`'s doc
+   * comment) — nothing reads or writes it any more. Left defined (rather
+   * than dropped, which would need an IndexedDB version bump + an
+   * `onupgradeneeded` migration to actually delete the store) since an
+   * unused, empty object store costs nothing to leave in place.
+   */
   progress: 'progress',
   inProgress: 'inProgress',
   completed: 'completed',

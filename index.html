@@ -8,84 +8,141 @@
   </head>
   <body>
     <div id="app">
-      <header>
-        <h1>Loop It</h1>
-        <div id="headerInfo">
-          <div id="puzzleLabel"></div>
-          <div id="progress">0 / 0</div>
-        </div>
-      </header>
-      <div id="boardWrap">
-        <canvas id="canvas"></canvas>
-        <div class="zoomControls">
-          <button id="zoomInBtn">+</button>
-          <button id="zoomOutBtn">–</button>
-          <button id="zoomFitBtn" style="font-size: 0.65rem">Fit</button>
-        </div>
-        <div id="winBanner">Loop complete!</div>
-        <div id="toast"></div>
-        <div id="reviewBar" class="hidden">
-          <span id="reviewLabel"></span>
-          <div id="reviewIdleControls">
-            <button class="secondary" id="replayBtn">Replay</button>
-            <button class="secondary" id="exitReviewBtn">Done</button>
+      <!-- Main menu: animated postgame-loop background behind Blitz/Free Play. -->
+      <div id="mainMenuScreen" class="screen">
+        <canvas id="menuCanvas"></canvas>
+        <div class="menuContent mainMenuContent">
+          <h1 class="menuTitle">Loop It</h1>
+          <p class="menuTagline">Trace one loop through every cell.</p>
+          <div class="menuButtonStack">
+            <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
+            <button class="menuBtn menuBtnSecondary" id="blitzEntryBtn">Blitz<span class="menuBtnBadge">Coming soon</span></button>
           </div>
-          <div id="reviewPlaybackControls" class="hidden">
-            <button class="secondary" id="replayPlayPauseBtn">Pause</button>
-            <select id="replaySpeedSelect" title="Replay speed">
-              <option value="0.25">0.25×</option>
-              <option value="0.5">0.5×</option>
-              <option value="1" selected>1×</option>
-              <option value="2">2×</option>
+        </div>
+      </div>
+
+      <!-- Free Play hub: New Game / Resume / Replays. -->
+      <div id="freePlayMenuScreen" class="screen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="freePlayBackBtn">‹ Menu</button>
+          <h2>Free Play</h2>
+        </div>
+        <div class="menuContent">
+          <div class="menuButtonStack">
+            <button class="menuBtn menuBtnPrimary" id="newGameEntryBtn">New Game</button>
+            <button class="menuBtn menuBtnSecondary" id="resumeEntryBtn">Resume</button>
+            <button class="menuBtn menuBtnSecondary" id="replaysEntryBtn">Replays</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- New Game: pick size + shape, then start a fresh, randomly-seeded puzzle. -->
+      <div id="newGameMenuScreen" class="screen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="newGameBackBtn">‹ Free Play</button>
+          <h2>New Game</h2>
+        </div>
+        <div class="menuContent newGameForm">
+          <label
+            >Size
+            <select id="newGameSizeSelect">
+              <option value="tiny">Tiny</option>
+              <option value="mini">Mini</option>
+              <option value="small" selected>Small</option>
+              <option value="medium">Medium</option>
+              <option value="large">Large</option>
+              <option value="huge">Huge</option>
             </select>
-            <input type="range" id="replayScrubber" min="0" max="0" value="0" step="1" />
-            <span id="replayCounter"></span>
-            <button class="secondary" id="replayCloseBtn">Done</button>
+          </label>
+          <label
+            >Shape
+            <select id="newGameShapeSelect">
+              <option value="rect" selected>Rectangle</option>
+              <option value="random">Random shape</option>
+              <option value="toroidal">Toroidal</option>
+              <!--
+                Klein bottle / projective plane are temporarily disabled — their
+                nonorientable-surface generation has known bugs that are too hard
+                to fix for now (src/game/topology.ts's file doc comment). The
+                underlying code (buildKleinBottlePuzzle/buildProjectivePlanePuzzle
+                etc.) is still there for a future fix; these options are just not
+                offered to players meanwhile.
+              -->
+            </select>
+          </label>
+          <button class="menuBtn menuBtnPrimary" id="newGameStartBtn">Start</button>
+        </div>
+      </div>
+
+      <!-- Resume: every saved in-progress game, resumable or deletable. -->
+      <div id="resumeMenuScreen" class="screen hidden">
+        <div class="overlayHeader">
+          <h2>Resume</h2>
+          <button class="secondary backBtn" id="resumeBackBtn">‹ Free Play</button>
+        </div>
+        <div id="resumeListEl" class="listScroll"></div>
+      </div>
+
+      <!-- Replays: every completed puzzle, reviewable or deletable. -->
+      <div id="replaysMenuScreen" class="screen hidden">
+        <div class="overlayHeader">
+          <h2>Replays</h2>
+          <button class="secondary backBtn" id="replaysBackBtn">‹ Free Play</button>
+        </div>
+        <div id="replaysListEl" class="listScroll"></div>
+      </div>
+
+      <!-- The live/reviewed game itself. -->
+      <div id="gameScreen" class="screen hidden">
+        <header>
+          <h1>Loop It</h1>
+          <div id="headerInfo">
+            <div id="puzzleLabel"></div>
+            <div id="progress">0 / 0</div>
+          </div>
+        </header>
+        <div id="boardWrap">
+          <canvas id="canvas"></canvas>
+          <div class="zoomControls">
+            <button id="zoomInBtn">+</button>
+            <button id="zoomOutBtn">–</button>
+            <button id="zoomFitBtn" style="font-size: 0.65rem">Fit</button>
+          </div>
+          <div id="winBanner">Loop complete!</div>
+          <div id="toast"></div>
+          <div id="reviewBar" class="hidden">
+            <span id="reviewLabel"></span>
+            <div id="reviewIdleControls">
+              <button class="secondary" id="replayBtn">Replay</button>
+              <button class="secondary" id="exitReviewBtn">Done</button>
+            </div>
+            <div id="reviewPlaybackControls" class="hidden">
+              <button class="secondary" id="replayPlayPauseBtn">Pause</button>
+              <select id="replaySpeedSelect" title="Replay speed">
+                <option value="0.25">0.25×</option>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+              </select>
+              <input type="range" id="replayScrubber" min="0" max="0" value="0" step="1" />
+              <span id="replayCounter"></span>
+              <button class="secondary" id="replayCloseBtn">Done</button>
+            </div>
+          </div>
+        </div>
+        <div class="controls" id="playControls">
+          <button class="secondary" id="exitBtn">Exit</button>
+          <div id="activeControls" class="controlGroup">
+            <button class="secondary" id="undoBtn" disabled>Undo</button>
+            <button class="secondary" id="redoBtn" disabled>Redo</button>
+            <button class="secondary" id="giveUpBtn" disabled>Give Up</button>
+          </div>
+          <div id="completeControls" class="controlGroup hidden">
+            <button id="rematchBtn">Rematch</button>
+            <button class="secondary" id="viewReplayBtn">Replay</button>
           </div>
         </div>
       </div>
-      <div class="controls" id="playControls">
-        <label
-          >Size
-          <select id="sizeSelect">
-            <option value="tiny">Tiny</option>
-            <option value="mini">Mini</option>
-            <option value="small" selected>Small</option>
-            <option value="medium">Medium</option>
-            <option value="large">Large</option>
-            <option value="huge">Huge</option>
-          </select>
-        </label>
-        <label
-          >Shape
-          <select id="shapeSelect">
-            <option value="rect" selected>Rectangle</option>
-            <option value="random">Random shape</option>
-            <option value="toroidal">Toroidal</option>
-            <!--
-              Klein bottle / projective plane are temporarily disabled — their
-              nonorientable-surface generation has known bugs that are too hard
-              to fix for now (src/game/topology.ts's file doc comment). The
-              underlying code (buildKleinBottlePuzzle/buildProjectivePlanePuzzle
-              etc.) is still there for a future fix; these options are just not
-              offered to players meanwhile.
-            -->
-          </select>
-        </label>
-        <button class="secondary" id="resetBtn">Reset</button>
-        <button class="secondary" id="undoBtn" disabled>Undo</button>
-        <button class="secondary" id="redoBtn" disabled>Redo</button>
-        <button class="secondary" id="giveUpBtn" disabled>Give Up</button>
-        <button class="secondary" id="historyBtn">History</button>
-        <button id="nextBtn" disabled>Next Puzzle</button>
-      </div>
-    </div>
-    <div id="historyOverlay" class="hidden">
-      <div class="overlayHeader">
-        <h2>Completed Puzzles</h2>
-        <button class="secondary" id="closeHistoryBtn">Close</button>
-      </div>
-      <div id="historyList"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
