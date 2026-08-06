@@ -229,12 +229,13 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   effect. `game/edgeRipple.ts`'s `computeRecoloredEdges` finds every such
   edge that's actually graph-reachable from the toggle location in the
   post-toggle marked-edge graph, together with its hop distance; `main.ts`
-  staggers each one's pulse start by `distance * PULSE_STAGGER_MS` so the
-  recolor visibly ripples outward rather than flipping everywhere at once.
-  Each pulse (`render.ts`'s `PULSE_MS`, 260ms) bulges the edge's line width
-  up and back down, swapping from its old color to its live one right at
-  the peak — "growing and then shrinking as it changes color". A merge/
-  split can also renumber an entirely *unrelated* component purely because
+  staggers each one's pulse start by `distance * RIPPLE_STAGGER_MS` (45ms,
+  exported from `render.ts` — see below for why) so the recolor visibly
+  ripples outward rather than flipping everywhere at once. Each pulse
+  (`render.ts`'s `PULSE_MS`, 260ms) bulges the edge's line width up and back
+  down, swapping from its old color to its live one right at the peak —
+  "growing and then shrinking as it changes color". A merge/split can also
+  renumber an entirely *unrelated* component purely because
   `edgeComponents.ts`'s component ids are assigned by iteration order, not
   identity (see its doc comment) — `computeRecoloredEdges` deliberately
   excludes anything not reachable from the toggle, so that case recolors
@@ -248,26 +249,50 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
     pre-existing segment kept id 0 jumping straight to green with no
     animation), `main.ts` uses `edgeRipple.ts`'s `computeReachableEdges`,
     which ripples *every* reachable edge unconditionally. It uses the exact
-    same `PULSE_STAGGER_MS` as an ordinary ripple (an earlier version used a
+    same `RIPPLE_STAGGER_MS` as an ordinary ripple (an earlier version used a
     separate, faster stagger so a huge board's sweep wouldn't take too long
     — but that made the win ripple visibly a *different*, faster animation
     from the everyday one, which read as inconsistent rather than snappy;
     it's simplest, and truest to "the same animation, just over more
     edges", to just let a huge board's win ripple take longer, same as
     everything else here scales with board size).
-- **Win-loop dot**: once a puzzle is actually complete (`pathState.won`
-  live, or `reviewWon` while reviewing — deliberately *not* `gaveUp`, which
-  is explicitly not a real win, see "Give Up" below), a small dot travels
-  around the solved loop forever. `game/loopOrder.ts`'s `orderLoopCells`
-  walks the marked-edge set (guaranteed to be one simple Hamiltonian cycle
-  by `computeWin`) into an ordered cell sequence once per completed state;
-  `render.ts` interpolates the dot's on-screen position each frame from
-  elapsed time. It moves at a constant pace (`winDotPeriodMs`'s
-  `WIN_DOT_MS_PER_EDGE`, 90ms/edge) rather than a fixed lap duration, so a
-  bigger loop just takes proportionally longer to complete a lap instead of
-  the dot itself visibly speeding up — an earlier version clamped the lap
-  time to a fixed range instead, which made the dot noticeably *faster* on
-  a huge board (more cells covered per second) than on a small one.
+- **Win-comet**: once the winning move's ripple above finishes covering the
+  whole board in green, a bright-green "comet" starts exactly where that
+  ripple last reached (`edgeRipple.ts`'s `computeFarthestCell`) and travels
+  forever around the loop in one direction at the same `RIPPLE_STAGGER_MS`
+  pace, its tail fading from `COLORS.markedWon` down to a darker
+  `COLORS.winCometDark` the longer it's been since the comet passed over
+  that edge — reaching fully dark right as the comet is about to lap back
+  around and relight it, since the fade's duration is deliberately exactly
+  one full lap (`render.ts`'s `computeCometStyles`: `cells.length *
+  RIPPLE_STAGGER_MS`), which is what makes the fade pace scale with board
+  size the way a bigger loop takes a bigger lap. Its leading edge also
+  bulges past normal width and back — the exact same `PULSE_MS`
+  duration/`PULSE_BULGE` shape as an ordinary recolor pulse's width bulge,
+  just re-triggered every lap at the comet's current position instead of
+  once at a scheduled delay — so the comet's frontier visibly "grows and
+  shrinks" the same way the pre-comet ripple's did, rather than being a
+  flat-width color fade with no motion of its own. This replaced an
+  earlier, simpler "dot traveling around the loop" animation — the comet
+  reuses the same underlying cell-cycle data (`game/loopOrder.ts`'s
+  `orderLoopCells`, cached in `main.ts`'s `winLoopCells`/`winLoopEdgesRef`
+  exactly as the dot used it) but colors (and locally widens) the whole
+  loop instead of drawing a separate marker.
+  - **Waiting for the ripple to actually finish**: the comet must not start
+    until the winning ripple above has *completely* finished (not merely
+    "the board looks all green," since the ripple's own pulses already make
+    it look that way well before the last one completes) — `main.ts`'s
+    `scheduleToggleAnimation` computes exactly when and where that'll be
+    the moment it schedules a winning ripple (`pendingCometStart`, mirroring
+    the farthest edge's own pulse-completion time), and `render()` holds the
+    comet off (`cometActive` stays `false`) until then. A completed state
+    reached with no ripple to wait for at all — opening an already-completed
+    puzzle from history, or replay reaching its end with animations off —
+    just starts the comet immediately instead, from an arbitrary point
+    (index 0 of the cycle), since there's no ripple endpoint to anchor to.
+  - Deliberately *not* shown for a given-up puzzle (`gaveUp`): the flat
+    "solved" green is used there instead, same as before this feature
+    existed, since giving up isn't a real win — see "Give Up" below.
 
 All three share one `requestAnimationFrame` chain, driven entirely by
 `main.ts`'s `render()`: every other call site still just calls `render()`
@@ -277,16 +302,21 @@ only place that decides whether a follow-up frame is needed
 `animFrameId` until neither is true. Every entry is keyed by
 `performance.now()` timestamps rather than a frame counter, so a slow frame
 or a backgrounded tab can't desync an animation from where it should be.
+`render.ts` exports `RIPPLE_STAGGER_MS` (alongside `GROW_MS`/`SHRINK_MS`/
+`PULSE_MS`) so both the ripple's pulse-delay math and the comet's travel
+speed in `main.ts` share the exact same constant as the ripple's own drawing
+code, rather than three places having to be kept in sync by hand.
 
 Only a live tap/keyboard toggle (`setPathState`) starts a grow/shrink/pulse
 animation. Anything that jumps straight to a different state instead — undo,
 redo, Give Up, Reset, starting a new puzzle, entering/leaving review — calls
-`clearEdgeAnimations()` up front, so a leftover in-flight animation is never
-reinterpreted against a state it no longer describes. The win-loop dot's
-cycle cache doesn't need this: `render()` recomputes it (or clears it)
-automatically whenever "is this state completed" changes, or the completed
-edge set's *reference* changes (a fresh win, a different already-completed
-puzzle opened in review, a replay frame) — see `render()`'s own doc comment.
+`clearEdgeAnimations()` up front, so a leftover in-flight animation (and any
+`pendingCometStart`) is never reinterpreted against a state it no longer
+describes. The win-loop cycle cache doesn't need this: `render()` recomputes
+it (or clears it, along with the comet's own state) automatically whenever
+"is this state completed" changes, or the completed edge set's *reference*
+changes (a fresh win, a different already-completed puzzle opened in review,
+a replay frame) — see `render()`'s own doc comment.
 
 ## Edge collections
 

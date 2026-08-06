@@ -1,6 +1,6 @@
 import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
 import { computeEdgeComponents } from './game/edgeComponents';
-import { computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
+import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
@@ -10,7 +10,7 @@ import { computeRegions, type Face, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { getInProgress, getUnlockedIndex, listCompleted, recordCompletion, saveInProgress, type CompletedRecord } from './persistence/gameStore';
-import { draw, GROW_MS, PULSE_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
+import { draw, GROW_MS, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -120,9 +120,10 @@ let toastTimerId: number | null = null;
  *   (`clearEdgeAnimations`), which is simplest and keeps this file from
  *   having to reconcile an in-flight animation with a state it no longer
  *   describes.
- * - `winLoopCells`/`winLoopEdgesRef`/`winLoopStartTime` track the traveling
- *   win-loop dot; see `render()`'s doc comment for how they're kept in sync
- *   with whatever's actually on screen.
+ * - `winLoopCells`/`winLoopEdgesRef` track the completed puzzle's cell
+ *   cycle, and `pendingCometStart`/`cometActive`/`cometStartIndex`/
+ *   `cometStartTime` the win-comet built on top of it; see `render()`'s doc
+ *   comment for how they're kept in sync with whatever's actually on screen.
  * - `animFrameId` is the single `requestAnimationFrame` handle driving
  *   continued redraws while anything above is active; `render()` reschedules
  *   itself as long as `edgeAnimsActive() || winLoopCells !== null`, and lets
@@ -131,13 +132,27 @@ let toastTimerId: number | null = null;
 const growingEdges = new Map<EdgeKey, number>();
 const shrinkingEdges = new Map<EdgeKey, { start: number; color: string }>();
 const pulsingEdges = new Map<EdgeKey, { start: number; delay: number; fromColor: string }>();
-/** Stagger between adjacent hops of a recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`/`computeReachableEdges`. Shared by the ordinary (merge/split) ripple and the winning move's "everything turns green" ripple, so the latter reads as the same animation, just over more edges. */
-const PULSE_STAGGER_MS = 45;
 
 let winLoopCells: ReadonlyArray<readonly [number, number]> | null = null;
 /** Reference (not deep-equality) to whichever edge set `winLoopCells` was computed from, so a *different* already-won puzzle (e.g. opening another completed puzzle in review) recomputes instead of keeping a stale cycle — see `render()`. */
 let winLoopEdgesRef: ReadonlySet<EdgeKey> | null = null;
-let winLoopStartTime = 0;
+
+/**
+ * Set by `scheduleToggleAnimation` the instant a toggle wins the puzzle:
+ * where the winning ripple will finally finish (`computeFarthestCell`'s
+ * result — the point its outward wave reaches last) and exactly when
+ * (mirroring that edge's own pulse-completion time). `render()` holds the
+ * win-comet off (`cometActive` stays `false`) until `now` reaches `at`, so
+ * the comet only ever starts *after* the whole board has finished turning
+ * green, right where that ripple ends — see `render()`'s doc comment.
+ * `edgesRef` guards against a stale pending start ever being applied to a
+ * *different* state that happens to become completed later (shouldn't
+ * really be reachable, but cheap to guard).
+ */
+let pendingCometStart: { cell: readonly [number, number]; edgesRef: ReadonlySet<EdgeKey>; at: number } | null = null;
+let cometActive = false;
+let cometStartIndex = 0;
+let cometStartTime = 0;
 
 let animFrameId: number | null = null;
 
@@ -156,6 +171,7 @@ function clearEdgeAnimations(): void {
   growingEdges.clear();
   shrinkingEdges.clear();
   pulsingEdges.clear();
+  pendingCometStart = null;
 }
 
 /**
@@ -176,9 +192,11 @@ function clearEdgeAnimations(): void {
  * switch to the solved color, filtering by "did the id change" would (by
  * incidental id-numbering luck) leave a chunk of the board jumping straight
  * to green with no animation — so every reachable edge ripples instead,
- * using the *same* `PULSE_STAGGER_MS` pace as an ordinary ripple (just
+ * using the *same* `RIPPLE_STAGGER_MS` pace as an ordinary ripple (just
  * potentially over many more edges, since it's not filtered), so a win
- * visibly reads as the same animation, not a different one.
+ * visibly reads as the same animation, not a different one. On a win, this
+ * also arranges for the win-comet to pick up exactly where that ripple
+ * leaves off — see `pendingCometStart`'s doc comment.
  */
 function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>, justWon: boolean): void {
   if (toggledEdges.size === 0) return;
@@ -200,7 +218,12 @@ function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: Rea
   const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggledEdges) : computeRecoloredEdges(prevEdges, nextEdges, toggledEdges);
   for (const { edge, distance } of rippleEdges) {
     if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
-    pulsingEdges.set(edge, { start: now, delay: distance * PULSE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
+    pulsingEdges.set(edge, { start: now, delay: distance * RIPPLE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
+  }
+
+  if (justWon) {
+    const farthest = computeFarthestCell(nextEdges, toggledEdges);
+    pendingCometStart = farthest ? { cell: farthest.cell, edgesRef: nextEdges, at: now + farthest.distance * RIPPLE_STAGGER_MS + PULSE_MS } : null;
   }
 }
 
@@ -229,14 +252,24 @@ function activeRegionMap(): RegionMap {
  * more than one such chain running at once (harmless either way, since
  * every frame just redraws the same live state, but wasteful).
  *
- * Also owns the win-loop dot's cycle cache: `completed` is `reviewWon`
- * while reviewing (deliberately excluding `gaveUp` — a given-up puzzle was
- * *not* actually won, see its doc comment) or `pathState.won` while
- * playing. The cycle is only recomputed when `completed` newly holds *or*
- * the edge set it was computed from has changed by reference — covering a
- * fresh win, opening a different already-completed puzzle in review, and
- * replay reaching (or leaving) its final frame, all without recomputing on
- * every single one of the animation's own re-renders.
+ * Also owns the win-loop cycle cache and the win-comet built on it:
+ * `completed` is `reviewWon` while reviewing (deliberately excluding
+ * `gaveUp` — a given-up puzzle was *not* actually won, see its doc
+ * comment) or `pathState.won` while playing. `winLoopCells` is only
+ * recomputed when `completed` newly holds *or* the edge set it was
+ * computed from has changed by reference — covering a fresh win, opening a
+ * different already-completed puzzle in review, and replay reaching (or
+ * leaving) its final frame, all without recomputing on every single one of
+ * the animation's own re-renders.
+ *
+ * Whenever that transition happens, the comet either starts right away
+ * (`cometStartIndex = 0`) — for anything that arrives at a completed state
+ * with no ripple to wait for, e.g. opening an already-completed puzzle in
+ * review — or, if `scheduleToggleAnimation` just recorded a
+ * `pendingCometStart` for this exact edge set (a live or replayed winning
+ * toggle), waits until `pendingCometStart.at` before starting there
+ * instead, so the comet always picks up right where the winning ripple
+ * left off rather than racing ahead of it.
  */
 function render(): void {
   const now = performance.now();
@@ -262,11 +295,27 @@ function render(): void {
     if (winLoopEdgesRef !== state.edges) {
       winLoopCells = orderLoopCells(state.edges);
       winLoopEdgesRef = state.edges;
-      winLoopStartTime = now;
+      if (pendingCometStart && pendingCometStart.edgesRef === state.edges) {
+        cometActive = false; // wait for the winning ripple to finish -- see below
+      } else {
+        cometActive = true;
+        cometStartIndex = 0;
+        cometStartTime = now;
+        pendingCometStart = null;
+      }
+    }
+    if (!cometActive && pendingCometStart && pendingCometStart.edgesRef === state.edges && now >= pendingCometStart.at) {
+      const idx = winLoopCells?.findIndex(([x, y]) => x === pendingCometStart!.cell[0] && y === pendingCometStart!.cell[1]) ?? -1;
+      cometStartIndex = idx >= 0 ? idx : 0;
+      cometStartTime = pendingCometStart.at;
+      cometActive = true;
+      pendingCometStart = null;
     }
   } else if (winLoopEdgesRef !== null) {
     winLoopCells = null;
     winLoopEdgesRef = null;
+    cometActive = false;
+    pendingCometStart = null;
   }
 
   const anim: AnimationState = {
@@ -274,7 +323,7 @@ function render(): void {
     growing: growingEdges.size > 0 ? growingEdges : undefined,
     shrinking: shrinkingEdges.size > 0 ? shrinkingEdges : undefined,
     pulsing: pulsingEdges.size > 0 ? pulsingEdges : undefined,
-    winLoop: winLoopCells ? { cells: winLoopCells, startTime: winLoopStartTime } : undefined,
+    winComet: winLoopCells && cometActive ? { cells: winLoopCells, startIndex: cometStartIndex, startTime: cometStartTime } : undefined,
   };
 
   draw(ctx, canvas.width, canvas.height, { ...state, anim }, LAYOUT, view);
