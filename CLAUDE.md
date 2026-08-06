@@ -247,12 +247,14 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
     (which, on a win, would by incidental id-numbering luck leave whichever
     pre-existing segment kept id 0 jumping straight to green with no
     animation), `main.ts` uses `edgeRipple.ts`'s `computeReachableEdges`,
-    which ripples *every* reachable edge unconditionally. It also swaps in a
-    tighter `WIN_RIPPLE_STAGGER_MS` (12ms/hop vs. the ordinary ripple's 45)
-    since this wave can span up to roughly half the loop's length in hops
-    (from the toggle location to the far side) rather than a small local
-    patch, so it needs a faster pace to still read as one sweep instead of a
-    multi-second crawl on a huge board.
+    which ripples *every* reachable edge unconditionally. It uses the exact
+    same `PULSE_STAGGER_MS` as an ordinary ripple (an earlier version used a
+    separate, faster stagger so a huge board's sweep wouldn't take too long
+    — but that made the win ripple visibly a *different*, faster animation
+    from the everyday one, which read as inconsistent rather than snappy;
+    it's simplest, and truest to "the same animation, just over more
+    edges", to just let a huge board's win ripple take longer, same as
+    everything else here scales with board size).
 - **Win-loop dot**: once a puzzle is actually complete (`pathState.won`
   live, or `reviewWon` while reviewing — deliberately *not* `gaveUp`, which
   is explicitly not a real win, see "Give Up" below), a small dot travels
@@ -428,6 +430,24 @@ should not erase it from the movie.
   immediately (`main.ts`'s `replaySpeedSelect`'s `change` listener) rather
   than waiting for the next natural tick, and the choice is persisted to
   `localStorage` (`LAST_REPLAY_SPEED_KEY`) the same way size/shape are.
+- **Replay plays the same grow/shrink/ripple animations live editing gets**,
+  but only at the two slowest speeds (`replayAnimationsEnabled()`,
+  `replaySpeed <= 0.5`) — at 1×/2× a new animation would just get
+  interrupted by the next frame before finishing (`GROW_MS`/`PULSE_MS` are
+  both longer than a frame interval at those speeds), reading as flicker
+  rather than motion, so those speeds simply snap each frame in instantly
+  instead, same as before this existed. `showReplayFrame`'s `animate`
+  parameter is only ever `true` for `playReplay`'s own natural single-step
+  tick; scrubbing (and the initial jump to frame 0) always snaps regardless
+  of speed, since a dragged scrub can span an arbitrary number of frames and
+  there's no one sensible toggle to animate for that. The animated edges are
+  computed as the symmetric difference between consecutive frames'
+  (`main.ts`'s `symmetricDifference`) rather than replayed from the
+  original `PathOp`, which works the same whether that step was a real move
+  or an undo/redo jump — `scheduleToggleAnimation` itself doesn't need to
+  know which, and now takes an explicit `toggledEdges` set rather than
+  `PathOp[]` so both call sites (`setPathState` and `showReplayFrame`) can
+  feed it.
 
 ## Daily puzzle sequence
 

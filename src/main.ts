@@ -131,18 +131,8 @@ let toastTimerId: number | null = null;
 const growingEdges = new Map<EdgeKey, number>();
 const shrinkingEdges = new Map<EdgeKey, { start: number; color: string }>();
 const pulsingEdges = new Map<EdgeKey, { start: number; delay: number; fromColor: string }>();
-/** Stagger between adjacent hops of an ordinary (merge/split) recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`. */
+/** Stagger between adjacent hops of a recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`/`computeReachableEdges`. Shared by the ordinary (merge/split) ripple and the winning move's "everything turns green" ripple, so the latter reads as the same animation, just over more edges. */
 const PULSE_STAGGER_MS = 45;
-/**
- * Stagger between adjacent hops of the winning move's "everything turns
- * green" ripple (see `edgeRipple.ts`'s `computeReachableEdges`) — smaller
- * than `PULSE_STAGGER_MS` because this one can span the *entire* loop (up to
- * roughly half its length in hops, from the toggle location to the far
- * side), not just a small local patch, so it needs a faster per-hop pace to
- * still read as one satisfying sweep rather than a multi-second crawl on a
- * huge board.
- */
-const WIN_RIPPLE_STAGGER_MS = 12;
 
 let winLoopCells: ReadonlyArray<readonly [number, number]> | null = null;
 /** Reference (not deep-equality) to whichever edge set `winLoopCells` was computed from, so a *different* already-won puzzle (e.g. opening another completed puzzle in review) recomputes instead of keeping a stale cycle — see `render()`. */
@@ -169,12 +159,15 @@ function clearEdgeAnimations(): void {
 }
 
 /**
- * Schedules the visual grow/shrink/recolor-ripple animation for one path
- * edit. Called from `setPathState` with the edge sets on either side of the
- * toggle, exactly which edges it touched (`ops`, see `PathOp`), and whether
- * this toggle is the one that just won the puzzle — an edge newly present
- * starts a grow, one newly absent freezes its current color and starts a
- * shrink (see `render.ts`'s `ShrinkingEdges`).
+ * Schedules the visual grow/shrink/recolor-ripple animation for one edge
+ * transition — a live toggle (`setPathState`) or a single replay-frame step
+ * (`showReplayFrame`) alike. `toggledEdges` is exactly which edges flipped
+ * presence (a live toggle already knows this from its `PathOp`s; a replay
+ * step derives it as the symmetric difference between consecutive frames'
+ * edge sets, which works uniformly whether that frame came from a real move
+ * or an undo/redo jump). An edge newly present starts a grow, one newly
+ * absent freezes its current color and starts a shrink (see `render.ts`'s
+ * `ShrinkingEdges`).
  *
  * For the recolor ripple: an ordinary toggle uses `computeRecoloredEdges`,
  * which only flags an edge whose component id actually changed (a merge or
@@ -182,21 +175,18 @@ function clearEdgeAnimations(): void {
  * win means every remaining edge is now one single component about to
  * switch to the solved color, filtering by "did the id change" would (by
  * incidental id-numbering luck) leave a chunk of the board jumping straight
- * to green with no animation — so every reachable edge ripples, using the
- * tighter `WIN_RIPPLE_STAGGER_MS` pace so a huge board's sweep still reads
- * as one ripple rather than a multi-second crawl. Either way, each pulse is
- * delayed by its graph distance from the toggle so the recolor visibly
- * ripples outward rather than flipping everywhere at once.
+ * to green with no animation — so every reachable edge ripples instead,
+ * using the *same* `PULSE_STAGGER_MS` pace as an ordinary ripple (just
+ * potentially over many more edges, since it's not filtered), so a win
+ * visibly reads as the same animation, not a different one.
  */
-function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, ops: PathOp[], justWon: boolean): void {
-  const toggled = new Set<EdgeKey>();
-  for (const op of ops) for (const ek of op.edges) toggled.add(ek);
-  if (toggled.size === 0) return;
+function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>, justWon: boolean): void {
+  if (toggledEdges.size === 0) return;
 
   const now = performance.now();
   const prevComponents = computeEdgeComponents(prevEdges);
 
-  for (const ek of toggled) {
+  for (const ek of toggledEdges) {
     growingEdges.delete(ek);
     shrinkingEdges.delete(ek);
     pulsingEdges.delete(ek);
@@ -207,12 +197,19 @@ function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: Rea
     }
   }
 
-  const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggled) : computeRecoloredEdges(prevEdges, nextEdges, toggled);
-  const staggerMs = justWon ? WIN_RIPPLE_STAGGER_MS : PULSE_STAGGER_MS;
+  const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggledEdges) : computeRecoloredEdges(prevEdges, nextEdges, toggledEdges);
   for (const { edge, distance } of rippleEdges) {
     if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
-    pulsingEdges.set(edge, { start: now, delay: distance * staggerMs, fromColor: segmentColor(prevComponents.get(edge)!) });
+    pulsingEdges.set(edge, { start: now, delay: distance * PULSE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
   }
+}
+
+/** The edges present in exactly one of `a`/`b` — what actually changed between two edge sets, regardless of whether that change came from a `PathOp` or an arbitrary jump (undo/redo, a replay frame). */
+function symmetricDifference(a: ReadonlySet<EdgeKey>, b: ReadonlySet<EdgeKey>): Set<EdgeKey> {
+  const result = new Set<EdgeKey>();
+  for (const ek of a) if (!b.has(ek)) result.add(ek);
+  for (const ek of b) if (!a.has(ek)) result.add(ek);
+  return result;
 }
 
 function activePuzzle(): Puzzle {
@@ -371,7 +368,9 @@ function persistLiveState(): void {
 function setPathState(next: PathState, ops: PathOp[]): void {
   const prev = pathState;
   const justWon = next.won && !prev.won;
-  scheduleToggleAnimation(prev.edges, next.edges, ops, justWon);
+  const toggled = new Set<EdgeKey>();
+  for (const op of ops) for (const ek of op.edges) toggled.add(ek);
+  scheduleToggleAnimation(prev.edges, next.edges, toggled, justWon);
   pathState = next;
   history = recordMove(history, prev, ops);
   updateProgress();
@@ -672,9 +671,39 @@ function stopReplayTimer(): void {
   replayPlayPauseBtn.textContent = 'Play';
 }
 
-function showReplayFrame(index: number): void {
+/**
+ * Replay only animates the same grow/shrink/ripple juice a live toggle gets
+ * at the two slowest speeds — faster than that, a new animation would just
+ * get interrupted by the next frame before finishing (`GROW_MS`/`PULSE_MS`
+ * are both longer than a frame at 1×/2×), reading as flicker rather than
+ * motion, so it's simplest to just skip scheduling any at those speeds.
+ */
+function replayAnimationsEnabled(): boolean {
+  return replaySpeed <= 0.5;
+}
+
+/**
+ * Shows one replay frame. `animate` is true only for a natural single-step
+ * forward advance (`playReplay`'s own tick) — scrubbing or the initial
+ * frame jump straight to the target state instead (`clearEdgeAnimations`),
+ * since a dragged scrub can span an arbitrary number of frames and there's
+ * no one sensible "toggle" to animate for that. When animating, the edges
+ * that actually changed are the symmetric difference between this frame and
+ * the previous one, which works the same whether that step was a real move
+ * or an undo/redo jump (`symmetricDifference`) — `scheduleToggleAnimation`
+ * doesn't need to know which.
+ */
+function showReplayFrame(index: number, animate = false): void {
+  const prevFrame = replayFrames[replayIndex];
   replayIndex = Math.max(0, Math.min(replayFrames.length - 1, index));
   const frame = replayFrames[replayIndex];
+
+  if (animate && replayAnimationsEnabled() && prevFrame) {
+    scheduleToggleAnimation(prevFrame.edges, frame.edges, symmetricDifference(prevFrame.edges, frame.edges), frame.won && !prevFrame.won);
+  } else {
+    clearEdgeAnimations();
+  }
+
   reviewEdges = frame.edges;
   reviewWon = frame.won;
   replayScrubberEl.value = String(replayIndex);
@@ -691,7 +720,7 @@ function playReplay(): void {
       stopReplayTimer();
       return;
     }
-    showReplayFrame(replayIndex + 1);
+    showReplayFrame(replayIndex + 1, true);
   }, REPLAY_FRAME_MS / replaySpeed);
 }
 
@@ -709,6 +738,7 @@ function startReplay(): void {
 /** Leaves playback (if any) and restores the static, fully-solved view — called on Done and when leaving review entirely. */
 function closeReplay(): void {
   stopReplayTimer();
+  clearEdgeAnimations();
   reviewPlaybackControlsEl.classList.add('hidden');
   reviewIdleControlsEl.classList.remove('hidden');
   if (currentReviewItem) {
