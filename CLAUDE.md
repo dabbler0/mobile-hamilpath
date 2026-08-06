@@ -210,6 +210,20 @@ persisted (a reload always resumes/redraws in the fully-settled state).
 instant of it (its `AnimationState`, threaded through `RenderState.anim`)
 for both the ordinary and wraparound (`drawWrapped`) render paths.
 
+Any of these can temporarily widen an edge past its normal stroke width
+(grow overshoots nothing, but a pulse or the comet's bulge do). Both
+`drawMarkedEdges` and `drawWrapped` collect every edge's draw info first
+and stroke them widest-last (`strokeMarkedEdges`, and `tiledMarkedEdges`'s
+own sort) rather than drawing each edge immediately in `edges`' arbitrary
+iteration order: two edges sharing a vertex both get a rounded end cap
+there, and whichever is stroked *second* paints over the first's cap at
+that point. Normally invisible (same-width neighbors' caps align exactly),
+but a temporarily-widened edge stroked *before* its ordinary-width
+neighbor let that neighbor's thinner cap visibly bite into the wide edge's
+join — most noticeable as a "hole" right at a moving wave's leading edge.
+Sorting so wider edges always draw last keeps a bulging edge's join on top
+everywhere, regardless of draw order.
+
 - **Grow/shrink**: a region toggle's newly-marked edges "grow" from zero to
   full *width* (drawn at full length the whole time), and newly-unmarked
   edges "shrink" from full width back to zero, over `render.ts`'s
@@ -267,17 +281,21 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   one full lap (`render.ts`'s `computeCometStyles`: `cells.length *
   RIPPLE_STAGGER_MS`), which is what makes the fade pace scale with board
   size the way a bigger loop takes a bigger lap. Its leading edge also
-  bulges past normal width and back — the exact same `PULSE_MS`
-  duration/`PULSE_BULGE` shape as an ordinary recolor pulse's width bulge,
-  just re-triggered every lap at the comet's current position instead of
-  once at a scheduled delay — so the comet's frontier visibly "grows and
-  shrinks" the same way the pre-comet ripple's did, rather than being a
-  flat-width color fade with no motion of its own. This replaced an
-  earlier, simpler "dot traveling around the loop" animation — the comet
-  reuses the same underlying cell-cycle data (`game/loopOrder.ts`'s
-  `orderLoopCells`, cached in `main.ts`'s `winLoopCells`/`winLoopEdgesRef`
-  exactly as the dot used it) but colors (and locally widens) the whole
-  loop instead of drawing a separate marker.
+  bulges past normal width, peaking exactly *at* the head and easing back
+  down to normal over a trailing `PULSE_MS`-ish window behind it
+  (`PULSE_BULGE`, same magnitude as an ordinary recolor pulse's width
+  bulge) — deliberately *not* the ordinary pulse's symmetric grow-then-
+  shrink shape (zero at both ends of its own window), since the comet's
+  frontier is always mid-motion with nothing "before" it to ramp up from;
+  peaking immediately at the head means there's always a bulge in progress
+  somewhere, continuously, with no ramp-up gap — see
+  `computeCometStyles`'s doc comment for why an earlier, symmetric-bulge
+  version of this caused a visible stutter right at the ripple-to-comet
+  handoff. This replaced an earlier, simpler "dot traveling around the
+  loop" animation — the comet reuses the same underlying cell-cycle data
+  (`game/loopOrder.ts`'s `orderLoopCells`, cached in `main.ts`'s
+  `winLoopCells`/`winLoopEdgesRef` exactly as the dot used it) but colors
+  (and locally widens) the whole loop instead of drawing a separate marker.
   - **Waiting for the ripple to actually finish**: the comet must not start
     until the winning ripple above has *completely* finished (not merely
     "the board looks all green," since the ripple's own pulses already make
