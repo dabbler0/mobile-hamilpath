@@ -293,6 +293,23 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   - Deliberately *not* shown for a given-up puzzle (`gaveUp`): the flat
     "solved" green is used there instead, same as before this feature
     existed, since giving up isn't a real win — see "Give Up" below.
+  - **The first lap starts in a brighter field, on purpose**: the ordinary
+    steady-state math (an edge's color age = hops since the comet's *current
+    lap* last passed it, wrapping at one full lap) would, applied naively
+    the instant the comet starts, treat every edge the comet hasn't reached
+    yet in this first lap as if it were reached almost a full lap ago — the
+    entire board would jump from flat bright green (how the ripple just left
+    it) to mostly-dark in one frame. `computeCometStyles` avoids this by
+    capping an edge's color age at `elapsedHops` (how long the comet has
+    actually been running) rather than the raw wraparound distance — so at
+    the moment the comet starts every edge's age is `0` (matching the
+    ripple's own bright finish exactly), and only the arc truly behind the
+    comet's head darkens for real, until a full lap has passed and the cap
+    stops applying anywhere. The width-bulge calculation deliberately does
+    *not* get this same cap (it always uses the raw distance) — capping it
+    too would make the whole not-yet-reached arc bulge in width together
+    during the first lap, instead of staying one small pulse localized at
+    the comet's actual head.
 
 All three share one `requestAnimationFrame` chain, driven entirely by
 `main.ts`'s `render()`: every other call site still just calls `render()`

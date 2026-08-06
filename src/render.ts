@@ -119,6 +119,21 @@ export interface CometStyle {
  * the comet's leading edge visibly "grows and shrinks" the same way the
  * pre-comet ripple's frontier does, rather than being a flat-width color
  * fade with no motion of its own.
+ *
+ * `colorAgeHops` (used only for color, never for the width bulge — see
+ * below) is capped at `elapsedHops`: every edge the comet hasn't actually
+ * passed *yet* in its very first lap has never truly been "passed" at all,
+ * so the ordinary wraparound math (which would otherwise treat "not yet
+ * reached" as "reached almost a full lap ago", i.e. nearly the darkest
+ * color) is wrong for it — capping at how long the comet has been running
+ * at all instead means every edge starts out exactly as bright as the
+ * winning ripple just left it (`elapsedHops` is `0` the instant the comet
+ * starts, so every edge's age is `0` too), and only the arc actually behind
+ * the comet's head darkens for real until a full lap has passed and the cap
+ * stops applying anywhere — this is what turns the ripple-to-comet handoff
+ * into a seamless continuation instead of the rest of the board abruptly
+ * jumping from flat bright green to a mostly-dark field the instant the
+ * comet takes over.
  */
 function computeCometStyles(cells: ReadonlyArray<readonly [number, number]>, startIndex: number, startTime: number, now: number): Map<EdgeKey, CometStyle> {
   const n = cells.length;
@@ -132,7 +147,13 @@ function computeCometStyles(cells: ReadonlyArray<readonly [number, number]>, sta
     // right under the comet's head, approaching `n` (a full lap) just before
     // it laps back around to relight this edge.
     const sincePassedHops = (((cometPos - i) % n) + n) % n;
-    const color = lerpColor(COLORS.markedWon, COLORS.winCometDark, sincePassedHops / n);
+    const colorAgeHops = Math.min(sincePassedHops, elapsedHops);
+    const color = lerpColor(COLORS.markedWon, COLORS.winCometDark, colorAgeHops / n);
+    // Deliberately keyed to the *uncapped* distance — capping this too would
+    // make the entire not-yet-reached arc bulge in width together during the
+    // first lap (since they'd all briefly share the same small `elapsedHops`
+    // age), instead of the bulge staying a single small pulse localized right
+    // at the comet's actual head.
     const tPulse = (sincePassedHops * RIPPLE_STAGGER_MS) / PULSE_MS;
     const widthMultiplier = tPulse <= 1 ? 1 + PULSE_BULGE * Math.sin(Math.PI * tPulse) : 1;
     styles.set(ek, { color, widthMultiplier });
