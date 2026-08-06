@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { edgeKey } from './regions';
-import { computeReachableEdges, computeRecoloredEdges } from './edgeRipple';
+import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './edgeRipple';
 
 describe('computeRecoloredEdges', () => {
   it('reports no ripple when nothing recolors', () => {
@@ -70,5 +70,41 @@ describe('computeReachableEdges', () => {
     const eA = edgeKey([0, 0], [1, 0]);
     const edges = new Set([eA]);
     expect(computeReachableEdges(edges, edges, new Set())).toEqual([]);
+  });
+});
+
+describe('computeFarthestCell', () => {
+  it('finds the cell at the far end of a straight path from the toggle', () => {
+    // A path (0,0)-(1,0)-(2,0)-(3,0)-(4,0), toggled at the (0,0)-(1,0) end.
+    // Both of the toggled edge's endpoints seed the BFS at distance 0, so
+    // (1,0) starts at 0 too -- (4,0) is 3 hops from there, not 4.
+    const edges = new Set([edgeKey([0, 0], [1, 0]), edgeKey([1, 0], [2, 0]), edgeKey([2, 0], [3, 0]), edgeKey([3, 0], [4, 0])]);
+    const toggled = new Set([edgeKey([0, 0], [1, 0])]);
+    const farthest = computeFarthestCell(edges, toggled);
+    expect(farthest).not.toBeNull();
+    expect(farthest!.cell).toEqual([4, 0]);
+    expect(farthest!.distance).toBe(3);
+  });
+
+  it('finds the meeting point on the far side of a cycle from the toggle', () => {
+    // An 8-cell ring; toggling one edge seeds both its endpoints at distance 0,
+    // so the ripple spreading both ways around the ring meets at the two cells
+    // directly opposite the toggled edge, each 3 hops away.
+    const cells: Array<[number, number]> = [
+      [0, 0], [1, 0], [2, 0], [2, 1],
+      [2, 2], [1, 2], [0, 2], [0, 1],
+    ];
+    const edges = new Set<string>();
+    for (let i = 0; i < cells.length; i++) edges.add(edgeKey(cells[i], cells[(i + 1) % cells.length]));
+    const toggled = new Set([edgeKey(cells[0], cells[1])]);
+
+    const farthest = computeFarthestCell(edges, toggled);
+    expect(farthest).not.toBeNull();
+    expect(farthest!.distance).toBe(3);
+  });
+
+  it('returns null when there are no toggled edges', () => {
+    const eA = edgeKey([0, 0], [1, 0]);
+    expect(computeFarthestCell(new Set([eA]), new Set())).toBeNull();
   });
 });

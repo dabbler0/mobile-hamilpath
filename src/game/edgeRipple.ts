@@ -1,5 +1,6 @@
+import type { Cell } from './hamiltonianCycle';
 import { computeEdgeComponents } from './edgeComponents';
-import { key, type CellKey } from './puzzle';
+import { key, parseKey, type CellKey } from './puzzle';
 import { parseEdgeKey, type EdgeKey } from './regions';
 
 export interface RippleEdge {
@@ -122,4 +123,26 @@ export function computeReachableEdges(prevEdges: ReadonlySet<EdgeKey>, nextEdges
     result.push({ edge: ek, distance });
   }
   return result;
+}
+
+export interface FarthestCell {
+  cell: Cell;
+  distance: number;
+}
+
+/**
+ * The cell farthest (in marked-edge hops) from the toggle location, in the
+ * post-toggle graph — i.e. where an outward ripple starting at the toggle
+ * arrives last. Used to seed `main.ts`'s win-comet animation exactly where
+ * the winning move's ripple (`computeReachableEdges`) finishes, once it
+ * finishes. Returns `null` only if `toggledEdges` is empty (nothing to
+ * measure distance from).
+ */
+export function computeFarthestCell(nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>): FarthestCell | null {
+  const dist = cellDistancesFromToggle(nextEdges, toggledEdges);
+  let best: FarthestCell | null = null;
+  for (const [ck, d] of dist) {
+    if (!best || d > best.distance) best = { cell: parseKey(ck), distance: d };
+  }
+  return best;
 }

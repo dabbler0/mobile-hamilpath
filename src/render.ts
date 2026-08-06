@@ -1,6 +1,6 @@
 import { computeEdgeComponents } from './game/edgeComponents';
 import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
-import { parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
+import { edgeKey, parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { countCollectionEdges, parseKey, type EdgeCollection, type Puzzle } from './game/puzzle';
 import { topologyFor, wrappedNeighbor, type Topology } from './game/topology';
 import type { Viewport } from './view/viewport';
@@ -30,8 +30,17 @@ export interface AnimationState {
   growing?: GrowingEdges;
   shrinking?: ShrinkingEdges;
   pulsing?: PulsingEdges;
-  /** The cell cycle a completed puzzle's win-loop dot travels along, and when it started — `null`/absent whenever the board isn't currently in a completed state. */
-  winLoop?: { cells: ReadonlyArray<readonly [number, number]>; startTime: number } | null;
+  /**
+   * The perpetual "comet" that replaces a completed puzzle's flat solved
+   * color once the winning move's recolor ripple finishes (see `main.ts`'s
+   * "Animations" section): `cells` is the loop's cell cycle (same data the
+   * old traveling dot used), `startIndex` is which cell the comet began at
+   * (wherever the ripple last reached), and `startTime` is when it was
+   * there. `null`/absent whenever the board isn't in a completed state, or
+   * is but the ripple hasn't finished yet (main.ts holds off on setting
+   * this until then).
+   */
+  winComet?: { cells: ReadonlyArray<readonly [number, number]>; startIndex: number; startTime: number } | null;
 }
 
 /** How long a newly-marked edge takes to grow from zero to full *width* (drawn full-length the whole time), and a newly-unmarked one to shrink back to zero width — `pathEdit.ts`'s `toggleRegion` is the only thing that starts one (see `main.ts`'s `scheduleToggleAnimation`). */
@@ -39,6 +48,16 @@ export const GROW_MS = 220;
 export const SHRINK_MS = 220;
 /** How long one edge's recolor "pulse" (width bulge + color swap at its peak) lasts, once its ripple delay has elapsed. */
 export const PULSE_MS = 260;
+/**
+ * Stagger between adjacent hops of a recolor ripple, in ms — shared by the
+ * ordinary (merge/split) ripple, the winning move's "everything turns
+ * green" ripple, and the win-comet's constant travel speed once that
+ * ripple hands off to it, so all three read as one consistent pace rather
+ * than three different animations. Exported so `main.ts` can use the same
+ * value when scheduling ripple pulse delays and computing when the
+ * winning ripple (and so the comet) should start.
+ */
+export const RIPPLE_STAGGER_MS = 45;
 const PULSE_BULGE = 0.85;
 /** Below this a stroke is treated as invisible and skipped — canvas ignores/normalizes `ctx.lineWidth = 0` rather than actually drawing nothing, so a grow/shrink's endpoints would otherwise flash a stray hairline. */
 const MIN_VISIBLE_WIDTH = 0.5;
@@ -48,18 +67,17 @@ function smoothstep(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
-/**
- * The win-loop dot travels at a constant pace (edges per ms) rather than a
- * fixed lap time, so a bigger loop just takes proportionally longer to
- * complete rather than the dot itself visibly speeding up or slowing down —
- * a fixed-duration lap previously had to be clamped to keep a huge board's
- * lap watchable, which made the dot noticeably *faster* there than on a
- * small board (more cells covered per second) instead of the same speed.
- * The floor only guards a degenerate near-empty cycle from being instant.
- */
-const WIN_DOT_MS_PER_EDGE = 90;
-function winDotPeriodMs(cellCount: number): number {
-  return Math.max(600, cellCount * WIN_DOT_MS_PER_EDGE);
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Linearly interpolates between two `#rrggbb` colors — used for the win-comet's bright-to-dark fade. */
+function lerpColor(from: string, to: string, t: number): string {
+  const c = Math.max(0, Math.min(1, t));
+  const [r1, g1, b1] = hexToRgb(from);
+  const [r2, g2, b2] = hexToRgb(to);
+  return `rgb(${Math.round(r1 + (r2 - r1) * c)}, ${Math.round(g1 + (g2 - g1) * c)}, ${Math.round(b1 + (b2 - b1) * c)})`;
 }
 
 const COLORS = {
@@ -69,13 +87,41 @@ const COLORS = {
   markedWon: '#35c46a',
   regionFocus: 'rgba(127, 184, 255, 0.22)',
   cursor: '#e8e8ea',
-  /** The dot that travels around a completed puzzle's loop, see `drawWinLoopDot`. */
-  winDot: '#ffffff',
+  /** The far, faded end of the win-comet's tail (see `computeCometColors`) — `markedWon` itself is reused as the comet's bright head color, so a completed puzzle's coloring stays anchored to the same "solved" green it's always been, just animated now. */
+  winCometDark: '#173a24',
   /** Badge color for an edge collection whose currently-marked count doesn't match its `required` count — see `drawEdgeCollectionBadges`. */
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
 };
+
+/**
+ * Colors every edge of a completed loop for the win-comet: a bright head
+ * (`COLORS.markedWon`) travels forward around `cells` at a constant pace
+ * (`RIPPLE_STAGGER_MS` per hop, same as an ordinary recolor ripple), with
+ * each edge fading from bright to `COLORS.winCometDark` the longer it's
+ * been since the comet last passed over it — reaching fully dark right as
+ * the comet is about to lap back around to it, since the fade's duration
+ * is exactly one full lap (`cells.length * RIPPLE_STAGGER_MS`), which is
+ * what makes the fade pace scale with board size the way `main.ts`'s doc
+ * comment on this feature describes.
+ */
+function computeCometColors(cells: ReadonlyArray<readonly [number, number]>, startIndex: number, startTime: number, now: number): Map<EdgeKey, string> {
+  const n = cells.length;
+  const colors = new Map<EdgeKey, string>();
+  if (n < 2) return colors;
+  const elapsedHops = (now - startTime) / RIPPLE_STAGGER_MS;
+  const cometPos = (((startIndex + elapsedHops) % n) + n) % n;
+  for (let i = 0; i < n; i++) {
+    const ek = edgeKey(cells[i], cells[(i + 1) % n]);
+    // How many hops ago the comet was at this edge's position, wrapping — 0
+    // right under the comet's head, approaching `n` (a full lap) just before
+    // it laps back around to relight this edge.
+    const sincePassed = (((cometPos - i) % n) + n) % n;
+    colors.set(ek, lerpColor(COLORS.markedWon, COLORS.winCometDark, sincePassed / n));
+  }
+  return colors;
+}
 
 /**
  * One color per edge collection (see `puzzle.ts`'s `EdgeCollection`), used
@@ -135,7 +181,6 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawNodes(ctx, puzzle, layout);
   drawMarkedEdges(ctx, edges, won, layout, anim);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
-  if (anim?.winLoop) drawWinLoopDot(ctx, anim.winLoop, anim.now, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
@@ -189,7 +234,11 @@ function drawRegionHighlight(ctx: CanvasRenderingContext2D, region: Region, layo
  * down to 0. A `pulsing` edge (present the whole time, just recoloring as a
  * merge/split ripples past it) bulges *past* normal width and back, swapping
  * from its old color to its live one at the peak — see `AnimationState`'s
- * doc comment for where these come from.
+ * doc comment for where these come from. Once the win-comet is running
+ * (`anim.winComet`), its per-edge colors (`computeCometColors`) take over
+ * from the flat "solved" color for every edge that isn't otherwise mid grow
+ * or pulse — this can only actually apply once every edge is done pulsing,
+ * since that's the same moment `main.ts` starts the comet.
  */
 function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, won: boolean, layout: Layout, anim?: AnimationState): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
@@ -200,9 +249,10 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
   // from the segment palette.
   const components = won ? null : computeEdgeComponents(edges);
   const now = anim?.now ?? 0;
+  const cometColors = anim?.winComet ? computeCometColors(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
 
   for (const ek of edges) {
-    const liveColor = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
+    const liveColor = cometColors?.get(ek) ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
     const [a, b] = parseEdgeKey(ek);
     const [sx1, sy1] = toScreen(a, layout);
     const [sx2, sy2] = toScreen(b, layout);
@@ -249,27 +299,6 @@ function drawMarkedEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeK
       ctx.stroke();
     }
   }
-}
-
-/** Draws the traveling dot that marks a completed puzzle's loop, walking `winLoop.cells` in order and looping forever (see `winDotPeriodMs`). */
-function drawWinLoopDot(ctx: CanvasRenderingContext2D, winLoop: NonNullable<AnimationState['winLoop']>, now: number, layout: Layout): void {
-  const { cells, startTime } = winLoop;
-  if (cells.length < 2) return;
-  const periodMs = winDotPeriodMs(cells.length);
-  const frac = (((now - startTime) % periodMs) + periodMs) % periodMs / periodMs;
-  const pos = frac * cells.length;
-  const i = Math.floor(pos) % cells.length;
-  const localT = pos - Math.floor(pos);
-  const [sx1, sy1] = toScreen(cells[i], layout);
-  const [sx2, sy2] = toScreen(cells[(i + 1) % cells.length], layout);
-  const r = Math.max(4, layout.cellSize * 0.24);
-  ctx.beginPath();
-  ctx.fillStyle = COLORS.winDot;
-  ctx.arc(sx1 + (sx2 - sx1) * localT, sy1 + (sy2 - sy1) * localT, r, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
-  ctx.stroke();
 }
 
 /**
@@ -456,16 +485,17 @@ function drawWrapped(
     }
   }
 
-  // Mirrors `drawMarkedEdges`'s grow/shrink/pulse handling (see its doc
-  // comment) — `lineWidth` is resolved once here per logical edge, then
-  // reapplied identically to every tile copy below, since the animation's
-  // progress doesn't depend on which repeated tile it's drawn in.
+  // Mirrors `drawMarkedEdges`'s grow/shrink/pulse/comet handling (see its
+  // doc comment) — `lineWidth`/`color` are resolved once here per logical
+  // edge, then reapplied identically to every tile copy below, since the
+  // animation's progress doesn't depend on which repeated tile it's drawn in.
   const components = won ? null : computeEdgeComponents(edges);
+  const cometColors = anim?.winComet ? computeCometColors(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
   const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
   const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
-    const liveColor = components ? segmentColor(components.get(ek)!) : COLORS.markedWon;
+    const liveColor = cometColors?.get(ek) ?? (components ? segmentColor(components.get(ek)!) : COLORS.markedWon);
     const classified = classifyEdge(a, b, topology, W, H);
 
     const growStart = anim?.growing?.get(ek);
@@ -615,34 +645,6 @@ function drawWrapped(
         const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
         drawBadge(ctx, (sx1 + sx2) / 2, (sy1 + sy2) / 2, r, text, fill);
       }
-    });
-  }
-
-  if (anim?.winLoop && anim.winLoop.cells.length >= 2) {
-    const { cells, startTime } = anim.winLoop;
-    const periodMs = winDotPeriodMs(cells.length);
-    const frac = (((now - startTime) % periodMs) + periodMs) % periodMs / periodMs;
-    const pos = frac * cells.length;
-    const i = Math.floor(pos) % cells.length;
-    const localT = pos - Math.floor(pos);
-    // `classifyEdge` returns `from`/`to` by reference to whichever of `a`/`b` it
-    // picked as the canonical near endpoint — reference-compare against `a` to
-    // know whether `localT` (a's-side-first) needs flipping to match.
-    const a = cells[i];
-    const b = cells[(i + 1) % cells.length];
-    const classified = classifyEdge(a, b, topology, W, H);
-    const dotT = classified.from === a ? localT : 1 - localT;
-    const r = Math.max(4, layout.cellSize * 0.24);
-    ctx.fillStyle = COLORS.winDot;
-    forEachTile((tileX, tileY) => {
-      const oFrom = topology.tileOrientation(tileX, tileY);
-      const [sx1, sy1] = toScreenTiled(classified.from, layout, tileX, tileY, W, H, oFrom);
-      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, classified.tileDX, classified.tileDY);
-      const oTo = classified.tileDX === 0 && classified.tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
-      const [sx2, sy2] = toScreenTiled(classified.to, layout, toTileX, toTileY, W, H, oTo);
-      ctx.beginPath();
-      ctx.arc(sx1 + (sx2 - sx1) * dotT, sy1 + (sy2 - sy1) * dotT, r, 0, Math.PI * 2);
-      ctx.fill();
     });
   }
 
