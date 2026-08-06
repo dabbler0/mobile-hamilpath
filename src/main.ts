@@ -1,6 +1,6 @@
 import { generateDailyPuzzle, generateDailySolutionEdges, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, todayKey, type PuzzleId, type ShapeMode } from './game/dailyPuzzle';
 import { computeEdgeComponents } from './game/edgeComponents';
-import { computeRecoloredEdges } from './game/edgeRipple';
+import { computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
@@ -16,7 +16,7 @@ import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type Vi
 
 const LAYOUT: Layout = { cellSize: 34, pad: 24 };
 const VIEW_BOUNDS: ViewportBounds = { minScale: 0.12, maxScale: 3 };
-/** How long each replay frame stays on screen. */
+/** How long each replay frame stays on screen at the default (1×) replay speed — see `replaySpeedSelect`/`replaySpeed`. */
 const REPLAY_FRAME_MS = 50;
 /** How long a transient status message (e.g. "undo history unavailable") stays visible. */
 const TOAST_MS = 3200;
@@ -55,6 +55,7 @@ const reviewIdleControlsEl = byId<HTMLDivElement>('reviewIdleControls');
 const reviewPlaybackControlsEl = byId<HTMLDivElement>('reviewPlaybackControls');
 const replayBtn = byId<HTMLButtonElement>('replayBtn');
 const replayPlayPauseBtn = byId<HTMLButtonElement>('replayPlayPauseBtn');
+const replaySpeedSelect = byId<HTMLSelectElement>('replaySpeedSelect');
 const replayScrubberEl = byId<HTMLInputElement>('replayScrubber');
 const replayCounterEl = byId<HTMLSpanElement>('replayCounter');
 const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
@@ -98,6 +99,8 @@ let keyboardCursor: Face | null = null;
 let replayFrames: PathState[] = [];
 let replayIndex = 0;
 let replayTimerId: number | null = null;
+/** Playback speed multiplier — `REPLAY_FRAME_MS / replaySpeed` is the actual per-frame interval. Read from/written to `replaySpeedSelect`, and persisted the same way size/shape are. */
+let replaySpeed = 1;
 let toastTimerId: number | null = null;
 
 /**
@@ -128,8 +131,18 @@ let toastTimerId: number | null = null;
 const growingEdges = new Map<EdgeKey, number>();
 const shrinkingEdges = new Map<EdgeKey, { start: number; color: string }>();
 const pulsingEdges = new Map<EdgeKey, { start: number; delay: number; fromColor: string }>();
-/** Stagger between adjacent hops of a recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`. */
+/** Stagger between adjacent hops of an ordinary (merge/split) recolor ripple — see `edgeRipple.ts`'s `computeRecoloredEdges`. */
 const PULSE_STAGGER_MS = 45;
+/**
+ * Stagger between adjacent hops of the winning move's "everything turns
+ * green" ripple (see `edgeRipple.ts`'s `computeReachableEdges`) — smaller
+ * than `PULSE_STAGGER_MS` because this one can span the *entire* loop (up to
+ * roughly half its length in hops, from the toggle location to the far
+ * side), not just a small local patch, so it needs a faster per-hop pace to
+ * still read as one satisfying sweep rather than a multi-second crawl on a
+ * huge board.
+ */
+const WIN_RIPPLE_STAGGER_MS = 12;
 
 let winLoopCells: ReadonlyArray<readonly [number, number]> | null = null;
 /** Reference (not deep-equality) to whichever edge set `winLoopCells` was computed from, so a *different* already-won puzzle (e.g. opening another completed puzzle in review) recomputes instead of keeping a stale cycle — see `render()`. */
@@ -158,15 +171,24 @@ function clearEdgeAnimations(): void {
 /**
  * Schedules the visual grow/shrink/recolor-ripple animation for one path
  * edit. Called from `setPathState` with the edge sets on either side of the
- * toggle plus exactly which edges it touched (`ops`, see `PathOp`) — an
- * edge newly present starts a grow, one newly absent freezes its current
- * color and starts a shrink (see `render.ts`'s `ShrinkingEdges`), and
- * `computeRecoloredEdges` finds any *other* still-marked edge that visibly
- * recolored as a side effect (a merge/split), scheduling a delayed pulse
- * staggered by its graph distance from the toggle so the recolor visibly
+ * toggle, exactly which edges it touched (`ops`, see `PathOp`), and whether
+ * this toggle is the one that just won the puzzle — an edge newly present
+ * starts a grow, one newly absent freezes its current color and starts a
+ * shrink (see `render.ts`'s `ShrinkingEdges`).
+ *
+ * For the recolor ripple: an ordinary toggle uses `computeRecoloredEdges`,
+ * which only flags an edge whose component id actually changed (a merge or
+ * split). The winning toggle instead uses `computeReachableEdges` — since a
+ * win means every remaining edge is now one single component about to
+ * switch to the solved color, filtering by "did the id change" would (by
+ * incidental id-numbering luck) leave a chunk of the board jumping straight
+ * to green with no animation — so every reachable edge ripples, using the
+ * tighter `WIN_RIPPLE_STAGGER_MS` pace so a huge board's sweep still reads
+ * as one ripple rather than a multi-second crawl. Either way, each pulse is
+ * delayed by its graph distance from the toggle so the recolor visibly
  * ripples outward rather than flipping everywhere at once.
  */
-function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, ops: PathOp[]): void {
+function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, ops: PathOp[], justWon: boolean): void {
   const toggled = new Set<EdgeKey>();
   for (const op of ops) for (const ek of op.edges) toggled.add(ek);
   if (toggled.size === 0) return;
@@ -185,9 +207,11 @@ function scheduleToggleAnimation(prevEdges: ReadonlySet<EdgeKey>, nextEdges: Rea
     }
   }
 
-  for (const { edge, distance } of computeRecoloredEdges(prevEdges, nextEdges, toggled)) {
+  const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggled) : computeRecoloredEdges(prevEdges, nextEdges, toggled);
+  const staggerMs = justWon ? WIN_RIPPLE_STAGGER_MS : PULSE_STAGGER_MS;
+  for (const { edge, distance } of rippleEdges) {
     if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
-    pulsingEdges.set(edge, { start: now, delay: distance * PULSE_STAGGER_MS, fromColor: segmentColor(prevComponents.get(edge)!) });
+    pulsingEdges.set(edge, { start: now, delay: distance * staggerMs, fromColor: segmentColor(prevComponents.get(edge)!) });
   }
 }
 
@@ -347,7 +371,7 @@ function persistLiveState(): void {
 function setPathState(next: PathState, ops: PathOp[]): void {
   const prev = pathState;
   const justWon = next.won && !prev.won;
-  scheduleToggleAnimation(prev.edges, next.edges, ops);
+  scheduleToggleAnimation(prev.edges, next.edges, ops, justWon);
   pathState = next;
   history = recordMove(history, prev, ops);
   updateProgress();
@@ -501,6 +525,9 @@ function resetPath(): void {
 
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
 const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
+const LAST_REPLAY_SPEED_KEY = 'loopit:replaySpeed';
+/** Must match `replaySpeedSelect`'s `<option>` values in `index.html` exactly. */
+const REPLAY_SPEED_OPTIONS = [0.25, 0.5, 1, 2];
 
 /**
  * Loads whichever puzzle is current for this size+shape today: a resumed
@@ -665,7 +692,7 @@ function playReplay(): void {
       return;
     }
     showReplayFrame(replayIndex + 1);
-  }, REPLAY_FRAME_MS);
+  }, REPLAY_FRAME_MS / replaySpeed);
 }
 
 function startReplay(): void {
@@ -756,6 +783,12 @@ replayScrubberEl.addEventListener('input', () => {
   stopReplayTimer();
   showReplayFrame(Number(replayScrubberEl.value));
 });
+replaySpeedSelect.addEventListener('change', () => {
+  replaySpeed = Number(replaySpeedSelect.value) || 1;
+  localStorage.setItem(LAST_REPLAY_SPEED_KEY, String(replaySpeed));
+  // Restart the running interval so a mid-playback speed change takes effect immediately, rather than waiting for the next tick.
+  if (replayTimerId !== null) playReplay();
+});
 
 /** Tag names for controls where ctrl+z/y should keep its native text-editing meaning instead of undo/redo-ing the puzzle. Deliberately narrower than `keyboard.ts`'s equivalent list (which also excludes SELECT/BUTTON, since arrow keys and Enter/Space *do* conflict with those) — ctrl+z has no native behavior on a focused button or select, and excluding BUTTON here would mean clicking Undo/Redo/Reset (which keeps focus on the button afterward) silently breaks the ctrl+z shortcut until focus moves elsewhere. */
 const TEXT_EDITING_TAGS = new Set(['INPUT', 'TEXTAREA']);
@@ -808,5 +841,10 @@ if (lastSize && SIZE_OPTIONS.some((opt) => opt.key === lastSize)) {
 const lastShape = localStorage.getItem(LAST_SHAPE_STORAGE_KEY);
 if (lastShape && SELECTABLE_SHAPE_MODE_OPTIONS.some((opt) => opt.key === lastShape)) {
   shapeSelect.value = lastShape;
+}
+const lastReplaySpeed = Number(localStorage.getItem(LAST_REPLAY_SPEED_KEY));
+if (REPLAY_SPEED_OPTIONS.includes(lastReplaySpeed)) {
+  replaySpeed = lastReplaySpeed;
+  replaySpeedSelect.value = String(lastReplaySpeed);
 }
 void startPuzzle(sizeSelect.value, shapeSelect.value as ShapeMode);

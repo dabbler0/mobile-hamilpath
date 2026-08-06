@@ -48,9 +48,18 @@ function smoothstep(t: number): number {
   return c * c * (3 - 2 * c);
 }
 
-/** How long one full lap of the win-loop dot animation takes, scaled by loop length but clamped so a tiny board isn't dizzying and a huge one doesn't crawl. */
+/**
+ * The win-loop dot travels at a constant pace (edges per ms) rather than a
+ * fixed lap time, so a bigger loop just takes proportionally longer to
+ * complete rather than the dot itself visibly speeding up or slowing down —
+ * a fixed-duration lap previously had to be clamped to keep a huge board's
+ * lap watchable, which made the dot noticeably *faster* there than on a
+ * small board (more cells covered per second) instead of the same speed.
+ * The floor only guards a degenerate near-empty cycle from being instant.
+ */
+const WIN_DOT_MS_PER_EDGE = 90;
 function winDotPeriodMs(cellCount: number): number {
-  return Math.max(2500, Math.min(9000, cellCount * 60));
+  return Math.max(600, cellCount * WIN_DOT_MS_PER_EDGE);
 }
 
 const COLORS = {

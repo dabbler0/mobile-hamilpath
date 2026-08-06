@@ -240,6 +240,19 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   excludes anything not reachable from the toggle, so that case recolors
   instantly on the next render with no ripple, matching the fact that there's
   nowhere real for a ripple to travel from.
+  - **The winning move gets a bigger version of the same ripple**: the
+    instant a toggle completes the puzzle, literally every already-marked
+    edge is about to switch to the single "solved" green — so instead of
+    `computeRecoloredEdges`'s "did the component id actually change" filter
+    (which, on a win, would by incidental id-numbering luck leave whichever
+    pre-existing segment kept id 0 jumping straight to green with no
+    animation), `main.ts` uses `edgeRipple.ts`'s `computeReachableEdges`,
+    which ripples *every* reachable edge unconditionally. It also swaps in a
+    tighter `WIN_RIPPLE_STAGGER_MS` (12ms/hop vs. the ordinary ripple's 45)
+    since this wave can span up to roughly half the loop's length in hops
+    (from the toggle location to the far side) rather than a small local
+    patch, so it needs a faster pace to still read as one sweep instead of a
+    multi-second crawl on a huge board.
 - **Win-loop dot**: once a puzzle is actually complete (`pathState.won`
   live, or `reviewWon` while reviewing — deliberately *not* `gaveUp`, which
   is explicitly not a real win, see "Give Up" below), a small dot travels
@@ -247,8 +260,12 @@ for both the ordinary and wraparound (`drawWrapped`) render paths.
   walks the marked-edge set (guaranteed to be one simple Hamiltonian cycle
   by `computeWin`) into an ordered cell sequence once per completed state;
   `render.ts` interpolates the dot's on-screen position each frame from
-  elapsed time (`winDotPeriodMs`, scaled by loop length and clamped so a
-  tiny board isn't dizzying and a huge one doesn't crawl).
+  elapsed time. It moves at a constant pace (`winDotPeriodMs`'s
+  `WIN_DOT_MS_PER_EDGE`, 90ms/edge) rather than a fixed lap duration, so a
+  bigger loop just takes proportionally longer to complete a lap instead of
+  the dot itself visibly speeding up — an earlier version clamped the lap
+  time to a fixed range instead, which made the dot noticeably *faster* on
+  a huge board (more cells covered per second) than on a small one.
 
 All three share one `requestAnimationFrame` chain, driven entirely by
 `main.ts`'s `render()`: every other call site still just calls `render()`
@@ -397,12 +414,20 @@ should not erase it from the movie.
   `moveLog` just disables the Replay button with an explanatory `title`,
   rather than crashing `decodeMoveLog` on missing data.
 - **Replay UI**: `#reviewBar` swaps between `#reviewIdleControls`
-  (Replay/Done) and `#reviewPlaybackControls` (Play/Pause, a scrubber,
-  Done) rather than being two separate bars, to keep the CSS/layout
-  simple. `reviewWon` (distinct from the hardcoded `won: true` `render()`
-  used before this feature, for the static "view a finished puzzle" case)
-  tracks the *current replay frame's* own `won` flag, since mid-playback
-  frames usually aren't won yet.
+  (Replay/Done) and `#reviewPlaybackControls` (Play/Pause, a speed select, a
+  scrubber, Done) rather than being two separate bars, to keep the
+  CSS/layout simple. `reviewWon` (distinct from the hardcoded `won: true`
+  `render()` used before this feature, for the static "view a finished
+  puzzle" case) tracks the *current replay frame's* own `won` flag, since
+  mid-playback frames usually aren't won yet.
+- **Replay speed**: `#replaySpeedSelect` (0.25×/0.5×/1×/2×, default 1×) is
+  read by `playReplay()` as a divisor on `REPLAY_FRAME_MS` (50ms — i.e. the
+  default 1× option is the original, only-ever speed before this control
+  existed, deliberately left close to the top of the range rather than in
+  the middle). Changing it while already playing restarts the interval
+  immediately (`main.ts`'s `replaySpeedSelect`'s `change` listener) rather
+  than waiting for the next natural tick, and the choice is persisted to
+  `localStorage` (`LAST_REPLAY_SPEED_KEY`) the same way size/shape are.
 
 ## Daily puzzle sequence
 
