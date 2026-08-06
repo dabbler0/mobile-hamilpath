@@ -32,6 +32,12 @@
           </div>
           <div id="reviewPlaybackControls" class="hidden">
             <button class="secondary" id="replayPlayPauseBtn">Pause</button>
+            <select id="replaySpeedSelect" title="Replay speed">
+              <option value="0.25">0.25×</option>
+              <option value="0.5">0.5×</option>
+              <option value="1" selected>1×</option>
+              <option value="2">2×</option>
+            </select>
             <input type="range" id="replayScrubber" min="0" max="0" value="0" step="1" />
             <span id="replayCounter"></span>
             <button class="secondary" id="replayCloseBtn">Done</button>
