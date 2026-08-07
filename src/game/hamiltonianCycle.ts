@@ -1,4 +1,5 @@
 import type { Rng } from './rng';
+import { scrambleHamiltonianCycle } from './backbite';
 import { hasBlock, shapeBoundingBox, type Shape } from './shape';
 import { randSpanningTree, type TreeEdges } from './spanningTree';
 
@@ -94,8 +95,17 @@ export function generateHamiltonianCycle(shape: Shape, rng: Rng): HamiltonianCyc
     throw new Error(`generateHamiltonianCycle: incomplete cycle (${cells.length} of ${totalCells} cells) — shape has a notch the wall-follower can't trace`);
   }
 
+  // The wall-follower's cycle only ever crosses between tree-adjacent
+  // blocks, which makes it structurally regular (and so easier to guess
+  // than a puzzle should be) — scramble it via backbite mutations (see
+  // `backbite.ts`) into a cycle that still visits every cell exactly once
+  // but no longer resembles the spanning tree it was traced from.
+  const scrambled = scrambleHamiltonianCycle(cells, inShape, rng);
+  const startIdx = scrambled.findIndex(([x, y]) => x === start[0] && y === start[1]);
+  const rotated = startIdx <= 0 ? scrambled : [...scrambled.slice(startIdx), ...scrambled.slice(0, startIdx)];
+
   const { m, n } = shapeBoundingBox(shape);
-  return { cells, W: 2 * m, H: 2 * n };
+  return { cells: rotated, W: 2 * m, H: 2 * n };
 }
 
 /**
