@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  customSizeKey,
   generatePuzzle,
   generateSolutionCells,
   generateSolutionEdges,
@@ -25,6 +26,15 @@ describe('sizeOption', () => {
 
   it('throws for an unknown key', () => {
     expect(() => sizeOption('nonexistent')).toThrow();
+  });
+
+  it('resolves a synthetic customSizeKey (Blitz\'s continuously-sized boards) to its own m/n, without a SIZE_OPTIONS entry', () => {
+    expect(sizeOption(customSizeKey(5, 9))).toEqual({ key: 'custom:5x9', label: '5×9', m: 5, n: 9 });
+  });
+
+  it('still throws for a key that merely looks custom-ish but is malformed', () => {
+    expect(() => sizeOption('custom:5xNaN')).toThrow();
+    expect(() => sizeOption('custom:5')).toThrow();
   });
 });
 

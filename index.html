@@ -48,7 +48,7 @@
         </div>
       </div>
 
-      <!-- Blitz setup: pick starting time + time back per edge, then start a fresh, randomly-seeded run. -->
+      <!-- Blitz setup: pick a pace preset, then start a fresh, randomly-seeded run. -->
       <div id="blitzSetupScreen" class="screen menuBgScreen hidden">
         <div class="menuHeader">
           <button class="secondary backBtn" id="blitzSetupBackBtn">‹ Blitz</button>
@@ -56,12 +56,12 @@
         </div>
         <div class="menuContent newGameForm">
           <label
-            >Starting time (seconds)
-            <input type="number" id="blitzStartingTimeInput" min="10" max="900" step="5" value="60" />
-          </label>
-          <label
-            >Time back per edge (seconds)
-            <input type="number" id="blitzTimeBackInput" min="0.05" max="5" step="0.05" value="0.3" />
+            >Pace
+            <select id="blitzPaceSelect">
+              <option value="slow">Slow (90s start, +0.2s/edge)</option>
+              <option value="normal" selected>Normal (60s start, +0.15s/edge)</option>
+              <option value="fast">Fast (45s start, +0.1s/edge)</option>
+            </select>
           </label>
           <button class="menuBtn menuBtnPrimary" id="blitzStartBtn">Start</button>
         </div>

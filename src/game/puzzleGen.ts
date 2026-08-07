@@ -33,8 +33,34 @@ export const SIZE_OPTIONS: readonly SizeOption[] = [
 
 export function sizeOption(sizeKey: string): SizeOption {
   const found = SIZE_OPTIONS.find((s) => s.key === sizeKey);
-  if (!found) throw new Error(`unknown size key: ${sizeKey}`);
-  return found;
+  if (found) return found;
+  const custom = parseCustomSizeKey(sizeKey);
+  if (custom) return { key: sizeKey, label: `${custom.m}×${custom.n}`, m: custom.m, n: custom.n };
+  throw new Error(`unknown size key: ${sizeKey}`);
+}
+
+const CUSTOM_SIZE_KEY_RE = /^custom:(\d+)x(\d+)$/;
+
+/**
+ * A synthetic `sizeKey` for a board with explicit, non-catalog dimensions —
+ * used by Blitz mode, whose boards now vary continuously with the run's
+ * difficulty budget rather than being picked from `SIZE_OPTIONS` (see
+ * CLAUDE.md's "Blitz mode"). Encodes `m`/`n` directly into the key itself
+ * rather than adding a second, parallel dimensions field to `PuzzleId` —
+ * every other piece of code that already treats `sizeKey` as the one source
+ * of a puzzle's dimensions (`generatePuzzle`, `generateSolutionCells`,
+ * storage/hashing, `boardEdgeCount`) keeps working completely unchanged, it
+ * just resolves through `sizeOption`'s fallback parsing below instead of a
+ * `SIZE_OPTIONS` lookup.
+ */
+export function customSizeKey(m: number, n: number): string {
+  return `custom:${m}x${n}`;
+}
+
+function parseCustomSizeKey(sizeKey: string): { m: number; n: number } | null {
+  const match = CUSTOM_SIZE_KEY_RE.exec(sizeKey);
+  if (!match) return null;
+  return { m: Number(match[1]), n: Number(match[2]) };
 }
 
 /**
