@@ -1143,7 +1143,7 @@ const host: GameInputHost = {
   wrapEl,
 };
 
-attachPointerHandling(canvas, host);
+attachPointerHandling(wrapEl, host);
 
 const keyboardHost: KeyboardInputHost = {
   getPuzzle: () => activePuzzle(),
@@ -1327,8 +1327,14 @@ function startBlitzRun(params: BlitzParams): void {
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
 
-  advanceBlitzPuzzle();
+  // `showScreen('game')` must run before `advanceBlitzPuzzle()`'s `layout()`
+  // — `#gameScreen` is still `.hidden` (`display: none`) up to that call, so
+  // `wrapEl.clientWidth`/`clientHeight` would read 0 and `fitView()` would
+  // compute a bogus/degenerate view (see `layout()`'s doc comment for why
+  // every other mode-entry function — `beginPuzzle`, `enterReview`,
+  // `openBlitzReplay` — already does `showScreen('game')` first).
   showScreen('game');
+  advanceBlitzPuzzle();
   startBlitzTimer();
 }
 
@@ -1452,7 +1458,23 @@ function blitzReplayDurationMs(): number {
   return blitzReplayRecord.events[blitzReplayRecord.events.length - 1].t;
 }
 
-/** Applies one event to the replay's own puzzle/path state — the exact same state transitions live play made, just replayed instead of performed. */
+/**
+ * Applies one event to the replay's own puzzle/path state — the exact same
+ * state transitions live play made, just replayed instead of performed.
+ * `puzzleStart` calls `layout()` for the same reason `advanceBlitzPuzzle()`
+ * (live play) does: each puzzle in a run can be a different size, and
+ * `layout()` is what resizes the canvas to the new puzzle's board and
+ * re-fits the view to it. Without this, the canvas stayed sized (and the
+ * view fitted) to whichever board the *first* `puzzleStart` event set it
+ * to, cropping every later, larger board even when zoomed out — a plain
+ * `render()` redraws the current puzzle but never revisits the canvas's
+ * own pixel dimensions or the view. Safe to call regardless of which
+ * caller reached here (`seekBlitzReplay`'s initial/scrub jump or
+ * `advanceBlitzReplayTo`'s natural forward step): both only ever run once
+ * `mode === 'blitzReplay'` and `#gameScreen` is already the visible
+ * screen, so `wrapEl`'s size (which `fitView()` inside `layout()` reads) is
+ * always real by the time any `puzzleStart` event is applied.
+ */
 function applyBlitzReplayEvent(ev: BlitzEvent): void {
   switch (ev.kind) {
     case 'puzzleStart': {
@@ -1462,6 +1484,7 @@ function applyBlitzReplayEvent(ev: BlitzEvent): void {
       blitzReplayRegionMap = computeRegions(blitzReplayPuzzle);
       blitzReplayPathState = createInitialPath();
       resetComponentColorState(reviewComponentColors);
+      layout();
       break;
     }
     case 'move':
@@ -1603,8 +1626,15 @@ function openBlitzReplay(record: BlitzRunRecord, returnScreen: Screen): void {
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.remove('hidden');
 
-  seekBlitzReplay(0); // synchronously applies t=0's puzzleStart, so blitzReplayPuzzle is ready before the first layout()/render()
+  // `showScreen('game')` must come before `seekBlitzReplay(0)`: that call
+  // synchronously applies t=0's `puzzleStart` event, which now itself calls
+  // `layout()` (see `applyBlitzReplayEvent`) — and `layout()`'s `fitView()`
+  // needs `wrapEl`'s real (non-`.hidden`) size to compute a sane view, same
+  // reasoning as `startBlitzRun`'s doc comment. The extra `layout()` below
+  // is a harmless belt-and-suspenders call for the edge case of a record
+  // with no events at all, where `seekBlitzReplay` has nothing to apply.
   showScreen('game');
+  seekBlitzReplay(0);
   layout();
   playBlitzReplay();
 }

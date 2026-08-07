@@ -33,6 +33,20 @@ function midpoint(a: { x: number; y: number }, b: { x: number; y: number }): { x
   return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
 }
 
+/**
+ * True for a pointerdown that landed on a real interactive control — the
+ * zoom buttons, or (while reviewing/watching a Blitz replay) the review/
+ * Blitz-replay bar's buttons/select/scrubber — all of which live inside
+ * `wrapEl` as ordinary siblings of the canvas. Listening on `wrapEl` itself
+ * (see `attachPointerHandling`'s doc comment) means a tap on any of those
+ * now bubbles up to this module's own listeners too, which would otherwise
+ * misread it as the start of a board pan/tap; this is the guard that keeps
+ * such taps working as plain button/control presses instead.
+ */
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('button, select, input, a, label') !== null;
+}
+
 interface PinchState {
   startDist: number;
   startScale: number;
@@ -53,13 +67,34 @@ interface TapCandidate {
 }
 
 /**
- * Wires unified pointer handling onto `canvas`: a tap on a face (a grid
- * square between vertices) toggles the region it belongs to (marking every
- * unmarked boundary edge and unmarking every marked one), single-finger
- * drags pan the board, and two-finger gestures pinch-zoom. Returns a
- * teardown function.
+ * Wires unified pointer handling onto `wrapEl` (the whole board viewport,
+ * not just the canvas element sitting inside it — see below): a tap on a
+ * face (a grid square between vertices) toggles the region it belongs to
+ * (marking every unmarked boundary edge and unmarking every marked one),
+ * single-finger drags pan the board, and two-finger gestures pinch-zoom.
+ * Returns a teardown function.
+ *
+ * Listening on `wrapEl` rather than the canvas itself is deliberate: an
+ * ordinary (non-wraparound) board's canvas is sized to the board's own
+ * fixed pixel dimensions (`main.ts`'s `layout()`), not to the viewport, so
+ * a small board — or any board zoomed out below 1:1 — leaves empty wrap
+ * area the canvas element doesn't actually cover. Binding to `canvas`
+ * alone meant a touch/drag landing in that empty margin never reached
+ * these handlers at all, so pan/pinch only worked directly on top of the
+ * board's own pixels. `wrapEl` always spans the full visible viewport
+ * (`layout()` keeps a wraparound board's canvas sized to it too), so
+ * binding there makes pan/pinch work anywhere in the game area regardless
+ * of how small or zoomed-out the board is. All the coordinate math already
+ * went through `host.wrapEl.getBoundingClientRect()` (`wrapLocal`) rather
+ * than the canvas's own rect, so nothing else needed to change to support
+ * this. The one thing that does need care: `wrapEl` also contains real
+ * interactive controls (zoom buttons, the review/Blitz-replay bars) as
+ * ordinary sibling elements of the canvas, and listening on their common
+ * ancestor means their own pointerdowns now bubble up here too —
+ * `isInteractiveTarget` is what keeps those working as plain control
+ * presses instead of being misread as a board gesture.
  */
-export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost): () => void {
+export function attachPointerHandling(wrapEl: HTMLElement, host: GameInputHost): () => void {
   const activePointers = new Map<number, { x: number; y: number }>();
   let pinch: PinchState | null = null;
   let panState: PanState | null = null;
@@ -94,6 +129,7 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
   }
 
   function onPointerDown(evt: PointerEvent) {
+    if (isInteractiveTarget(evt.target)) return;
     activePointers.set(evt.pointerId, { x: evt.clientX, y: evt.clientY });
     (evt.target as Element).setPointerCapture?.(evt.pointerId);
 
@@ -177,15 +213,15 @@ export function attachPointerHandling(canvas: HTMLElement, host: GameInputHost):
     host.setFocusedRegion(null);
   }
 
-  canvas.addEventListener('pointerdown', onPointerDown as EventListener);
-  canvas.addEventListener('pointermove', onPointerMove as EventListener);
-  canvas.addEventListener('pointerup', onPointerEnd as EventListener);
-  canvas.addEventListener('pointercancel', onPointerEnd as EventListener);
+  wrapEl.addEventListener('pointerdown', onPointerDown as EventListener);
+  wrapEl.addEventListener('pointermove', onPointerMove as EventListener);
+  wrapEl.addEventListener('pointerup', onPointerEnd as EventListener);
+  wrapEl.addEventListener('pointercancel', onPointerEnd as EventListener);
 
   return () => {
-    canvas.removeEventListener('pointerdown', onPointerDown as EventListener);
-    canvas.removeEventListener('pointermove', onPointerMove as EventListener);
-    canvas.removeEventListener('pointerup', onPointerEnd as EventListener);
-    canvas.removeEventListener('pointercancel', onPointerEnd as EventListener);
+    wrapEl.removeEventListener('pointerdown', onPointerDown as EventListener);
+    wrapEl.removeEventListener('pointermove', onPointerMove as EventListener);
+    wrapEl.removeEventListener('pointerup', onPointerEnd as EventListener);
+    wrapEl.removeEventListener('pointercancel', onPointerEnd as EventListener);
   };
 }
