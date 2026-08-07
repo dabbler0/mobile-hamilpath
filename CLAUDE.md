@@ -249,6 +249,22 @@ near a face remembers a tap candidate (highlighted via
 pointer moved less than `TAP_MOVEMENT_THRESHOLD`; otherwise a single-finger
 drag pans, two fingers pinch-zoom. It talks to the host app only through the
 `GameInputHost` interface, so it has no direct dependency on `main.ts`.
+Listeners are bound to `wrapEl` (`#boardWrap`, the whole board viewport),
+*not* the canvas element inside it — an ordinary (non-wraparound) board's
+canvas is only sized to the board's own fixed pixel dimensions, so a small
+board (or any board zoomed out below 1:1) leaves empty wrap area the canvas
+itself doesn't cover; binding to the canvas alone meant pan/pinch only
+worked when the gesture started directly on top of the board's own pixels.
+The coordinate math (`wrapLocal`) already read `host.wrapEl`'s own
+`getBoundingClientRect()` rather than the canvas's, so nothing else needed
+to change for this. Since `wrapEl` also contains real interactive controls
+as plain siblings of the canvas (the zoom buttons, and — while
+reviewing/watching a Blitz replay — the review/Blitz-replay bars' buttons,
+speed `<select>`, and scrubber), listening on their common ancestor means
+a tap on any of those now bubbles up here too; `isInteractiveTarget` (an
+early return in `onPointerDown` for any `evt.target` inside a `button`,
+`select`, `input`, `a`, or `label`) is what keeps those working as plain
+control presses instead of being misread as a board gesture.
 
 `src/render.ts` draws the board: candidate edges, marked edges (colored by
 connected component, `edgeComponents.ts`, unless `won` in which case there's
@@ -1153,7 +1169,15 @@ Both are clamped to `BLITZ_PARAM_LIMITS` (min/max/default, mirroring
 regardless of whatever the number inputs actually contained. Starting a run
 (`main.ts`'s `startBlitzRun`) mints a fresh `randomSeed()` for the run
 (independent of `BlitzParams`, per above), builds its `createBlitzSequence`,
-and shows the very first puzzle.
+and shows the very first puzzle. `startBlitzRun` calls `showScreen('game')`
+*before* `advanceBlitzPuzzle()` (which puts that first puzzle on screen via
+`layout()`) rather than after — `#gameScreen` is still `.hidden`
+(`display: none`) up to that call, and `layout()`'s `fitView()` reads
+`wrapEl.clientWidth`/`clientHeight` to compute the fit-to-view scale/pan,
+which read `0` while hidden and produced a degenerate, badly-mis-fitted
+view. Every other mode-entry function (`beginPuzzle`, `enterReview`,
+`openBlitzReplay`) already called `showScreen('game')` first for the same
+reason; `startBlitzRun` was the one outlier.
 
 ### Live play
 
@@ -1241,7 +1265,18 @@ states:
 
 - `{ kind: 'puzzleStart', t, sizeKey, shapeMode, seed }` — carries its own
   resolved `PuzzleId` fields explicitly (see "the puzzle sequence" above for
-  why replay never needs to re-run `createBlitzSequence` at all).
+  why replay never needs to re-run `createBlitzSequence` at all). Applying
+  this event (`applyBlitzReplayEvent`) calls `layout()` after swapping in
+  the new puzzle, exactly like live play's `advanceBlitzPuzzle()` does — a
+  run's puzzles are rarely all the same size, and without this the canvas
+  stayed sized (and the view fitted) to whichever board the *first*
+  `puzzleStart` set it to, cropping every later, larger board even when
+  zoomed out. Both call sites that reach `applyBlitzReplayEvent` only ever
+  run once `mode === 'blitzReplay'` and `#gameScreen` is already the
+  visible screen (`openBlitzReplay` calls `showScreen('game')` *before*
+  its initial `seekBlitzReplay(0)`, for the same `wrapEl`-must-be-visible
+  reason `startBlitzRun` above needs it), so `layout()`'s `fitView()` always
+  has a real `wrapEl` size to compute against.
 - `{ kind: 'move', t, ops }` — reuses `PathOp` verbatim, same compact shape
   `history.ts`'s `moveLog` already uses. There's no `jump`/undo entry (no
   Undo/Redo in Blitz — every transition is a real forward move).
