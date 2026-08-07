@@ -1,4 +1,4 @@
-import { BLITZ_PARAM_LIMITS, createBlitzSequence, type BlitzEvent, type BlitzParams } from './game/blitz';
+import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
@@ -79,8 +79,7 @@ const blitzLeaderboardEntryBtn = byId<HTMLButtonElement>('blitzLeaderboardEntryB
 
 const blitzSetupScreenEl = byId<HTMLDivElement>('blitzSetupScreen');
 const blitzSetupBackBtn = byId<HTMLButtonElement>('blitzSetupBackBtn');
-const blitzStartingTimeInput = byId<HTMLInputElement>('blitzStartingTimeInput');
-const blitzTimeBackInput = byId<HTMLInputElement>('blitzTimeBackInput');
+const blitzPaceSelect = byId<HTMLSelectElement>('blitzPaceSelect');
 const blitzStartBtn = byId<HTMLButtonElement>('blitzStartBtn');
 
 const blitzLeaderboardScreenEl = byId<HTMLDivElement>('blitzLeaderboardScreen');
@@ -215,7 +214,7 @@ const BLITZ_ADVANCE_DELAY_MS = 550;
 /** Below this many remaining milliseconds, the header timer switches to its urgent (red) styling. */
 const BLITZ_LOW_TIME_MS = 10000;
 
-let blitzParams: BlitzParams = { startingTimeSec: BLITZ_PARAM_LIMITS.startingTimeSec.default, timeBackPerEdgeSec: BLITZ_PARAM_LIMITS.timeBackPerEdgeSec.default };
+let blitzParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
 let blitzSeq: ReturnType<typeof createBlitzSequence> | null = null;
 let blitzRunSeed = 0;
 let blitzPuzzle: Puzzle;
@@ -1187,11 +1186,6 @@ function blitzPuzzleStatsLabel(id: PuzzleId, puzzlesSolvedSoFar: number): string
   return `Puzzle ${puzzlesSolvedSoFar + 1} · ${opt.label}${shapeSuffix}`;
 }
 
-function clampBlitzParam(value: number, limits: { min: number; max: number; default: number }): number {
-  if (!Number.isFinite(value)) return limits.default;
-  return Math.min(limits.max, Math.max(limits.min, value));
-}
-
 /** Refreshes the live-run header readout — called every timer tick (for the countdown) and on every puzzle transition (for the stats line). */
 function updateBlitzHeader(): void {
   const remaining = blitzDeadline - performance.now();
@@ -1380,7 +1374,10 @@ function forfeitBlitzRun(): void {
 
 // ---- Blitz mode: leaderboard ----
 
+/** The leaderboard's per-difficulty heading — the matching pace preset's name ("Slow"/"Normal"/"Fast") when `params` matches one exactly, or the raw numbers as a fallback for a run recorded before the pace presets existed (see `paceForParams`). */
 function formatBlitzParamsLabel(params: BlitzParams): string {
+  const pace = paceForParams(params);
+  if (pace) return BLITZ_PACE_OPTIONS.find((opt) => opt.key === pace)!.label;
   return `${params.startingTimeSec}s start · +${params.timeBackPerEdgeSec}s/edge`;
 }
 
@@ -1745,9 +1742,8 @@ blitzSetupBackBtn.addEventListener('click', () => showScreen('blitzMenu'));
 blitzLeaderboardBackBtn.addEventListener('click', () => showScreen('blitzMenu'));
 blitzLeaderboardRunsBackBtn.addEventListener('click', () => showScreen('blitzLeaderboard'));
 blitzStartBtn.addEventListener('click', () => {
-  const startingTimeSec = clampBlitzParam(Number(blitzStartingTimeInput.value), BLITZ_PARAM_LIMITS.startingTimeSec);
-  const timeBackPerEdgeSec = clampBlitzParam(Number(blitzTimeBackInput.value), BLITZ_PARAM_LIMITS.timeBackPerEdgeSec);
-  startBlitzRun({ startingTimeSec, timeBackPerEdgeSec });
+  const pace = (blitzPaceSelect.value as BlitzPace) in BLITZ_PACE_PARAMS ? (blitzPaceSelect.value as BlitzPace) : DEFAULT_BLITZ_PACE;
+  startBlitzRun(BLITZ_PACE_PARAMS[pace]);
 });
 blitzExitBtn.addEventListener('click', forfeitBlitzRun);
 blitzPlayAgainBtn.addEventListener('click', () => startBlitzRun(blitzParams));

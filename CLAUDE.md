@@ -755,6 +755,17 @@ the `Puzzle`; `generateSolutionCells`/`generateSolutionEdges(id)` recompute
 the hidden cycle on demand (Give Up, the main menu background — see their
 own sections).
 
+`sizeKey` doesn't strictly have to be a `SIZE_OPTIONS` entry: `sizeOption()`
+also accepts a synthetic key produced by `customSizeKey(m, n)`
+(`` `custom:${m}x${n}` ``), resolving it to a one-off `SizeOption` built from
+the encoded dimensions rather than a catalog lookup. This exists solely for
+Blitz mode's continuously-varying board sizes (see "Blitz mode" below) —
+Free Play/New Game never produce one — and needs no changes anywhere else
+that already treats `sizeKey` as the one source of a puzzle's dimensions
+(`generatePuzzle`, `generateSolutionCells`, storage/hashing,
+`blitz.ts`'s `boardEdgeCount`), since they all resolve dimensions through
+`sizeOption()` rather than indexing `SIZE_OPTIONS` directly.
+
 **There is no more daily rotation or unlock gating.** An earlier version of
 this game identified a puzzle by `{ day, sizeKey, shapeMode, index,
 collections? }` — the player's local calendar date plus a 0-based position
@@ -1100,41 +1111,86 @@ of the same size, since a random shape is "a random connected polyomino of
 the *same area*" and a toroidal board is generated on the same `m x n`
 block grid, so it's a property of `sizeKey` alone, not of the actual
 generated puzzle graph) times a **first-pass, easy-to-retune**
-`SHAPE_DIFFICULTY_MULTIPLIER` table: `rect` 1×, `random` 0.5× (a
+`SHAPE_DIFFICULTY_MULTIPLIER` table: `rect` 1×, `random` 0.75× (a
 non-rectangular shape's irregular outline tends to make the hidden loop
-more forced/obvious), `toroidal` 2× (no boundary to anchor on, plus the
-wraparound rendering itself takes longer to read). Deliberately factored
-into one small table, separate from the selection logic that reads it, so
-it can be rebalanced later without touching anything else. Klein
-bottle/projective plane get a nominal entry too (matching toroidal's 2×)
-purely so the table stays total over every `ShapeMode`, even though Blitz
-never actually offers them (see "Board shapes and topologies" above — same
-picker restriction as New Game).
+more forced/obvious), `toroidal` 1.5× (no boundary to anchor on, plus the
+wraparound rendering itself takes longer to read). These two non-`rect`
+multipliers are deliberately closer to 1× than an earlier pass at this
+table had them (0.5×/2×) — both shapes were locked out for much longer than
+felt warranted once board size stopped being picked from a handful of fixed
+sizes and started varying continuously (see below), so they were nudged
+toward the middle for balance. Deliberately factored into one small table,
+separate from the selection logic that reads it, so it can be rebalanced
+later without touching anything else. Klein bottle/projective plane get a
+nominal entry too (matching toroidal's multiplier) purely so the table
+stays total over every `ShapeMode`, even though Blitz never actually offers
+them (see "Board shapes and topologies" above — same picker restriction as
+New Game).
+
+**Board size is chosen continuously, not looked up from `SIZE_OPTIONS`.**
+An earlier version of this feature picked each puzzle's size from the same
+fixed `tiny`/`mini`/.../`huge` table Free Play's New Game screen uses;
+`blitz.ts`'s `chooseBlitzBoard(rng, budget)` replaced that outright with a
+generator that can produce *any* block dimensions, so a run's board sizes
+form a smooth spread rather than jumping between six fixed points. For a
+given budget it: picks a shape mode uniformly among whatever's affordable
+at all (`eligibleBlitzShapes`, gating on that shape's cheapest-possible
+board — `MIN_BLITZ_BLOCK_DIM` (2) per dimension — rather than on any one
+fixed size); rolls a random target difficulty for that shape somewhere
+between its own cheapest board and the full budget (CLAUDE.md's "choose a
+random difficulty up to the present budget"), capped at
+`MAX_BLITZ_BOARD_AREA` (280 blocks, matching the old `huge` size's area) so
+a very long run's ever-growing budget still tops out at a sane board size
+instead of compounding toward absurdity — without a ceiling, each puzzle's
+own size grows the budget, which grows the *next* puzzle's likely size, and
+so on, racing exponentially past anything playable or even generatable in
+reasonable time; and splits the resulting area into concrete `m`/`n` block
+dimensions using a random aspect ratio between `MIN_ASPECT_RATIO` (a
+perfect square, 1×) and `MAX_ASPECT_RATIO` (1.6× — the least-square ratio
+any of the old fixed `SIZE_OPTIONS` ever used, `large`'s 10x16, computed
+from that table rather than hardcoded so it stays consistent if those
+entries ever change) — "make the aspect ratio random, but keep it at least
+as square as the current aspect ratios." Which of the two split dimensions
+ends up the wider one is independently randomized too, so boards aren't
+always elongated in the same screen direction. All the rounding in this
+split is deliberately asymmetric — the narrower dimension is *rounded* to
+the nearest integer while the wider one is *floored* down from the area,
+then explicitly re-clamped to the aspect-ratio cap — because flooring the
+narrower dimension down (the naive approach) silently widens the *realized*
+ratio past the target (dividing the same area by a smaller-than-intended
+short side always yields a larger long side), which is what an earlier
+draft of this function got wrong (`blitz.test.ts` catches this directly:
+"never produces an aspect ratio more elongated than..."). Each chosen
+board's dimensions are encoded into a synthetic `sizeKey` via
+`puzzleGen.ts`'s `customSizeKey(m, n)` rather than needing a second,
+parallel dimensions field on `PuzzleId` — see "Puzzle identity and
+generation" above.
 
 A run's puzzle sequence is driven by a difficulty **budget** that starts at
-`BLITZ_INITIAL_BUDGET` (the larger of `tiny`+`rect`'s and `tiny`+`random`'s
-own ratings — computed from the table, not hardcoded, so resizing `tiny` or
-retuning the multipliers keeps this self-consistent) and grows, after every
-puzzle handed out, by that puzzle's `boardEdgeCount(sizeKey)` — this is
-also, not coincidentally, the exact number of edges in that puzzle's
+`BLITZ_INITIAL_BUDGET` (the larger of a nominal `tiny`-sized, i.e. 3x4,
+rectangle's and random-shape's own ratings — computed from the table, not
+hardcoded, so retuning the multipliers keeps this self-consistent; kept as
+the starting point purely so a fresh run's opening difficulty still feels
+the same as it did before board size became continuous) and grows, after
+every puzzle handed out, by that puzzle's own `4 * m * n` edge count — this
+is also, not coincidentally, the exact number of edges in that puzzle's
 solution (a Hamiltonian cycle has one edge per cell), matching this
 feature's plain-English spec: "the difficulty rating increases after each
 solve by the number of edges in the solution to the solved board." Only the
 *budget growth* is keyed to "after each solve" in the spec's wording; the
-actual number added is knowable the instant a size is picked, before it's
+actual number added is knowable the instant a board is chosen, before it's
 solved at all, which is what makes the whole sequence precomputable (see
-below) — a puzzle's edge count is a property of its `sizeKey`, not of how
-well or badly the player plays it. At every step, `eligibleBlitzOptions(budget)`
-is every size/shape combination whose rating fits within the current
-budget; `blitz.ts`'s `createBlitzSequence(runSeed)` returns a stepping
-generator (`.next()`) that, each call, uniformly picks one eligible option
-via the run's own `mulberry32` rng stream, mints that puzzle's own seed from
-the same stream, and grows the budget. This is what CLAUDE.md's spec means
-by "the run starts only capable of generating tiny rectangular and tiny
-random-shape boards" — both rate at or under the initial budget, and
-nothing else does (the smallest toroidal board, `tiny`+`toroidal`, already
-rates *above* it) — with everything else unlocking gradually as the budget
-grows from solved puzzles.
+below) — a puzzle's edge count is a property of the dimensions
+`chooseBlitzBoard` picked, not of how well or badly the player plays it.
+`blitz.ts`'s `createBlitzSequence(runSeed)` returns a stepping generator
+(`.next()`) that, each call, calls `chooseBlitzBoard` against the run's own
+`mulberry32` rng stream, mints that puzzle's own seed from the same stream,
+and grows the budget. Because every shape mode's cheapest possible board
+already fits comfortably under `BLITZ_INITIAL_BUDGET`, a fresh run can, in
+principle, roll any shape — including toroidal — from its very first
+puzzle; what actually varies with the budget is the *size* range each shape
+can be generated at, which starts small and widens (up to the
+`MAX_BLITZ_BOARD_AREA` ceiling) as the budget grows from solved puzzles.
 
 Critically, **puzzle generation is entirely independent of the run's
 difficulty parameters** (see below): `createBlitzSequence` takes only
@@ -1143,34 +1199,49 @@ a `runSeed` play through the *identical* sequence of puzzles in the
 identical order, regardless of their `BlitzParams` — only the clock differs.
 This is also what makes the whole sequence precomputable from the seed
 alone without needing the player to actually solve anything (the budget
-growth depends only on which size was picked, never on play quality), which
-is exactly what a real-time replay leans on (see below): a stored run's
-`puzzleStart` events record their own resolved `sizeKey`/`shapeMode`/`seed`
-explicitly rather than replaying `createBlitzSequence` itself, so replay
-never has to re-derive the sequence and stays correct even if the
+growth depends only on which board was picked, never on play quality),
+which is exactly what a real-time replay leans on (see below): a stored
+run's `puzzleStart` events record their own resolved `sizeKey`/`shapeMode`/
+`seed` explicitly rather than replaying `createBlitzSequence` itself, so
+replay never has to re-derive the sequence and stays correct even if the
 difficulty/selection rules are retuned later.
 
-### Starting a run: `BlitzParams`
+### Starting a run: `BlitzParams`, and the three pace presets
 
-Two player-facing knobs, set on the Blitz setup screen
-(`#blitzSetupScreen`, reachable via the Blitz hub's **Play** button) and
-bundled as `blitz.ts`'s `BlitzParams`:
+`blitz.ts`'s `BlitzParams` bundles the two numbers that actually drive a
+run's clock:
 
 - **`startingTimeSec`** — how much time the run's clock starts with.
 - **`timeBackPerEdgeSec`** — seconds credited back per edge of a solved
-  puzzle's solution cycle (again `totalCells(puzzle)`, the same quantity
-  the budget itself grows by) — a proportionality constant, not a flat
-  per-puzzle bonus, so a harder (bigger) puzzle is worth proportionally
-  more time back. Time credited this way has no cap — CLAUDE.md's spec:
-  "time bank can get arbitrarily large."
+  puzzle's solution cycle (again `4 * m * n`, the same quantity the budget
+  itself grows by) — a proportionality constant, not a flat per-puzzle
+  bonus, so a harder (bigger) puzzle is worth proportionally more time
+  back. Time credited this way has no cap — CLAUDE.md's spec: "time bank
+  can get arbitrarily large."
 
-Both are clamped to `BLITZ_PARAM_LIMITS` (min/max/default, mirroring
-`puzzle.ts`'s `EDGE_COLLECTION_LIMITS` pattern) before a run starts,
-regardless of whatever the number inputs actually contained. Starting a run
-(`main.ts`'s `startBlitzRun`) mints a fresh `randomSeed()` for the run
-(independent of `BlitzParams`, per above), builds its `createBlitzSequence`,
-and shows the very first puzzle. `startBlitzRun` calls `showScreen('game')`
-*before* `advanceBlitzPuzzle()` (which puts that first puzzle on screen via
+Rather than letting the player type these in directly, the Blitz setup
+screen (`#blitzSetupScreen`, reachable via the Blitz hub's **Play** button)
+offers exactly three named **pace** presets — `blitz.ts`'s `BlitzPace`
+(`'slow' | 'normal' | 'fast'`) and `BLITZ_PACE_PARAMS`, the one place these
+numbers are defined:
+
+| Pace | `startingTimeSec` | `timeBackPerEdgeSec` |
+| --- | --- | --- |
+| Slow | 90 | 0.2 |
+| Normal (default) | 60 | 0.15 |
+| Fast | 45 | 0.1 |
+
+`#blitzPaceSelect` is a plain `<select>` of the three (`BLITZ_PACE_OPTIONS`
+supplies the labels); `blitzStartBtn`'s click handler reads it, falling
+back to `DEFAULT_BLITZ_PACE` for a value that doesn't resolve to a preset
+(shouldn't happen from the `<select>` itself, but keeps the lookup total),
+and starts the run with `BLITZ_PACE_PARAMS[pace]` directly — no clamping
+needed any more, since every value a player can actually select is already
+one of the three exact preset pairs. Starting a run (`main.ts`'s
+`startBlitzRun`) mints a fresh `randomSeed()` for the run (independent of
+`BlitzParams`, per above), builds its `createBlitzSequence`, and shows the
+very first puzzle. `startBlitzRun` calls `showScreen('game')` *before*
+`advanceBlitzPuzzle()` (which puts that first puzzle on screen via
 `layout()`) rather than after — `#gameScreen` is still `.hidden`
 (`display: none`) up to that call, and `layout()`'s `fitView()` reads
 `wrapEl.clientWidth`/`clientHeight` to compute the fit-to-view scale/pan,
@@ -1178,6 +1249,16 @@ which read `0` while hidden and produced a degenerate, badly-mis-fitted
 view. Every other mode-entry function (`beginPuzzle`, `enterReview`,
 `openBlitzReplay`) already called `showScreen('game')` first for the same
 reason; `startBlitzRun` was the one outlier.
+
+A `BlitzRunRecord` still stores the raw `startingTimeSec`/
+`timeBackPerEdgeSec` numbers, not the pace name — the leaderboard's
+`formatBlitzParamsLabel` (`main.ts`) recovers the pace for *display* via
+`blitz.ts`'s `paceForParams` (an exact match against `BLITZ_PACE_PARAMS`),
+falling back to the raw `${startingTimeSec}s start · +${timeBackPerEdgeSec}s/edge`
+wording for a run recorded before the presets existed (or, in principle,
+if the presets are ever retuned) — a run's own params are always the
+source of truth; the label is just a friendlier name for whichever preset
+they happen to match today.
 
 ### Live play
 
@@ -1339,7 +1420,13 @@ removes every run at that difficulty in one go, a convenience beyond the
 individual per-run delete one level down. Opening either a difficulty-picker
 row or a run row navigates forward (`openBlitzLeaderboardRuns` /
 `openBlitzReplay`); "‹ Leaderboard"/"‹ Blitz" back buttons follow this
-project's usual top-left convention.
+project's usual top-left convention. The grouping itself is still by the
+raw `BlitzParams` pair (unchanged since a run's own recorded numbers are
+always the source of truth — see above), but every heading built from a
+group's params — the difficulty-picker row and the runs-list screen's own
+title (`#blitzLeaderboardRunsTitle`) — goes through `formatBlitzParamsLabel`,
+so a difficulty group shows its pace name ("Slow"/"Normal"/"Fast") instead
+of raw numbers whenever its params match one of the three current presets.
 
 ### Scope cuts
 
@@ -1351,10 +1438,10 @@ project's usual top-left convention.
   arbitrary reload gap the way a turn-based Free Play game can. Only a run
   that actually ends (times out or is explicitly forfeited via
   `#blitzExitBtn`) gets written to `blitzRuns` at all.
-- **No player-facing "last used" defaults for the setup screen** — unlike
+- **No player-facing "last used" default for the setup screen** — unlike
   New Game's remembered `sizeKey`/`shapeMode` (`localStorage`), the Blitz
-  setup screen's number inputs always start at `BLITZ_PARAM_LIMITS`'
-  defaults. Straightforward to add later (same `localStorage` pattern) if
+  setup screen's pace `<select>` always starts on `DEFAULT_BLITZ_PACE`
+  ("Normal"). Straightforward to add later (same `localStorage` pattern) if
   it turns out to matter; left out here to keep the first pass focused.
 
 ## `main.ts` orchestration
