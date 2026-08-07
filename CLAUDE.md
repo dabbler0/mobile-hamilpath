@@ -61,7 +61,10 @@ exists). The generation pipeline (`src/game/`):
    together and retries with a fresh shape (still deterministic — it just
    consumes more of the same `rng` stream) when that happens, which is only
    a practical concern for `randomShape`/`randomToroidalShape`, never for a
-   plain rectangle.
+   plain rectangle. Once the wall-follower's walk completes,
+   `generateHamiltonianCycle` immediately scrambles it via
+   `backbite.ts`'s `scrambleHamiltonianCycle` before returning — see
+   "Backbite scrambling" below.
 3. **`puzzle.ts`** — builds the graph the player actually sees: the cycle's
    edges, plus extra "distractor" edges between orthogonal neighbors (each
    added independently with probability `density`), so the hidden solution
@@ -79,6 +82,84 @@ Hamiltonian cycle through `adj`, not necessarily the original generated one
 
 `rng.ts` is a small seeded PRNG (mulberry32) used everywhere generation
 needs determinism.
+
+### Backbite scrambling
+
+The wall-follower above only ever crosses between doubled cells whose
+parent blocks are the same or tree-adjacent — every cycle it can produce is,
+structurally, the boundary of a thickened spanning tree. That's a real
+restriction on the *class* of Hamiltonian cycles the generator can ever
+draw, and it makes a puzzle much easier than "find a Hamiltonian cycle"
+sounds: once a player notices the tree-boundary pattern, reconstructing the
+loop stops requiring anything like a general search. `src/game/backbite.ts`
+exists purely to break that link, by scrambling the freshly-traced cycle
+into a different Hamiltonian cycle over the same cells before
+`generateHamiltonianCycle` returns it — every shape mode gets this for free
+since they all funnel through `generateHamiltonianCycle` (or, for toroidal,
+through the same function traced on the unreduced fundamental-domain
+shape), and `puzzleGen.ts`'s `generateSolutionCells`/`generateSolutionEdges`
+stay in sync automatically for the same reason (see "Give Up" below) — no
+separate call site needed to know scrambling exists at all.
+
+The technique is repeated rounds of **backbite** mutation, a standard way to
+randomize a Hamiltonian path/cycle on a fixed graph without ever leaving its
+real edges:
+
+- **The backbite move** (`applyBackbite`): given a Hamiltonian *path* (an
+  open cycle, with two endpoints), pick an endpoint `e` and some *other*
+  vertex `w` already on the path that's graph-adjacent to `e` in the
+  underlying grid (excluding the vertex `e`'s already connected to, which
+  would be a no-op). Since `e-w` is a real edge, reversing the segment of
+  the path between the old endpoint and `w` turns it into a different valid
+  Hamiltonian path — `w`'s old path-neighbor on the near side becomes the
+  new endpoint. This never uses anything but real orthogonal-adjacency
+  edges and never revisits a cell, so the result is always a legal
+  Hamiltonian path.
+- **Each round** (`scrambleRound`): cut the current cycle at a random edge,
+  turning it into a Hamiltonian path whose two endpoints are exactly the
+  cut edge's former ends (so they start out trivially adjacent — that's
+  the edge that was just removed). Do a batch of *uniformly-random*
+  backbite moves (`randomBackbiteStep`, alternating a random end each
+  time) to scramble the path, using the shape's *full* orthogonal
+  adjacency as the graph to move through — not the tree-adjacency
+  restriction the wall-follower is limited to, which is the whole point.
+  Then do a batch of *beeline* moves (`reclosingBackbiteStep`) that mostly
+  pick whichever candidate lands closest to the *other* endpoint's current
+  path position, pulling the two endpoints back toward being adjacent again;
+  a small chance per step (`EXPLORE_PROBABILITY`) of a uniformly-random move
+  instead is what keeps this from stalling in a hill-climbing local trap
+  (pure greedy could oscillate between a couple of unfavorable
+  configurations without ever converging — confirmed empirically during
+  development). Once the two endpoints are graph-adjacent again, the path
+  implicitly re-closes into a new cycle (last cell connects back to the
+  first), which becomes the input to the next round.
+- **Reclosing isn't mathematically guaranteed** to succeed within a bounded
+  number of beeline attempts, so each round is capped
+  (`maxRecloseAttempts`) and simply *abandoned* — falling back to the cycle
+  from before that round — if it can't reclose in time. This is always
+  safe: every round starts from an already-valid cycle and can fall back to
+  it losing nothing but that round's contribution to the scrambling.
+  `scrambleHamiltonianCycle` never throws; worst case (never observed in
+  practice — see below) it returns the input cycle completely unscrambled.
+  `BACKBITE_ROUNDS` (6) rounds run regardless, each independently capable of
+  failing or succeeding.
+- **Cost, and why the move/attempt counts scale with `sqrt(n)` rather than
+  `n`**: a single backbite move costs O(path length) (the reversal touches,
+  on average, roughly a quarter of the whole path) — so a move count linear
+  in the cycle's cell count `n` would cost O(n²) per round, which measured
+  as ~600ms for a single huge (1120-cell) board before this was tuned down.
+  Since one move already touches a large chunk of the path, far fewer than
+  `n` of them are needed to thoroughly scramble it — both
+  `randomStepCount` and `maxRecloseAttempts` scale with `sqrt(n)` instead,
+  which brought a huge board back down to roughly 100ms while still
+  reclosing successfully in every round across broad stress-testing (every
+  size, every shape mode, dozens of seeds each — see `backbite.test.ts` and
+  `puzzleGen.test.ts`).
+- After scrambling, `generateHamiltonianCycle` rotates the resulting cycle
+  so it once again starts at the shape's doubled start cell (`cells[0]` is
+  still `[2 * shape.start[0], 2 * shape.start[1]]`, exactly as before this
+  feature existed) — scrambling only changes which cycle is traced, not
+  where in it the returned array happens to begin.
 
 ### Board shapes and topologies
 
@@ -1285,7 +1366,7 @@ of `recordCompletion()`.
 
 ## Testing notes
 
-Vitest tests across 20 files, all in `*.test.ts` files next to their
+Vitest tests across 21 files, all in `*.test.ts` files next to their
 modules. Pure game logic (`src/game/*`), viewport math, and persistence are
 unit tested — including the pure pieces of the animation system
 (`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS,
