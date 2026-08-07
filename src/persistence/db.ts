@@ -1,5 +1,13 @@
 const DB_NAME = 'loopit';
-const DB_VERSION = 1;
+/**
+ * Bumped from 1 to 2 to add `blitzRuns` (see `STORES.blitzRuns`) — the only
+ * schema change so far since this project's IndexedDB store was introduced.
+ * `openDb`'s `onupgradeneeded` re-checks every store with
+ * `objectStoreNames.contains` rather than assuming a fresh-vs-upgrade split,
+ * so it creates whichever stores are missing regardless of which version a
+ * given browser is actually upgrading *from* (0, i.e. brand new, or 1).
+ */
+const DB_VERSION = 2;
 
 export const STORES = {
   /**
@@ -14,6 +22,16 @@ export const STORES = {
   progress: 'progress',
   inProgress: 'inProgress',
   completed: 'completed',
+  /**
+   * One record per finished (or forfeited) Blitz run — see
+   * `persistence/blitzStore.ts`'s `BlitzRunRecord`. Unlike `inProgress`,
+   * there's no "in-progress Blitz run" record at all: a Blitz run is only
+   * ever written here once it ends (timer hits zero or the player
+   * forfeits), so refreshing mid-run simply forfeits it with nothing saved
+   * — see CLAUDE.md's "Blitz mode" section for why that's an intentional
+   * scope cut rather than an oversight.
+   */
+  blitzRuns: 'blitzRuns',
 } as const;
 
 function promisifyRequest<T>(req: IDBRequest<T>): Promise<T> {
@@ -47,6 +65,9 @@ export function openDb(): Promise<IDBDatabase> {
         }
         if (!db.objectStoreNames.contains(STORES.completed)) {
           db.createObjectStore(STORES.completed, { keyPath: 'id' });
+        }
+        if (!db.objectStoreNames.contains(STORES.blitzRuns)) {
+          db.createObjectStore(STORES.blitzRuns, { keyPath: 'id' });
         }
       };
       req.onsuccess = () => resolve(req.result);

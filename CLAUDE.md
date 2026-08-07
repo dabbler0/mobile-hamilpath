@@ -14,9 +14,11 @@ redesigns: a multi-segment pointer-drag path editor (now removed —
 superseded by the current region-toggle interaction), a deterministic daily
 puzzle sequence (now also removed — superseded by the current seed-based
 puzzle identity, see "Puzzle identity and generation" below), IndexedDB
-persistence, non-rectangular/wraparound board shapes, edge collections, and
-a menu-driven shell wrapped around what used to be a single always-visible
-game screen (see "Menus and screen navigation" below).
+persistence, non-rectangular/wraparound board shapes, edge collections, a
+menu-driven shell wrapped around what used to be a single always-visible
+game screen (see "Menus and screen navigation" below), and Blitz mode — a
+timed run through an endlessly-escalating sequence of puzzles, with its own
+personal leaderboard and real-time replay (see "Blitz mode" below).
 
 ## Running things
 
@@ -678,7 +680,7 @@ backward-compatibility consequences.
 ## Persistence (IndexedDB)
 
 `src/persistence/db.ts` is a thin promise wrapper over the raw IndexedDB
-API (db name `loopit`, version 1, three stores — no external library).
+API (db name `loopit`, version 2, four stores — no external library).
 `src/persistence/gameStore.ts` has the actual domain logic:
 
 - **`progress`** store is **vestigial** — it used to hold the daily-puzzle
@@ -707,6 +709,17 @@ API (db name `loopit`, version 1, three stores — no external library).
   `recordCompletion()` records the completed game and clears in-progress —
   there's no unlock gate left to advance any more. `deleteCompleted` is the
   Replays menu's per-item Delete button.
+- **`blitzRuns`** store, added in the version-1-to-2 bump (`db.ts`'s
+  `onupgradeneeded` re-checks every store with `objectStoreNames.contains`
+  rather than assuming a fresh-vs-upgrade split, so it creates whichever
+  stores are missing regardless of which version a given browser is
+  upgrading *from*), keyed by `${seed}::${startedAt}` — one record per
+  finished (or forfeited) Blitz run. See "Blitz mode" below;
+  `persistence/blitzStore.ts` is its own small domain module, parallel to
+  `gameStore.ts` rather than folded into it, since a Blitz run isn't a
+  `PuzzleId` + `edges` at all. Unlike `inProgress`, there is no
+  "in-progress Blitz run" record — a run is only ever written here once it
+  ends.
 
 Puzzles are *not* stored in full — only `PuzzleId` + final `edges`. The
 puzzle graph is always regenerated on demand via `generatePuzzle(id)` for
@@ -746,19 +759,20 @@ re-opening).
 
 The app is a small stack of full-screen "pages" rather than the single
 always-visible game view it used to be. `src/main.ts`'s `Screen` type —
-`'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game'` —
-names them; `showScreen(next)` is the *only* place that toggles `.hidden`
-on their root elements (`index.html` gives each one its own top-level
-`<div class="screen">` inside `#app`) and runs each screen's enter/leave
-side effects. Exactly one screen is ever visible at a time.
+`'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' |
+'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' |
+'blitzGameOver'` — names them; `showScreen(next)` is the *only* place that
+toggles `.hidden` on their root elements (`index.html` gives each one its
+own top-level `<div class="screen">` inside `#app`) and runs each screen's
+enter/leave side effects. Exactly one screen is ever visible at a time. A
+live Blitz run and watching a Blitz run's replay both reuse the `'game'`
+screen (and its single canvas) rather than getting screens of their own —
+see "Blitz mode" below for why.
 
 - **Main menu** (`#mainMenuScreen`): the animated postgame-loop background
   (see "Main menu background" below) behind two buttons — **Free Play** and
-  **Blitz**. Blitz has no mode behind it yet (`blitzEntryBtn` just shows a
-  toast, "Blitz mode is coming soon!" — a deliberate placeholder, not a
-  disabled/dead button, so it still reads as "a real button that does
-  something," just not implemented yet); a future change will give it its
-  own screen the same way Free Play has one.
+  **Blitz** (opens the Blitz hub, `#blitzMenuScreen` — see "Blitz mode"
+  below).
 - **Free Play hub** (`#freePlayMenuScreen`): three buttons — **New Game**,
   **Resume**, **Replays** — each opening its own screen. "‹ Menu" goes back
   to the main menu.
@@ -967,6 +981,266 @@ individual screen change within it — see above), so its own
 also runs forever by design — doesn't keep drawing to a hidden canvas after
 the player has navigated away.
 
+## Blitz mode
+
+A timed-run mode alongside Free Play: solve an endless sequence of
+increasingly-difficult puzzles against a countdown clock, earning time back
+per puzzle solved, until the clock runs out. `src/game/blitz.ts` holds the
+pure difficulty/sequencing logic (unit tested, `blitz.test.ts`);
+`src/persistence/blitzStore.ts` holds the leaderboard's persistence layer
+(unit tested, `blitzStore.test.ts`); `src/main.ts`'s "Blitz mode" section
+(split into "live play", "leaderboard", and "real-time run replay"
+subsections, mirroring this doc's own structure) wires both into the UI —
+thin DOM/canvas glue, verified by hand per this project's usual policy (see
+"Testing notes" below) rather than unit tested.
+
+### Difficulty rating and the puzzle sequence
+
+Every `(sizeKey, shapeMode)` combination has a **difficulty rating**
+(`blitz.ts`'s `boardDifficultyRating`): a board's raw edge count
+(`boardEdgeCount(sizeKey)`, `4 * m * n` — identical across every shape mode
+of the same size, since a random shape is "a random connected polyomino of
+the *same area*" and a toroidal board is generated on the same `m x n`
+block grid, so it's a property of `sizeKey` alone, not of the actual
+generated puzzle graph) times a **first-pass, easy-to-retune**
+`SHAPE_DIFFICULTY_MULTIPLIER` table: `rect` 1×, `random` 0.5× (a
+non-rectangular shape's irregular outline tends to make the hidden loop
+more forced/obvious), `toroidal` 2× (no boundary to anchor on, plus the
+wraparound rendering itself takes longer to read). Deliberately factored
+into one small table, separate from the selection logic that reads it, so
+it can be rebalanced later without touching anything else. Klein
+bottle/projective plane get a nominal entry too (matching toroidal's 2×)
+purely so the table stays total over every `ShapeMode`, even though Blitz
+never actually offers them (see "Board shapes and topologies" above — same
+picker restriction as New Game).
+
+A run's puzzle sequence is driven by a difficulty **budget** that starts at
+`BLITZ_INITIAL_BUDGET` (the larger of `tiny`+`rect`'s and `tiny`+`random`'s
+own ratings — computed from the table, not hardcoded, so resizing `tiny` or
+retuning the multipliers keeps this self-consistent) and grows, after every
+puzzle handed out, by that puzzle's `boardEdgeCount(sizeKey)` — this is
+also, not coincidentally, the exact number of edges in that puzzle's
+solution (a Hamiltonian cycle has one edge per cell), matching this
+feature's plain-English spec: "the difficulty rating increases after each
+solve by the number of edges in the solution to the solved board." Only the
+*budget growth* is keyed to "after each solve" in the spec's wording; the
+actual number added is knowable the instant a size is picked, before it's
+solved at all, which is what makes the whole sequence precomputable (see
+below) — a puzzle's edge count is a property of its `sizeKey`, not of how
+well or badly the player plays it. At every step, `eligibleBlitzOptions(budget)`
+is every size/shape combination whose rating fits within the current
+budget; `blitz.ts`'s `createBlitzSequence(runSeed)` returns a stepping
+generator (`.next()`) that, each call, uniformly picks one eligible option
+via the run's own `mulberry32` rng stream, mints that puzzle's own seed from
+the same stream, and grows the budget. This is what CLAUDE.md's spec means
+by "the run starts only capable of generating tiny rectangular and tiny
+random-shape boards" — both rate at or under the initial budget, and
+nothing else does (the smallest toroidal board, `tiny`+`toroidal`, already
+rates *above* it) — with everything else unlocking gradually as the budget
+grows from solved puzzles.
+
+Critically, **puzzle generation is entirely independent of the run's
+difficulty parameters** (see below): `createBlitzSequence` takes only
+`runSeed`, nothing about starting time or time-back rate. Two runs sharing
+a `runSeed` play through the *identical* sequence of puzzles in the
+identical order, regardless of their `BlitzParams` — only the clock differs.
+This is also what makes the whole sequence precomputable from the seed
+alone without needing the player to actually solve anything (the budget
+growth depends only on which size was picked, never on play quality), which
+is exactly what a real-time replay leans on (see below): a stored run's
+`puzzleStart` events record their own resolved `sizeKey`/`shapeMode`/`seed`
+explicitly rather than replaying `createBlitzSequence` itself, so replay
+never has to re-derive the sequence and stays correct even if the
+difficulty/selection rules are retuned later.
+
+### Starting a run: `BlitzParams`
+
+Two player-facing knobs, set on the Blitz setup screen
+(`#blitzSetupScreen`, reachable via the Blitz hub's **Play** button) and
+bundled as `blitz.ts`'s `BlitzParams`:
+
+- **`startingTimeSec`** — how much time the run's clock starts with.
+- **`timeBackPerEdgeSec`** — seconds credited back per edge of a solved
+  puzzle's solution cycle (again `totalCells(puzzle)`, the same quantity
+  the budget itself grows by) — a proportionality constant, not a flat
+  per-puzzle bonus, so a harder (bigger) puzzle is worth proportionally
+  more time back. Time credited this way has no cap — CLAUDE.md's spec:
+  "time bank can get arbitrarily large."
+
+Both are clamped to `BLITZ_PARAM_LIMITS` (min/max/default, mirroring
+`puzzle.ts`'s `EDGE_COLLECTION_LIMITS` pattern) before a run starts,
+regardless of whatever the number inputs actually contained. Starting a run
+(`main.ts`'s `startBlitzRun`) mints a fresh `randomSeed()` for the run
+(independent of `BlitzParams`, per above), builds its `createBlitzSequence`,
+and shows the very first puzzle.
+
+### Live play
+
+A live run and a Free Play game share the exact same `'game'` screen and
+canvas — `main.ts`'s `Mode` type gained `'blitz'` (live) and `'blitzReplay'`
+(watching a recorded run back) alongside the existing `'playing'`/
+`'reviewing'`, and `activePuzzle()`/`activeRegionMap()`/`inputPathState()`/
+`render()` each grew a branch for both, exactly the way they already
+branched for `'reviewing'`. This reuses every bit of existing board
+rendering/pan/zoom/tap-to-toggle machinery unchanged — Blitz needed a new
+*edit funnel* and *screen chrome*, not a new board. `index.html`'s
+`#gameScreen` header/overlay elements are shared and swapped by visibility
+class per mode: Free Play's `#exitBtn`/`#headerInfo`/`#playControls`, the
+per-puzzle `#reviewBar`, and Blitz's own `#blitzExitBtn` ("‹ Forfeit",
+top-left per this project's back-button convention — see "Back/exit/done
+buttons are always top-left" above)/`#blitzHeaderInfo` (a live countdown
+`#blitzTimer` plus a `#blitzStats` status line) — every mode-entry function
+(`beginPuzzle`, `enterReview`, `startBlitzRun`, `openBlitzReplay`)
+defensively resets all of them, so leftover visibility from whichever mode
+was active before can never bleed into the next.
+
+There is **no Undo/Redo/Give Up in Blitz** — a live run's only edit funnel
+is `setBlitzPathState` (dispatched from the shared `setPathState` by
+`mode`), which just records the move and checks for a solve; a puzzle is
+either fresh or solved, nothing in between to undo back into. Solving one
+(`next.won && !prevWon`, exactly the same check Free Play's
+`setFreePlayPathState` uses) triggers `handleBlitzPuzzleSolved`: computes
+the time award (`timeBackPerEdgeSec * 1000 * totalCells(puzzle)`), pushes it
+onto `blitzDeadline` (a `performance.now()` timestamp, not a countdown
+number that needs decrementing — "how much time is left" is always just
+`blitzDeadline - performance.now()`, recomputed fresh, so nothing needs
+reconciling when an award lands mid-frame), shows a toast, and — after a
+short flash (`BLITZ_ADVANCE_DELAY_MS`, long enough to read the award and see
+the last edge's ordinary grow animation land, short enough to still feel
+like Blitz) — calls `advanceBlitzPuzzle`, which pulls the next `PuzzleId`
+from the run's `createBlitzSequence` and puts it on screen. The delay is a
+plain `setTimeout`, guarded by `mode === 'blitz'` when it fires, in case the
+run already ended (timer expired, or the player forfeited) in the meantime.
+
+The clock itself (`blitzTick`) is a `requestAnimationFrame` loop, separate
+from the live board's own animation-driven `render()` chain (though a solve
+still triggers the ordinary grow/shrink/ripple juice via
+`scheduleToggleAnimation`, reusing `liveComponentColors` — a fresh puzzle
+transition resets that color state, same as any other genuine board-identity
+boundary per "Persistent component colors" above): each tick recomputes
+`remaining = blitzDeadline - performance.now()`, updates the header, and — the
+moment `remaining <= 0` — calls `endBlitzRun`. **Blitz doesn't specially
+suppress the win-loop/comet machinery from "Animations" above** — `render()`
+treats a solved puzzle as "completed" exactly like a real Free Play win
+while `blitzPathState.won` is briefly true — but in practice it rarely gets
+far: `BLITZ_ADVANCE_DELAY_MS` is usually shorter than the winning ripple
+needs to finish sweeping the board (the comet doesn't even start until
+then, see "Win-comet (postgame)" above), so most solves read as a quick
+flash of the flat solved color rather than a full celebration. No special
+teardown is needed when the next puzzle appears either way:
+`advanceBlitzPuzzle`'s fresh, unwon `blitzPathState` makes `completed` false
+again on the very next `render()`, which is exactly the condition that
+already makes the win-loop/comet cache reset itself (the same
+"self-heals from a reference/value change alone" property `render()`'s own
+doc comment describes for every other mode).
+
+**Forfeiting** (`#blitzExitBtn`, confirm-gated) and **timing out** both funnel
+through the same `endBlitzRun`: it stops the clock, computes
+`scoreMs = blitzElapsedMs()` (real time elapsed since the run's own start —
+CLAUDE.md's spec: "the user's final score is the total amount of time they
+lasted," which is exactly this, *not* a countdown-remaining or
+time-bank-remaining number — a run that earned lots of refunds simply lasted
+longer in real time, which this measures directly rather than by summing
+awards), records the run (`saveBlitzRun`, see "Recording and replaying a
+run" below), and shows the Blitz game-over screen (`#blitzGameOverScreen`,
+one of `BACKGROUND_SCREENS` — see "Main menu background" above — showing
+the shared animated background same as the other fixed-layout Blitz
+screens) with **Play Again** (same `BlitzParams`, a brand-new
+`randomSeed()` — mirrors Free Play's Rematch), **Watch Replay** (opens the
+just-finished run in the real-time replay viewer, disabled if the save
+itself failed), and **‹ Blitz Menu**.
+
+### Recording and replaying a run
+
+`blitz.ts`'s `BlitzEvent` is the chronological, append-only recording of one
+run — timestamped by `t` (milliseconds since the run's own first
+`puzzleStart`, *not* a frame/step counter and *not* wall-clock `Date.now()`)
+so replay can reproduce real *pacing*, not just an ordered sequence of
+states:
+
+- `{ kind: 'puzzleStart', t, sizeKey, shapeMode, seed }` — carries its own
+  resolved `PuzzleId` fields explicitly (see "the puzzle sequence" above for
+  why replay never needs to re-run `createBlitzSequence` at all).
+- `{ kind: 'move', t, ops }` — reuses `PathOp` verbatim, same compact shape
+  `history.ts`'s `moveLog` already uses. There's no `jump`/undo entry (no
+  Undo/Redo in Blitz — every transition is a real forward move).
+- `{ kind: 'puzzleSolved', t, timeAwardedMs }`
+- `{ kind: 'runEnd', t, scoreMs }` — always the log's last entry;
+  `blitzReplayDurationMs()` just reads its `t`.
+
+`persistence/blitzStore.ts`'s `BlitzRunRecord` bundles this `events` log
+with the run's `BlitzParams`, `scoreMs`, `puzzlesSolved`, and
+`startedAt`/`completedAt` timestamps, keyed by `${seed}::${startedAt}`
+(pairing rather than `seed` alone rules out even the astronomically-unlikely
+case of two runs minting the same 32-bit seed — the same caveat
+`puzzleGen.ts`'s `randomSeed` already carries). Runs are *not* stored in
+full puzzle-graph form, same policy as `gameStore.ts`'s completed
+puzzles — regenerated on demand from each `puzzleStart` event's own id.
+
+**Replay** (`main.ts`'s "real-time run replay" section, `mode ===
+'blitzReplay'`) is a second, genuinely different playback engine from the
+per-puzzle `showReplayFrame`/`playReplay` above — that one steps through a
+fixed array of pre-decoded frames; this one walks the live `events` array
+forward from wherever `blitzReplayEventCursor` currently is, applying each
+event in turn (`applyBlitzReplayEvent`) as its `t` comes due, because a
+Blitz run's timeline spans *multiple puzzles*, each needing its own fresh
+`generatePuzzle(id)`/`computeRegions` — not just replaying one puzzle's
+edge-by-edge history. `advanceBlitzReplayTo(target, animate)` is playback's
+one real primitive: `blitzReplayTick` (a `requestAnimationFrame` loop
+advancing `blitzReplayT` by real elapsed time × `blitzReplaySpeed`, mirroring
+the ordinary replay's speed-select pattern but with a wider 0.5×-4× range
+since a whole run is longer than one puzzle) calls it with `animate: true`
+for its natural forward steps (each `move` event gets the same
+grow/shrink/ripple juice a live toggle does, via `scheduleToggleAnimation`
+against `reviewComponentColors` — kept separate from live play's
+`liveComponentColors`, same reasoning as ordinary review); scrubbing
+(`#blitzReplayScrubber`) instead calls `seekBlitzReplay(targetT)`, which
+always replays from event 0 (the same simplifying "always replay from the
+start, never step backward" tradeoff `decodeMoveLog` already makes for the
+per-puzzle case) and snaps with no animation, since an arbitrary scrub can
+span many puzzles at once and there's no one sensible thing to animate for
+that. `#blitzReplayBar` reuses `#blitzHeaderInfo`'s timer/stats display,
+reconstructing "remaining time" as `startingTimeSec * 1000 +
+(awarded-so-far) - t` — exactly the arithmetic `blitzDeadline` encodes live,
+just derived from the event log instead of a running timestamp.
+
+### Leaderboard
+
+Every run is scoped to its exact `BlitzParams` — `blitzStore.ts`'s
+`blitzParamsKey` (`${startingTimeSec}::${timeBackPerEdgeSec}`) is the
+grouping key both `listBlitzDifficulties` (every distinct difficulty the
+player has ever completed a run at, most-recently-played first — feeds
+`#blitzLeaderboardScreen`'s picker) and `listBlitzRunsForParams` (every run
+at one exact difficulty, sorted by score descending — feeds
+`#blitzLeaderboardRunsScreen`) use, matching this feature's spec: "a
+personal leaderboard for each difficulty setting... select difficulty
+settings and then see all their recordings for that difficulty setting,
+sorted by score." Both list screens reuse `main.ts`'s existing generic
+`renderListItem` (title/date/onOpen/onDelete) — the same Resume/Replays
+pattern, physically separate Delete (✕) buttons so a delete tap can never be
+misread as "open". A difficulty row's own Delete (`deleteBlitzRunsForParams`)
+removes every run at that difficulty in one go, a convenience beyond the
+individual per-run delete one level down. Opening either a difficulty-picker
+row or a run row navigates forward (`openBlitzLeaderboardRuns` /
+`openBlitzReplay`); "‹ Leaderboard"/"‹ Blitz" back buttons follow this
+project's usual top-left convention.
+
+### Scope cuts
+
+- **No resumable in-progress Blitz run.** Free Play autosaves on every edit
+  so a reload always resumes exactly where it left off; Blitz deliberately
+  does not — refreshing, closing the tab, or navigating away mid-run simply
+  forfeits it with *nothing* recorded (not even a partial score), since
+  there's no real-time clock to fairly "pause and resume" across an
+  arbitrary reload gap the way a turn-based Free Play game can. Only a run
+  that actually ends (times out or is explicitly forfeited via
+  `#blitzExitBtn`) gets written to `blitzRuns` at all.
+- **No player-facing "last used" defaults for the setup screen** — unlike
+  New Game's remembered `sizeKey`/`shapeMode` (`localStorage`), the Blitz
+  setup screen's number inputs always start at `BLITZ_PARAM_LIMITS`'
+  defaults. Straightforward to add later (same `localStorage` pattern) if
+  it turns out to matter; left out here to keep the first pass focused.
+
 ## `main.ts` orchestration
 
 Holds the mutable app state: `screen` (above), `mode: 'playing' |
@@ -1011,14 +1285,19 @@ of `recordCompletion()`.
 
 ## Testing notes
 
-Vitest tests across 18 files, all in `*.test.ts` files next to their
+Vitest tests across 20 files, all in `*.test.ts` files next to their
 modules. Pure game logic (`src/game/*`), viewport math, and persistence are
 unit tested — including the pure pieces of the animation system
 (`loopOrder.ts`'s cycle-walk, `edgeRipple.ts`'s reachable-recolor BFS,
-`componentColors.ts`'s persistent color assignment), even though the
-animations themselves are visual-only. `render.ts`, `input.ts`,
-`keyboard.ts`, and `menuBackground.ts` are not — they're thin DOM/canvas
-glue verified by hand instead. When changing pointer, keyboard, or
+`componentColors.ts`'s persistent color assignment) and of Blitz mode
+(`blitz.ts`'s difficulty rating/eligible-options/puzzle-sequence,
+`blitzStore.ts`'s leaderboard grouping/sorting/deletion — see "Blitz mode"
+above), even though the animations themselves are visual-only. `render.ts`,
+`input.ts`, `keyboard.ts`, `menuBackground.ts`, and `main.ts`'s own Blitz UI
+wiring are not — they're thin DOM/canvas glue verified by hand instead
+(Blitz's live-play/leaderboard/replay screen flow was verified end to end
+via a throwaway Playwright script the same way the rest of the menu system
+was — see below). When changing pointer, keyboard, or
 menu/screen-navigation interaction, the fastest way to sanity-check is a
 throwaway Playwright script against `npm run dev` (pre-installed Chromium
 at `/opt/pw-browsers/chromium-1194/chrome-linux/chrome` in this
