@@ -9,9 +9,9 @@ beforeEach(async () => {
 });
 
 const EVENTS: BlitzEvent[] = [
-  { kind: 'puzzleStart', t: 0, sizeKey: 'tiny', shapeMode: 'rect', seed: 1 },
+  { kind: 'puzzleStart', t: 0, sizeKey: 'tiny', shapeMode: 'rect', seed: 1, timeAwardedMs: 500 },
   { kind: 'move', t: 100, ops: [{ op: 'toggleRegion', region: 0, edges: ['0,0|1,0'] }] },
-  { kind: 'puzzleSolved', t: 200, timeAwardedMs: 500 },
+  { kind: 'puzzleSolved', t: 200 },
   { kind: 'runEnd', t: 5000, scoreMs: 5000 },
 ];
 

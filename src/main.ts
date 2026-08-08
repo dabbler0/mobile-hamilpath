@@ -209,7 +209,7 @@ let stopMenuBackground: (() => void) | null = null;
 // different playback engine (closer to `showReplayFrame`/`playReplay` above,
 // just driven by real timestamps instead of a frame index).
 
-/** How long the "solved!" flash stays on screen before the next puzzle appears — long enough to read the award toast and see the last edge's grow animation land, short enough to still feel like Blitz. */
+/** How long the "solved!" flash stays on screen before the next puzzle appears — long enough to read the "Solved!" toast and see the last edge's grow animation land, short enough to still feel like Blitz. */
 const BLITZ_ADVANCE_DELAY_MS = 550;
 /** Below this many remaining milliseconds, the header timer switches to its urgent (red) styling. */
 const BLITZ_LOW_TIME_MS = 10000;
@@ -227,7 +227,7 @@ let blitzEvents: BlitzEvent[] = [];
 let blitzRunStartPerf = 0;
 /** `Date.now()` at the same moment, purely for the leaderboard's human-readable date. */
 let blitzRunStartedAt = 0;
-/** `performance.now()` timestamp at which the clock reaches zero — starts at `blitzRunStartPerf + startingTimeSec * 1000` and is pushed forward by every `handleBlitzPuzzleSolved` award (see `BlitzParams.timeBackPerEdgeSec`'s doc comment); can grow arbitrarily large, matching CLAUDE.md's "time bank can get arbitrarily large". */
+/** `performance.now()` timestamp at which the clock reaches zero — starts at `blitzRunStartPerf + startingTimeSec * 1000` and is pushed forward by every `advanceBlitzPuzzle` award, credited the instant each puzzle starts rather than when it's solved (see `BlitzParams.timeBackPerEdgeSec`'s doc comment); can grow arbitrarily large, matching CLAUDE.md's "time bank can get arbitrarily large". */
 let blitzDeadline = 0;
 let blitzPuzzlesSolved = 0;
 let blitzTimerRafId: number | null = null;
@@ -248,7 +248,7 @@ let blitzReplayCurrentId: PuzzleId | null = null;
 let blitzReplayPathState: PathState = createInitialPath();
 /** Index into `blitzReplayRecord.events` of the next event *not yet* applied — `seekBlitzReplay`/`advanceBlitzReplayTo` both only ever move this forward from 0 (a rewind always resets and replays from the start, same tradeoff `decodeMoveLog` already makes for the ordinary per-puzzle replay). */
 let blitzReplayEventCursor = 0;
-/** Sum of every `puzzleSolved` award applied so far, for reconstructing the header's "remaining time" readout during replay (`startingTimeSec * 1000 + awarded - t`). */
+/** Sum of every `puzzleStart` award applied so far, for reconstructing the header's "remaining time" readout during replay (`startingTimeSec * 1000 + awarded - t`). */
 let blitzReplayAwardedMs = 0;
 let blitzReplaySolved = 0;
 /** Current playback position, in ms since the run's own start — the single source of truth `updateBlitzReplayUI` and the scrubber both read. */
@@ -1198,10 +1198,18 @@ function updateBlitzHeader(): void {
  * Pulls the next puzzle from this run's `blitzSeq` (see
  * `game/blitz.ts`'s `createBlitzSequence`) and puts it on screen — called
  * once to start the run and again after every solve (`handleBlitzPuzzleSolved`,
- * via its short delay). Records the transition as a `puzzleStart` event; the
- * very first call of a run forces `t: 0` exactly (rather than
- * `blitzElapsedMs()`, which would be a sub-millisecond positive jitter) so
- * `seekBlitzReplay(0)` can find it with a simple `<=` comparison.
+ * via its short delay). Immediately credits this puzzle's own time-back
+ * bonus (`timeBackPerEdgeSec * totalCells(puzzle)` seconds, CLAUDE.md: "time
+ * refunded proportional to the number of edges in the solution... at the
+ * start of the puzzle in question" — `totalCells` *is* that edge count, see
+ * `game/blitz.ts`'s `boardEdgeCount` doc comment) onto the deadline *before*
+ * the player has made a single move on it, rather than waiting for it to be
+ * solved — see `game/blitz.ts`'s `BlitzEvent` doc comment for why the award
+ * now lives on `puzzleStart` instead of `puzzleSolved`. Records the
+ * transition as a `puzzleStart` event carrying that award; the very first
+ * call of a run forces `t: 0` exactly (rather than `blitzElapsedMs()`, which
+ * would be a sub-millisecond positive jitter) so `seekBlitzReplay(0)` can
+ * find it with a simple `<=` comparison.
  */
 function advanceBlitzPuzzle(): void {
   clearEdgeAnimations();
@@ -1213,29 +1221,27 @@ function advanceBlitzPuzzle(): void {
   blitzPathState = createInitialPath();
   focusedRegionId = null;
   keyboardCursor = null;
-  blitzEvents.push({ kind: 'puzzleStart', t: blitzEvents.length === 0 ? 0 : blitzElapsedMs(), sizeKey: id.sizeKey, shapeMode: id.shapeMode, seed: id.seed });
+  const awardMs = Math.round(blitzParams.timeBackPerEdgeSec * 1000 * totalCells(blitzPuzzle));
+  blitzDeadline += awardMs;
+  blitzEvents.push({ kind: 'puzzleStart', t: blitzEvents.length === 0 ? 0 : blitzElapsedMs(), sizeKey: id.sizeKey, shapeMode: id.shapeMode, seed: id.seed, timeAwardedMs: awardMs });
+  showToast(`+${(awardMs / 1000).toFixed(1)}s for this puzzle`);
   updateBlitzHeader();
   layout();
 }
 
 /**
- * A puzzle was just solved: awards `timeBackPerEdgeSec * totalCells(puzzle)`
- * seconds back onto the deadline (CLAUDE.md: "the user gets time refunded
- * proportional to the number of edges in the solution to the solved
- * board" — `totalCells` *is* that edge count, see `game/blitz.ts`'s
- * `boardEdgeCount` doc comment), then, after a short flash
- * (`BLITZ_ADVANCE_DELAY_MS`) so the win is actually visible, moves on to the
- * next puzzle. Guarded by `mode === 'blitz'` in the timeout callback in case
- * the run already ended (timer expired, or the player forfeited) before the
- * delay elapsed.
+ * A puzzle was just solved: no longer moves the clock at all (see
+ * `advanceBlitzPuzzle`'s doc comment — the time-back bonus for a puzzle is
+ * credited when it *starts*, not when it's solved), just tallies the solve
+ * and, after a short flash (`BLITZ_ADVANCE_DELAY_MS`) so the win is actually
+ * visible, moves on to the next puzzle. Guarded by `mode === 'blitz'` in the
+ * timeout callback in case the run already ended (timer expired, or the
+ * player forfeited) before the delay elapsed.
  */
 function handleBlitzPuzzleSolved(): void {
-  const solutionEdges = totalCells(blitzPuzzle);
-  const awardMs = Math.round(blitzParams.timeBackPerEdgeSec * 1000 * solutionEdges);
-  blitzDeadline += awardMs;
   blitzPuzzlesSolved += 1;
-  blitzEvents.push({ kind: 'puzzleSolved', t: blitzElapsedMs(), timeAwardedMs: awardMs });
-  showToast(`Solved! +${(awardMs / 1000).toFixed(1)}s`);
+  blitzEvents.push({ kind: 'puzzleSolved', t: blitzElapsedMs() });
+  showToast('Solved!');
   updateBlitzHeader();
   if (blitzAdvanceTimeoutId !== null) window.clearTimeout(blitzAdvanceTimeoutId);
   blitzAdvanceTimeoutId = window.setTimeout(() => {
@@ -1481,6 +1487,7 @@ function applyBlitzReplayEvent(ev: BlitzEvent): void {
       blitzReplayRegionMap = computeRegions(blitzReplayPuzzle);
       blitzReplayPathState = createInitialPath();
       resetComponentColorState(reviewComponentColors);
+      blitzReplayAwardedMs += ev.timeAwardedMs;
       layout();
       break;
     }
@@ -1490,7 +1497,6 @@ function applyBlitzReplayEvent(ev: BlitzEvent): void {
       }
       break;
     case 'puzzleSolved':
-      blitzReplayAwardedMs += ev.timeAwardedMs;
       blitzReplaySolved += 1;
       break;
     case 'runEnd':
@@ -1559,7 +1565,8 @@ function advanceBlitzReplayTo(target: number, animate: boolean): void {
     } else {
       applyBlitzReplayEvent(ev);
     }
-    if (ev.kind === 'puzzleSolved') showToast(`Solved! +${(ev.timeAwardedMs / 1000).toFixed(1)}s`);
+    if (ev.kind === 'puzzleStart') showToast(`+${(ev.timeAwardedMs / 1000).toFixed(1)}s for this puzzle`);
+    if (ev.kind === 'puzzleSolved') showToast('Solved!');
     blitzReplayEventCursor++;
   }
   blitzReplayT = target;

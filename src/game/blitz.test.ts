@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BLITZ_BUDGET_INCREMENT,
   BLITZ_INITIAL_BUDGET,
   BLITZ_PACE_OPTIONS,
   BLITZ_PACE_PARAMS,
@@ -218,14 +219,18 @@ describe('createBlitzSequence', () => {
     expect(avg(late)).toBeGreaterThan(avg(early));
   });
 
-  it('never produces a puzzle whose rating exceeds the budget available at that step', () => {
+  it('never produces a puzzle whose rating exceeds the budget available at that step, growing the budget by a flat BLITZ_BUDGET_INCREMENT each time (not proportionally to that puzzle\'s own edge count)', () => {
     // Reimplements the budget bookkeeping independently to cross-check createBlitzSequence's internal invariant.
+    // If the real generator instead grew the budget proportionally to each
+    // puzzle's own size (as it used to), this recomputed `budget` would
+    // eventually diverge from the generator's own and this assertion would
+    // start failing once puzzles grow large enough.
     const seq = createBlitzSequence(77);
     let budget = BLITZ_INITIAL_BUDGET;
     for (let i = 0; i < 200; i++) {
       const id = seq.next();
       expect(boardDifficultyRating(id.sizeKey, id.shapeMode)).toBeLessThanOrEqual(budget);
-      budget += boardEdgeCount(id.sizeKey);
+      budget += BLITZ_BUDGET_INCREMENT;
     }
   });
 });

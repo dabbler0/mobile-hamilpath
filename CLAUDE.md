@@ -1167,21 +1167,29 @@ parallel dimensions field on `PuzzleId` — see "Puzzle identity and
 generation" above.
 
 A run's puzzle sequence is driven by a difficulty **budget** that starts at
-`BLITZ_INITIAL_BUDGET` (the larger of a nominal `tiny`-sized, i.e. 3x4,
+`BLITZ_INITIAL_BUDGET` and grows, after every puzzle handed out, by a flat
+`BLITZ_BUDGET_INCREMENT` — both are multiples of one nominal difficulty
+"unit" (`BLITZ_BUDGET_UNIT`, the larger of a `tiny`-sized, i.e. 3x4,
 rectangle's and random-shape's own ratings — computed from the table, not
-hardcoded, so retuning the multipliers keeps this self-consistent; kept as
-the starting point purely so a fresh run's opening difficulty still feels
-the same as it did before board size became continuous) and grows, after
-every puzzle handed out, by that puzzle's own `4 * m * n` edge count — this
-is also, not coincidentally, the exact number of edges in that puzzle's
-solution (a Hamiltonian cycle has one edge per cell), matching this
-feature's plain-English spec: "the difficulty rating increases after each
-solve by the number of edges in the solution to the solved board." Only the
-*budget growth* is keyed to "after each solve" in the spec's wording; the
-actual number added is knowable the instant a board is chosen, before it's
-solved at all, which is what makes the whole sequence precomputable (see
-below) — a puzzle's edge count is a property of the dimensions
-`chooseBlitzBoard` picked, not of how well or badly the player plays it.
+hardcoded, so retuning the multipliers keeps both self-consistent).
+`BLITZ_INITIAL_BUDGET` is *two* units (doubled from the original one-unit
+starting point, so a run opens noticeably harder right from its first
+puzzle rather than starting at the cheapest board Blitz can generate);
+`BLITZ_BUDGET_INCREMENT` is one unit, added after *every* puzzle handed out
+regardless of that puzzle's own size. This is a deliberate change from an
+earlier version of this feature, whose spec read "the difficulty rating
+increases after each solve by the number of edges in the solution to the
+solved board" — i.e. budget growth proportional to each puzzle's own `4 * m
+* n` edge count. That compounded: a bigger puzzle grew the budget more,
+which made the *next* puzzle likely bigger still, so a run's difficulty
+climbed away from a comfortable pace far faster than felt fair, especially
+combined with the now-doubled starting budget. A flat per-puzzle increment
+keeps difficulty climbing at a steady, predictable pace regardless of how
+large any single puzzle in the sequence happened to be. The increment is
+still knowable the instant a board is chosen, before it's solved at all
+(it doesn't even depend on which board was chosen any more, being a flat
+constant) — which is what keeps the whole sequence precomputable (see
+below), same as before this change.
 `blitz.ts`'s `createBlitzSequence(runSeed)` returns a stepping generator
 (`.next()`) that, each call, calls `chooseBlitzBoard` against the run's own
 `mulberry32` rng stream, mints that puzzle's own seed from the same stream,
@@ -1190,7 +1198,8 @@ already fits comfortably under `BLITZ_INITIAL_BUDGET`, a fresh run can, in
 principle, roll any shape — including toroidal — from its very first
 puzzle; what actually varies with the budget is the *size* range each shape
 can be generated at, which starts small and widens (up to the
-`MAX_BLITZ_BOARD_AREA` ceiling) as the budget grows from solved puzzles.
+`MAX_BLITZ_BOARD_AREA` ceiling) as the budget grows from puzzles handed
+out.
 
 Critically, **puzzle generation is entirely independent of the run's
 difficulty parameters** (see below): `createBlitzSequence` takes only
@@ -1199,8 +1208,9 @@ a `runSeed` play through the *identical* sequence of puzzles in the
 identical order, regardless of their `BlitzParams` — only the clock differs.
 This is also what makes the whole sequence precomputable from the seed
 alone without needing the player to actually solve anything (the budget
-growth depends only on which board was picked, never on play quality),
-which is exactly what a real-time replay leans on (see below): a stored
+growth is a flat constant per puzzle, depending on neither which board was
+picked nor on play quality), which is exactly what a real-time replay leans
+on (see below): a stored
 run's `puzzleStart` events record their own resolved `sizeKey`/`shapeMode`/
 `seed` explicitly rather than replaying `createBlitzSequence` itself, so
 replay never has to re-derive the sequence and stays correct even if the
@@ -1212,12 +1222,16 @@ difficulty/selection rules are retuned later.
 run's clock:
 
 - **`startingTimeSec`** — how much time the run's clock starts with.
-- **`timeBackPerEdgeSec`** — seconds credited back per edge of a solved
-  puzzle's solution cycle (again `4 * m * n`, the same quantity the budget
-  itself grows by) — a proportionality constant, not a flat per-puzzle
-  bonus, so a harder (bigger) puzzle is worth proportionally more time
-  back. Time credited this way has no cap — CLAUDE.md's spec: "time bank
-  can get arbitrarily large."
+- **`timeBackPerEdgeSec`** — seconds credited back per edge of a puzzle's own
+  solution cycle (`4 * m * n`, that puzzle's own edge count — no longer the
+  same quantity the budget grows by now that budget growth is a flat
+  constant, see "the puzzle sequence" above) — a proportionality constant,
+  not a flat per-puzzle bonus, so a harder (bigger) puzzle is worth
+  proportionally more time back. Credited the instant that puzzle *starts*,
+  not when it's solved (see "Live play" below) — a deliberate change from an
+  earlier version of this feature, which credited it on solve instead. Time
+  credited this way has no cap — CLAUDE.md's spec: "time bank can get
+  arbitrarily large."
 
 Rather than letting the player type these in directly, the Blitz setup
 screen (`#blitzSetupScreen`, reachable via the Blitz hub's **Play** button)
@@ -1285,18 +1299,32 @@ is `setBlitzPathState` (dispatched from the shared `setPathState` by
 `mode`), which just records the move and checks for a solve; a puzzle is
 either fresh or solved, nothing in between to undo back into. Solving one
 (`next.won && !prevWon`, exactly the same check Free Play's
-`setFreePlayPathState` uses) triggers `handleBlitzPuzzleSolved`: computes
-the time award (`timeBackPerEdgeSec * 1000 * totalCells(puzzle)`), pushes it
-onto `blitzDeadline` (a `performance.now()` timestamp, not a countdown
-number that needs decrementing — "how much time is left" is always just
+`setFreePlayPathState` uses) triggers `handleBlitzPuzzleSolved`, which no
+longer moves the clock at all — it just tallies the solve (`blitzPuzzlesSolved
++= 1`), records a `puzzleSolved` event, shows a plain "Solved!" toast, and,
+after a short flash (`BLITZ_ADVANCE_DELAY_MS`, long enough to read the toast
+and see the last edge's ordinary grow animation land, short enough to still
+feel like Blitz), calls `advanceBlitzPuzzle`. The delay is a plain
+`setTimeout`, guarded by `mode === 'blitz'` when it fires, in case the run
+already ended (timer expired, or the player forfeited) in the meantime.
+
+The time award moved to `advanceBlitzPuzzle` itself — a deliberate change
+from an earlier version of this feature, which awarded it in
+`handleBlitzPuzzleSolved` instead (i.e. on *solving* a puzzle, proportional
+to *that* puzzle's own size). Now, every time `advanceBlitzPuzzle` pulls the
+next `PuzzleId` from the run's `createBlitzSequence` and puts it on screen —
+whether that's the very first puzzle of the run or the one after a solve —
+it immediately computes that *new* puzzle's own award
+(`timeBackPerEdgeSec * 1000 * totalCells(puzzle)`) and pushes it onto
+`blitzDeadline` (a `performance.now()` timestamp, not a countdown number
+that needs decrementing — "how much time is left" is always just
 `blitzDeadline - performance.now()`, recomputed fresh, so nothing needs
-reconciling when an award lands mid-frame), shows a toast, and — after a
-short flash (`BLITZ_ADVANCE_DELAY_MS`, long enough to read the award and see
-the last edge's ordinary grow animation land, short enough to still feel
-like Blitz) — calls `advanceBlitzPuzzle`, which pulls the next `PuzzleId`
-from the run's `createBlitzSequence` and puts it on screen. The delay is a
-plain `setTimeout`, guarded by `mode === 'blitz'` when it fires, in case the
-run already ended (timer expired, or the player forfeited) in the meantime.
+reconciling when an award lands mid-frame) before the player has made a
+single move on it, and shows a toast for the bonus. In other words: the
+refund a puzzle is worth is now banked the moment that puzzle appears, not
+handed out as a reward for finishing it — CLAUDE.md's spec is "time refunded
+proportional to the number of edges in the solution to the solved board, at
+the start of the puzzle in question."
 
 The clock itself (`blitzTick`) is a `requestAnimationFrame` loop, separate
 from the live board's own animation-driven `render()` chain (though a solve
@@ -1344,24 +1372,30 @@ run — timestamped by `t` (milliseconds since the run's own first
 so replay can reproduce real *pacing*, not just an ordered sequence of
 states:
 
-- `{ kind: 'puzzleStart', t, sizeKey, shapeMode, seed }` — carries its own
-  resolved `PuzzleId` fields explicitly (see "the puzzle sequence" above for
-  why replay never needs to re-run `createBlitzSequence` at all). Applying
-  this event (`applyBlitzReplayEvent`) calls `layout()` after swapping in
-  the new puzzle, exactly like live play's `advanceBlitzPuzzle()` does — a
-  run's puzzles are rarely all the same size, and without this the canvas
-  stayed sized (and the view fitted) to whichever board the *first*
-  `puzzleStart` set it to, cropping every later, larger board even when
-  zoomed out. Both call sites that reach `applyBlitzReplayEvent` only ever
-  run once `mode === 'blitzReplay'` and `#gameScreen` is already the
-  visible screen (`openBlitzReplay` calls `showScreen('game')` *before*
-  its initial `seekBlitzReplay(0)`, for the same `wrapEl`-must-be-visible
-  reason `startBlitzRun` above needs it), so `layout()`'s `fitView()` always
-  has a real `wrapEl` size to compute against.
+- `{ kind: 'puzzleStart', t, sizeKey, shapeMode, seed, timeAwardedMs }` —
+  carries its own resolved `PuzzleId` fields explicitly (see "the puzzle
+  sequence" above for why replay never needs to re-run `createBlitzSequence`
+  at all), plus `timeAwardedMs`: this puzzle's own time-back bonus, credited
+  the instant it starts rather than when it's solved (see "Live play"
+  above) — so applying this event both regenerates the puzzle *and* credits
+  the award in one step. Applying this event (`applyBlitzReplayEvent`) calls
+  `layout()` after swapping in the new puzzle, exactly like live play's
+  `advanceBlitzPuzzle()` does — a run's puzzles are rarely all the same
+  size, and without this the canvas stayed sized (and the view fitted) to
+  whichever board the *first* `puzzleStart` set it to, cropping every
+  later, larger board even when zoomed out. Both call sites that reach
+  `applyBlitzReplayEvent` only ever run once `mode === 'blitzReplay'` and
+  `#gameScreen` is already the visible screen (`openBlitzReplay` calls
+  `showScreen('game')` *before* its initial `seekBlitzReplay(0)`, for the
+  same `wrapEl`-must-be-visible reason `startBlitzRun` above needs it), so
+  `layout()`'s `fitView()` always has a real `wrapEl` size to compute
+  against.
 - `{ kind: 'move', t, ops }` — reuses `PathOp` verbatim, same compact shape
   `history.ts`'s `moveLog` already uses. There's no `jump`/undo entry (no
   Undo/Redo in Blitz — every transition is a real forward move).
-- `{ kind: 'puzzleSolved', t, timeAwardedMs }`
+- `{ kind: 'puzzleSolved', t }` — no longer carries a time award (moved to
+  `puzzleStart`, see above); only marks that the puzzle in progress at `t`
+  was solved, for the puzzles-solved tally.
 - `{ kind: 'runEnd', t, scoreMs }` — always the log's last entry;
   `blitzReplayDurationMs()` just reads its `t`.
 
