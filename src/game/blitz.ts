@@ -17,7 +17,7 @@ import { mulberry32, type Rng } from './rng';
 export interface BlitzParams {
   /** How much time (seconds) the run's clock starts with. */
   startingTimeSec: number;
-  /** How many seconds are credited back per edge of a solved puzzle's solution cycle (`totalCells(puzzle)` edges — see `boardEdgeCount`'s doc comment) — i.e. the proportionality constant, not a flat per-puzzle bonus. */
+  /** How many seconds are credited back per edge of a puzzle's own solution cycle (`totalCells(puzzle)` edges — see `boardEdgeCount`'s doc comment) — i.e. the proportionality constant, not a flat per-puzzle bonus. Credited the instant that puzzle *starts*, not when it's solved — see `BlitzEvent`'s `puzzleStart.timeAwardedMs`. */
   timeBackPerEdgeSec: number;
 }
 
@@ -128,14 +128,38 @@ function minBlitzRating(shapeMode: ShapeMode): number {
 }
 
 /**
- * The difficulty "budget" a fresh run starts with — set to the larger of a
- * `tiny`-sized (3x4, the smallest of the former fixed `SIZE_OPTIONS`)
- * rectangle's and random-shape's own ratings, purely to keep a fresh run's
- * starting difficulty feeling the same as it did before board size became
- * continuous. Computed from the table rather than hardcoded, so retuning the
- * multipliers keeps this consistent automatically.
+ * One "unit" of difficulty budget — the larger of a `tiny`-sized (3x4, the
+ * smallest of the former fixed `SIZE_OPTIONS`) rectangle's and random-shape's
+ * own ratings. This is the nominal difficulty step both the starting budget
+ * and the per-puzzle budget growth are defined in terms of (see
+ * `BLITZ_INITIAL_BUDGET`/`BLITZ_BUDGET_INCREMENT` and `createBlitzSequence`
+ * below). Computed from the table rather than hardcoded, so retuning the
+ * multipliers keeps both consistent automatically.
  */
-export const BLITZ_INITIAL_BUDGET = Math.max(boardDifficultyRating('tiny', 'rect'), boardDifficultyRating('tiny', 'random'));
+const BLITZ_BUDGET_UNIT = Math.max(boardDifficultyRating('tiny', 'rect'), boardDifficultyRating('tiny', 'random'));
+
+/**
+ * The amount the difficulty budget grows by after *every* puzzle handed out,
+ * regardless of that puzzle's own size — a flat, constant step (one
+ * `BLITZ_BUDGET_UNIT`) rather than being proportional to the puzzle's edge
+ * count (as it used to be; see git history). Proportional growth compounded:
+ * a bigger puzzle grew the budget more, which made the *next* puzzle likely
+ * bigger still, racing the run's difficulty upward far faster than felt
+ * fair. A constant step keeps difficulty climbing at a steady, predictable
+ * pace regardless of how large any single puzzle in the sequence happened to
+ * be.
+ */
+export const BLITZ_BUDGET_INCREMENT = BLITZ_BUDGET_UNIT;
+
+/**
+ * The difficulty "budget" a fresh run starts with — twice `BLITZ_BUDGET_UNIT`
+ * (i.e. twice `BLITZ_BUDGET_INCREMENT`), so a run opens noticeably harder
+ * than its very first puzzle would otherwise be (this used to be exactly one
+ * unit; doubled so the opening puzzle already has some real size/shape
+ * variety to roll rather than starting right at the cheapest possible
+ * board).
+ */
+export const BLITZ_INITIAL_BUDGET = BLITZ_BUDGET_UNIT * 2;
 
 /** Every shape mode whose cheapest possible board still fits within the current difficulty budget — the continuous-size analogue of the old fixed-size-table `eligibleBlitzOptions`, gating only on shape now that dimensions are chosen separately (see `chooseBlitzBoard`). Always non-empty: the budget only ever grows from `BLITZ_INITIAL_BUDGET`, which already clears every shape's minimum rating. */
 export function eligibleBlitzShapes(budget: number): readonly ShapeMode[] {
@@ -162,15 +186,16 @@ const MAX_ASPECT_RATIO = Math.max(...SIZE_OPTIONS.map((s) => Math.max(s.m, s.n) 
 
 /**
  * Largest board area (in blocks, `m * n`) Blitz will ever generate — matches
- * the old fixed `huge` size (14x20 = 280 blocks). Without a ceiling, a long
- * enough run's difficulty budget compounds without bound (each puzzle's own
- * size grows the budget, which grows the *next* puzzle's likely size, and so
- * on), racing toward boards too large to be playable or even to generate in
- * reasonable time. Capping the area a board can ever reach is exactly what
- * the old fixed-size table did implicitly (`huge` was simply the largest
- * entry) — this reproduces that same ceiling now that size is chosen
- * continuously rather than looked up, while everything below it still
- * varies freely with the budget as before.
+ * the old fixed `huge` size (14x20 = 280 blocks). Without a ceiling, the
+ * difficulty budget still grows without bound over a long enough run (it now
+ * climbs by a flat `BLITZ_BUDGET_INCREMENT` per puzzle rather than
+ * compounding off each puzzle's own size — see `createBlitzSequence` — but
+ * "without bound" either way), eventually reaching boards too large to be
+ * playable or even to generate in reasonable time. Capping the area a board
+ * can ever reach is exactly what the old fixed-size table did implicitly
+ * (`huge` was simply the largest entry) — this reproduces that same ceiling
+ * now that size is chosen continuously rather than looked up, while
+ * everything below it still varies freely with the budget as before.
  */
 const MAX_BLITZ_BOARD_AREA = 14 * 20;
 
@@ -215,19 +240,20 @@ export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMo
  * from the first. Entirely independent of `BlitzParams`: the only state
  * driving each step is the run's own `mulberry32` rng stream plus a running
  * difficulty "budget" that starts at `BLITZ_INITIAL_BUDGET` and grows by the
- * chosen board's own `4 * m * n` edge count after every puzzle handed out
- * (not after it's actually *solved* — that count only depends on which
- * board `chooseBlitzBoard` picked, not on anything the player does, so the
- * whole sequence is deterministic and precomputable from `runSeed` alone;
- * live play just happens to reveal it one step at a time). This is what
- * lets two runs sharing a `runSeed` play through the identical sequence of
- * puzzles regardless of their `BlitzParams` — see `BlitzParams`'s doc
- * comment — and what lets a stored run's `events` (each `puzzleStart`
- * recording its own resolved `sizeKey`/`shapeMode`/`seed` explicitly, see
- * `BlitzEvent`) be replayed without needing to re-run this generator at
- * all. Each puzzle's dimensions are encoded into a synthetic `sizeKey` via
- * `customSizeKey` (see its doc comment) rather than needing a second,
- * parallel dimensions field on `PuzzleId`.
+ * flat `BLITZ_BUDGET_INCREMENT` after every puzzle handed out (not after
+ * it's actually *solved*, and — unlike an earlier version of this function —
+ * not scaled by that puzzle's own edge count either; the increment is the
+ * same regardless of which board `chooseBlitzBoard` picked, so the whole
+ * sequence is deterministic and precomputable from `runSeed` alone; live
+ * play just happens to reveal it one step at a time). This is what lets two
+ * runs sharing a `runSeed` play through the identical sequence of puzzles
+ * regardless of their `BlitzParams` — see `BlitzParams`'s doc comment — and
+ * what lets a stored run's `events` (each `puzzleStart` recording its own
+ * resolved `sizeKey`/`shapeMode`/`seed` explicitly, see `BlitzEvent`) be
+ * replayed without needing to re-run this generator at all. Each puzzle's
+ * dimensions are encoded into a synthetic `sizeKey` via `customSizeKey` (see
+ * its doc comment) rather than needing a second, parallel dimensions field
+ * on `PuzzleId`.
  */
 export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
   const rng = mulberry32(runSeed);
@@ -236,7 +262,7 @@ export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
     next(): PuzzleId {
       const { shapeMode, m, n } = chooseBlitzBoard(rng, budget);
       const seed = Math.floor(rng() * 0x100000000);
-      budget += 4 * m * n;
+      budget += BLITZ_BUDGET_INCREMENT;
       return { sizeKey: customSizeKey(m, n), shapeMode, seed, collections: NO_EDGE_COLLECTIONS };
     },
   };
@@ -258,13 +284,21 @@ export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
  * (rather than just an index into `createBlitzSequence`'s output) so replay
  * never needs to re-run the sequence generator — it just regenerates that
  * exact `PuzzleId` via `generatePuzzle`, exactly like the ordinary
- * Replays/review feature already does for a single puzzle. `move` reuses
- * `PathOp` verbatim, same compact shape `history.ts` already uses. There is
- * no `jump`/undo entry: Blitz play has no Undo/Redo (see CLAUDE.md), so
- * every state transition within a puzzle is a real forward move.
+ * Replays/review feature already does for a single puzzle. It also carries
+ * `timeAwardedMs`: the time-back bonus for *that* puzzle (proportional to
+ * its own edge count, `timeBackPerEdgeSec * 1000 * totalCells(puzzle)`) is
+ * credited to the clock the instant the puzzle appears, not when it's
+ * solved — so `puzzleStart` is where the award lives now, and applying it
+ * (live or in replay) means crediting the clock right away, before a single
+ * move has been made on that puzzle. `move` reuses `PathOp` verbatim, same
+ * compact shape `history.ts` already uses. There is no `jump`/undo entry:
+ * Blitz play has no Undo/Redo (see CLAUDE.md), so every state transition
+ * within a puzzle is a real forward move. `puzzleSolved` no longer carries
+ * an award — solving a puzzle doesn't move the clock at all any more, it
+ * only ever unblocks the next `puzzleStart`.
  */
 export type BlitzEvent =
-  | { kind: 'puzzleStart'; t: number; sizeKey: string; shapeMode: ShapeMode; seed: number }
+  | { kind: 'puzzleStart'; t: number; sizeKey: string; shapeMode: ShapeMode; seed: number; timeAwardedMs: number }
   | { kind: 'move'; t: number; ops: PathOp[] }
-  | { kind: 'puzzleSolved'; t: number; timeAwardedMs: number }
+  | { kind: 'puzzleSolved'; t: number }
   | { kind: 'runEnd'; t: number; scoreMs: number };
