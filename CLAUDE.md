@@ -222,6 +222,38 @@ marked — with no distractor edges, it usually comes out as just a couple of
 regions (the thickened spanning-tree corridor, and whatever's outside it),
 each of whose boundary is exactly the hidden Hamiltonian cycle.
 
+**Not every computed region is actually safe to toggle.** Toggling a region
+only preserves the game's core invariant (every cell's marked-degree stays
+*even* after any sequence of taps, starting from 0 at an empty board) if
+that region's own `boundary` is itself a closed loop — every cell it
+touches has an even number of `boundary` edges. On an unwrapped
+(non-toroidal) board, a lone, unpaired distractor edge can land exactly on
+the board's true outer edge (or a non-rectangular shape's own gap) with no
+matching edge to close the loop around it there — `computeRegions` still
+has to include that one real candidate edge in whichever region borders it
+(nothing else can ever toggle it), but the resulting `boundary` ends up an
+*open* chain instead of a closed one. Toggling a region like that would
+create a cell with a dangling single marked edge — a state `computeWin` can
+never call a win, and neither the same tap nor any other single tap can
+undo, since nothing else touches that same open chain. `regions.ts`'s
+`isBoundaryEnclosed`/`Region.enclosed` detects this per region (every
+region on a wraparound board is always enclosed — there's no true outer
+edge for the problem to arise from); `input.ts` and `keyboard.ts` are the
+only two places that check it, refusing to highlight or toggle a
+non-enclosed region at all — a tap or keyboard cursor on one behaves
+exactly as if there were no region there. `pathEdit.ts`'s `toggleRegion`
+itself stays completely unchanged and unconditional, since
+`game/edgeLock.ts`'s generation-time locking also drives it directly and
+must keep working regardless (its own edge selection never actually picks
+a non-enclosed region in practice). Refusing to toggle a non-enclosed
+region never strands anything real: every other edge on its boundary is an
+ordinary interior wall that also borders some other, different (and
+reliably enclosed) region, so it stays reachable through that one instead
+— verified for real generated puzzles, across every shape mode, in
+`regions.test.ts` and `puzzleGen.test.ts` (including a GF(2) linear-algebra
+check that the intended solution stays fully reachable using only enclosed
+regions, not just that each individual solution edge does).
+
 - **Tap** a face (mouse/touch, `src/input.ts`) or move the keyboard cursor
   onto it and press the action key (Enter/Space, `src/keyboard.ts`) →
   `pathEdit.ts`'s `toggleRegion` flips every one of that region's boundary

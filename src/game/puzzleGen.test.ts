@@ -424,3 +424,94 @@ describe('generateSolutionCells / generateSolutionEdges', () => {
     for (const d of degree.values()) expect(d).toBe(2);
   });
 });
+
+describe('non-enclosed regions on real generated puzzles (see CLAUDE.md\'s "non-enclosed region" bug)', () => {
+  // A lone, unpaired distractor edge dropped right on a plain (non-toroidal)
+  // board's true outer edge is what produces a `Region` whose own boundary
+  // isn't a closed loop (`regions.ts`'s `Region.enclosed` / `isBoundaryEnclosed`
+  // — see their doc comments for the mechanism). This is common enough at
+  // this project's usual `PUZZLE_DENSITY` that a plain "small" rect board
+  // reliably reproduces it within a handful of seeds, which is what these
+  // tests lean on rather than constructing a synthetic puzzle by hand.
+
+  it('does actually happen on real generated (rect) puzzles — sanity-checking the premise of the tests below', () => {
+    let sawNonEnclosed = false;
+    for (let seed = 0; seed < 20 && !sawNonEnclosed; seed++) {
+      const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed };
+      const regionMap = computeRegions(generatePuzzle(id));
+      if (regionMap.regions.some((r) => !r.enclosed)) sawNonEnclosed = true;
+    }
+    expect(sawNonEnclosed).toBe(true);
+  });
+
+  it('never happens on a wraparound (toroidal) board — there is no true outer edge for it to arise from', () => {
+    for (let seed = 0; seed < 20; seed++) {
+      const id: PuzzleId = { sizeKey: 'small', shapeMode: 'toroidal', seed };
+      const regionMap = computeRegions(generatePuzzle(id));
+      expect(regionMap.regions.every((r) => r.enclosed)).toBe(true);
+    }
+  });
+
+  /** Is `target` reachable as an XOR-combination of `generators` (GF(2) linear-span membership, via Gaussian elimination) — i.e. "can some sequence of taps on these regions reach exactly this marked-edge set". */
+  function inSpan(generators: readonly (readonly EdgeKey[])[], target: ReadonlySet<EdgeKey>): boolean {
+    const xor = (a: ReadonlySet<EdgeKey>, b: readonly EdgeKey[]): Set<EdgeKey> => {
+      const result = new Set(a);
+      for (const ek of b) (result.has(ek) ? result.delete(ek) : result.add(ek));
+      return result;
+    };
+    const minEdge = (s: ReadonlySet<EdgeKey>): EdgeKey => [...s].reduce((m, ek) => (ek < m ? ek : m));
+
+    const basis = new Map<EdgeKey, Set<EdgeKey>>();
+    for (const gen of generators) {
+      let v = new Set(gen);
+      while (v.size > 0) {
+        const pivot = minEdge(v);
+        const existing = basis.get(pivot);
+        if (!existing) {
+          basis.set(pivot, v);
+          break;
+        }
+        v = xor(v, [...existing]);
+      }
+    }
+    let t = new Set(target);
+    while (t.size > 0) {
+      const existing = basis.get(minEdge(t));
+      if (!existing) return false;
+      t = xor(t, [...existing]);
+    }
+    return true;
+  }
+
+  it('the intended solution stays fully reachable using only enclosed regions, for every shape mode and several sizes — nothing is stranded by refusing to toggle a non-enclosed region', () => {
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+    const sizeKeys = ['tiny', 'mini', 'small', 'medium'];
+    for (const shapeMode of shapeModes) {
+      for (const sizeKey of sizeKeys) {
+        for (let seed = 0; seed < 6; seed++) {
+          const id: PuzzleId = { sizeKey, shapeMode, seed };
+          const puzzle = generatePuzzle(id);
+          const regionMap = computeRegions(puzzle);
+          const solutionEdges = generateSolutionEdges(id);
+          const enclosedBoundaries = regionMap.regions.filter((r) => r.enclosed).map((r) => r.boundary);
+          expect(inSpan(enclosedBoundaries, solutionEdges)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it('every individual edge on a non-enclosed region\'s boundary still borders some other, enclosed region too — nothing becomes completely unreachable', () => {
+    for (let seed = 0; seed < 20; seed++) {
+      const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed };
+      const puzzle = generatePuzzle(id);
+      const regionMap = computeRegions(puzzle);
+      const nonEnclosed = regionMap.regions.filter((r) => !r.enclosed);
+      for (const region of nonEnclosed) {
+        for (const ek of region.boundary) {
+          const borderingEnclosed = regionMap.regions.some((r) => r.enclosed && r.boundary.includes(ek));
+          expect(borderingEnclosed).toBe(true);
+        }
+      }
+    }
+  });
+});
