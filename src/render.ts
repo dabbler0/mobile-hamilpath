@@ -251,6 +251,50 @@ const WON_HUE_EXCLUSION = 30;
 const GOLDEN_RATIO_CONJUGATE = 0.6180339887498949;
 const SEGMENT_SATURATION = 0.68;
 const SEGMENT_LIGHTNESS = 0.58;
+/** How much of the hue circle the walk actually gets to use, and where that usable arc begins — the band around `WON_HUE` is off limits (see `segmentColor`'s doc comment), so a `frac` in `[0, 1)` maps onto the remaining `360 - 2 * WON_HUE_EXCLUSION` degrees starting right past the band's far edge. */
+const WALKABLE_ARC = 360 - 2 * WON_HUE_EXCLUSION;
+const ARC_START = WON_HUE + WON_HUE_EXCLUSION;
+
+/** Maps a walk position `frac` (`[0, 1)`, wrapping) to the hue it lands on within the walkable arc — the forward half of the pair below. */
+function arcFracToHue(frac: number): number {
+  return (ARC_START + frac * WALKABLE_ARC) % 360;
+}
+
+/** Inverse of `arcFracToHue`: which walk position would land exactly on `hue`, assuming `hue` is already somewhere on the walkable arc (i.e. outside the excluded band around `WON_HUE`) — used only to anchor the walk's starting point below. */
+function hueToArcFrac(hue: number): number {
+  const t = (((hue - ARC_START) % 360) + 360) % 360;
+  return t / WALKABLE_ARC;
+}
+
+/** A plain, unmixed blue — the hue the walk's very first color (`component === 0`) is anchored to. Comfortably outside the excluded band around the victory green, so anchoring here costs nothing. */
+const BLUE_HUE = 240;
+/** A plain, unmixed red — what the walk's *direction* (below) is chosen to land its second color (`component === 1`) closest to. */
+const RED_HUE = 0;
+
+function circularHueDistance(a: number, b: number): number {
+  const d = Math.abs(a - b) % 360;
+  return Math.min(d, 360 - d);
+}
+
+/** The walk's starting position: `component === 0` always lands exactly on `BLUE_HUE`. */
+const BASE_FRAC = hueToArcFrac(BLUE_HUE);
+/**
+ * The walk's direction: `+1` steps forward through the golden-angle
+ * sequence, `-1` steps backward (still irrational, so uniqueness is
+ * unaffected either way — see `GOLDEN_RATIO_CONJUGATE`'s doc comment).
+ * With the start pinned to `BLUE_HUE` above, only one knob (this sign) is
+ * left to influence where `component === 1` lands, and a fixed step size
+ * can't be relied on to hit an arbitrary second target exactly — so this
+ * picks whichever direction's `component === 1` comes closer to
+ * `RED_HUE`, computed once here (rather than hardcoded) so it keeps
+ * re-deriving the better choice if `WON_HUE`/`WON_HUE_EXCLUSION` ever
+ * change enough to flip which direction wins.
+ */
+const WALK_DIRECTION: 1 | -1 = (() => {
+  const forwardHue = arcFracToHue((BASE_FRAC + GOLDEN_RATIO_CONJUGATE) % 1);
+  const backwardHue = arcFracToHue((((BASE_FRAC - GOLDEN_RATIO_CONJUGATE) % 1) + 1) % 1);
+  return circularHueDistance(forwardHue, RED_HUE) <= circularHueDistance(backwardHue, RED_HUE) ? 1 : -1;
+})();
 
 /**
  * One color per connected component of marked edges, so it's easy to tell
@@ -273,20 +317,23 @@ const SEGMENT_LIGHTNESS = 0.58;
  * ever on screen at once, without needing an upper bound baked in anywhere.
  * The hue walk's range excludes a band around `WON_HUE` (the "solved" green
  * — see `COLORS.markedWon`) so an in-progress segment is never mistakable,
- * even briefly, for the fully-solved color: the walk covers only the
- * `360 - 2 * WON_HUE_EXCLUSION` degrees *outside* that band, mapped back
- * onto the real hue circle starting right past the band's far edge.
- * Saturation/lightness are held constant (rather than also varied
- * procedurally) so every generated color stays similarly legible against
- * `COLORS.background`, matching the readability the old hand-picked palette
- * was tuned for.
+ * even briefly, for the fully-solved color: the walk covers only
+ * `WALKABLE_ARC` degrees *outside* that band, mapped back onto the real hue
+ * circle starting right past the band's far edge (`ARC_START`). The walk's
+ * start/direction (`BASE_FRAC`/`WALK_DIRECTION`) are chosen so the very
+ * first two colors read as recognizable primaries — component 0 lands
+ * exactly on a plain blue, component 1 as close to a plain red as a single
+ * fixed step size can land it — purely as a nicer, more predictable-looking
+ * start to the sequence; every later component still just keeps walking the
+ * same golden-angle step from there, so uniqueness/coverage past those
+ * first two is completely unaffected. Saturation/lightness are held
+ * constant (rather than also varied procedurally) so every generated color
+ * stays similarly legible against `COLORS.background`, matching the
+ * readability the old hand-picked palette was tuned for.
  */
 export function segmentColor(component: number): string {
-  const available = 360 - 2 * WON_HUE_EXCLUSION;
-  const arcStart = WON_HUE + WON_HUE_EXCLUSION; // the far edge of the excluded band, where the walkable arc begins
-  const frac = (component * GOLDEN_RATIO_CONJUGATE) % 1;
-  const hue = arcStart + frac * available;
-  return hslToHex(hue, SEGMENT_SATURATION, SEGMENT_LIGHTNESS);
+  const frac = (((BASE_FRAC + WALK_DIRECTION * component * GOLDEN_RATIO_CONJUGATE) % 1) + 1) % 1;
+  return hslToHex(arcFracToHue(frac), SEGMENT_SATURATION, SEGMENT_LIGHTNESS);
 }
 
 /**
