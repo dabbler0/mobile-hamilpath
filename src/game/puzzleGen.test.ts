@@ -16,9 +16,9 @@ import {
   type PuzzleId,
   type ShapeMode,
 } from './puzzleGen';
-import { computeWin } from './pathEdit';
+import { computeWin, createInitialPath, toggleRegion } from './pathEdit';
 import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
-import { computeRegions } from './regions';
+import { computeRegions, type EdgeKey } from './regions';
 
 describe('sizeOption', () => {
   it('finds every declared size by key', () => {
@@ -212,14 +212,13 @@ describe('locked edges in the puzzle id', () => {
     expect(puzzle.initialEdges).toBeUndefined();
   });
 
-  it('locks a non-empty, at-most-5% subset of the solution edges, and every locked edge starts out marked', () => {
+  it('locks exactly floor(solutionEdges.size * fraction) solution edges, each starting marked', () => {
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
 
     expect(puzzle.lockedEdges).toBeDefined();
-    expect(puzzle.lockedEdges!.size).toBeGreaterThan(0);
-    expect(puzzle.lockedEdges!.size).toBeLessThanOrEqual(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
+    expect(puzzle.lockedEdges!.size).toBe(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
     for (const ek of puzzle.lockedEdges!) expect(solutionEdges.has(ek)).toBe(true);
 
     // Every locked edge starts marked, per this feature's spec — though
@@ -229,6 +228,43 @@ describe('locked edges in the puzzle id', () => {
     // other, unrelated boundary edges in that region right along with it.
     const initialEdges = new Set(puzzle.initialEdges);
     for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(true);
+  });
+
+  it('never strands a required (unlocked) solution edge in the wrong mark state — every edge that ends up unreachable, locked or not, is already correctly marked or unmarked', () => {
+    // The core correctness guarantee `applyLockedEdges` depends on, and the
+    // reason it doesn't need to explicitly re-lock a `strandedEdges` entry
+    // (see `edgeLock.ts`'s doc comment): any edge that ends up unreachable
+    // as a side effect of locking edge E was, by construction, *already on
+    // the boundary of whichever region got toggled to fix E's own mark
+    // state* — that's exactly why merging strands it. So the very same
+    // toggle that correctly marks E also marks/unmarks every one of its
+    // now-stranded siblings correctly, automatically — whether they're
+    // other solution edges (need marking) or distractor edges that
+    // happened to share the same connector (need to stay unmarked). Checked
+    // across every real edge in the graph, not just the ones this puzzle
+    // happened to choose as candidates.
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
+    for (const shapeMode of shapeModes) {
+      for (const seed of [1, 2, 3]) {
+        const id: PuzzleId = { sizeKey: 'small', shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+        const puzzle = generatePuzzle(id);
+        const solutionEdges = generateSolutionEdges(id);
+        const regionMap = computeRegions(puzzle);
+        const reachable = new Set(regionMap.regions.flatMap((r) => r.boundary));
+        const initialEdges = new Set(puzzle.initialEdges);
+
+        const seen = new Set<EdgeKey>();
+        for (const [k, neighbors] of puzzle.adj) {
+          for (const nk of neighbors) {
+            const ek = k < nk ? `${k}|${nk}` : `${nk}|${k}`;
+            if (seen.has(ek)) continue;
+            seen.add(ek);
+            if (puzzle.lockedEdges!.has(ek) || reachable.has(ek)) continue; // formally locked, or still toggleable — not what this test is about
+            expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
+          }
+        }
+      }
+    }
   });
 
   it('is fully deterministic for the same id', () => {
@@ -254,6 +290,37 @@ describe('locked edges in the puzzle id', () => {
       const puzzle = generatePuzzle(id);
       const solutionEdges = generateSolutionEdges(id);
       expect(computeWin(puzzle, solutionEdges)).toBe(true);
+    }
+  });
+
+  it('the intended solution is actually *reachable* by some real combination of region taps, starting from the locked initial state (not just theoretically valid)', () => {
+    // A stronger check than the computeWin check above: computeWin alone
+    // doesn't care *how* the marked set was reached, but the whole point of
+    // region toggling is that every state has to be reachable through taps
+    // alone. Exhaustive over every subset of the puzzle's (small, so this
+    // stays fast) toggleable regions — same pattern as `pathEdit.test.ts`'s
+    // "toggleRegion reachability" tests.
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+    for (const shapeMode of shapeModes) {
+      for (const seed of [1, 2, 3]) {
+        const id: PuzzleId = { sizeKey: 'tiny', shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+        const puzzle = generatePuzzle(id);
+        const solutionEdges = generateSolutionEdges(id);
+        const regionMap = computeRegions(puzzle);
+        const R = regionMap.regions.length;
+
+        let reachedSolution = false;
+        for (let mask = 0; mask < 1 << R && !reachedSolution; mask++) {
+          let state = createInitialPath(puzzle);
+          for (let i = 0; i < R; i++) {
+            if (mask & (1 << i)) state = toggleRegion(puzzle, regionMap, state, i).state;
+          }
+          if (state.edges.size === solutionEdges.size && [...state.edges].every((ek) => solutionEdges.has(ek))) {
+            reachedSolution = true;
+          }
+        }
+        expect(reachedSolution).toBe(true);
+      }
     }
   });
 });

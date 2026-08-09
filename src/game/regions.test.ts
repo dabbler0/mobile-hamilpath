@@ -72,12 +72,17 @@ describe('computeRegions', () => {
     expect(region1.boundary).toEqual([edgeKey([1, 0], [1, 1])]);
   });
 
-  it('lists a boundary edge once even when both its faces are already in the same region via a different fused path', () => {
+  it('excludes an edge from the boundary once both its faces are already in the same region via a different fused path', () => {
     // 3x4 vertex grid: a 2x3 grid of faces. The only real edge is the shared
     // side between face (0,0) and face (1,0); every other face-to-face side
     // has no candidate edge (a permanent fuse). That ring of fuses connects
     // (0,0) and (1,0) back together the long way around, through every other
-    // face, even though a real edge directly separates them too.
+    // face, even though a real edge directly separates them too. Since both
+    // its faces land in the same region, this edge is *interior* to it, not
+    // a boundary — toggling the region must never touch it (see
+    // `computeRegions`'s own doc comment on why: it would let a merged
+    // region's tap unmark an edge that has nothing to do with the tapped
+    // face, as a pure side effect of the merge).
     const puzzle = puzzleFromEdges(3, 4, [[[1, 0], [1, 1]]]);
     const { faceToRegion, regions } = computeRegions(puzzle);
 
@@ -87,7 +92,7 @@ describe('computeRegions', () => {
 
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(6);
-    expect(region.boundary).toEqual([edgeKey([1, 0], [1, 1])]);
+    expect(region.boundary).toEqual([]);
   });
 
   it('regionAt resolves a face to its region id', () => {
@@ -165,7 +170,9 @@ describe('computeRegions', () => {
     // (0,0) and (0,3) — connecting row 3 back to row 0. Every other
     // adjacent face pair (including other wraps) has no candidate edge, so
     // they all fuse into one region the long way around the torus — same
-    // shape as the rectangular "boundary edge listed once" test above.
+    // shape as the rectangular "excludes an edge... via a different fused
+    // path" test above, so the one real edge ends up interior (excluded),
+    // not a boundary edge.
     const W = 4;
     const H = 4;
     const adj = new Map<string, Set<string>>();
@@ -184,7 +191,7 @@ describe('computeRegions', () => {
     expect(regionIds.size).toBe(1);
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
-    expect(region.boundary).toEqual([edgeKey([0, 0], [0, 3])]);
+    expect(region.boundary).toEqual([]);
   });
 
   it('wraps face adjacency across a flip seam on a Klein bottle board', () => {
@@ -193,7 +200,8 @@ describe('computeRegions', () => {
     // steps down to KLEIN_BOTTLE.wrapY(1, 4, 4, 4) = (4-1-1, 0) = (2,0).
     // Every other adjacent face pair (including other wraps) has no
     // candidate edge, so — same shape as the torus test above — they all
-    // fuse into one region the long way around.
+    // fuse into one region the long way around, leaving the one real edge
+    // interior (excluded from the boundary).
     const W = 4;
     const H = 4;
     const adj = new Map<string, Set<string>>();
@@ -212,13 +220,14 @@ describe('computeRegions', () => {
     expect(regionIds.size).toBe(1);
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
-    expect(region.boundary).toEqual([edgeKey([1, 3], [2, 0])]);
+    expect(region.boundary).toEqual([]);
   });
 
   it('wraps face adjacency across a flip seam on a projective plane board', () => {
     // 4x4 projective plane board: both directions flip. The only real edge
     // crosses the x-seam: (3,1) steps right to
-    // PROJECTIVE_PLANE.wrapX(4, 1, 4, 4) = (0, 4-1-1) = (0,2).
+    // PROJECTIVE_PLANE.wrapX(4, 1, 4, 4) = (0, 4-1-1) = (0,2). Same shape as
+    // the torus/Klein tests above — the one real edge ends up interior.
     const W = 4;
     const H = 4;
     const adj = new Map<string, Set<string>>();
@@ -237,7 +246,7 @@ describe('computeRegions', () => {
     expect(regionIds.size).toBe(1);
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
-    expect(region.boundary).toEqual([edgeKey([3, 1], [0, 2])]);
+    expect(region.boundary).toEqual([]);
   });
 });
 
@@ -304,13 +313,33 @@ function regionMapFingerprint(regionMap: RegionMap): string {
   return JSON.stringify(groups);
 }
 
+/**
+ * Two 2-face columns (A = {(0,0),(0,1)}, B = {(1,0),(1,1)}) on a 3x3 vertex
+ * grid, connected by *two* separate real edges instead of just one: E1 =
+ * (1,0)-(1,1) (between (0,0) and (1,0)) and E2 = (1,1)-(1,2) (between (0,1)
+ * and (1,1)). Every other wall — including each column's own internal wall
+ * — is a non-edge, so (0,0)/(0,1) fuse into region A and (1,0)/(1,1) fuse
+ * into region B, leaving E1 and E2 as A and B's *only* two direct
+ * connectors. This is the shape that exposes the regression this module's
+ * tests are guarding against: naively unioning A's and B's boundaries when
+ * locking E1 would wrongly leave E2 toggleable even though both its faces
+ * are now inside the same merged region.
+ */
+function twoConnectorPuzzle(): { puzzle: Puzzle; e1: EdgeKey; e2: EdgeKey } {
+  const puzzle = puzzleFromEdges(3, 3, [
+    [[1, 0], [1, 1]],
+    [[1, 1], [1, 2]],
+  ]);
+  return { puzzle, e1: edgeKey([1, 0], [1, 1]), e2: edgeKey([1, 1], [1, 2]) };
+}
+
 describe('lockEdgeInRegionMap', () => {
   it('matches a from-scratch computeRegions recompute after locking a single edge', () => {
     const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
     const ek = edgeKey([1, 0], [1, 1]);
     const regionMap0 = computeRegions(base);
 
-    const incremental = lockEdgeInRegionMap(regionMap0, ek);
+    const { regionMap: incremental } = lockEdgeInRegionMap(regionMap0, ek);
     const fromScratch = computeRegions({ ...base, lockedEdges: new Set([ek]) });
     expect(regionMapFingerprint(incremental)).toBe(regionMapFingerprint(fromScratch));
   });
@@ -322,25 +351,83 @@ describe('lockEdgeInRegionMap', () => {
 
     let regionMap = computeRegions(puzzle);
     for (const ek of toLock) {
-      regionMap = lockEdgeInRegionMap(regionMap, ek);
+      ({ regionMap } = lockEdgeInRegionMap(regionMap, ek));
     }
     const fromScratch = computeRegions({ ...puzzle, lockedEdges: new Set(toLock) });
     expect(regionMapFingerprint(regionMap)).toBe(regionMapFingerprint(fromScratch));
   });
 
-  it('throws for an edge not on any boundary (already locked, or not real)', () => {
+  it('returns the regionMap unchanged (no throw) for an edge already excluded from every boundary', () => {
     const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
     const ek = edgeKey([1, 0], [1, 1]);
-    const locked = lockEdgeInRegionMap(computeRegions(base), ek);
-    expect(() => lockEdgeInRegionMap(locked, ek)).toThrow();
+    const { regionMap: locked } = lockEdgeInRegionMap(computeRegions(base), ek);
+    const result = lockEdgeInRegionMap(locked, ek);
+    expect(result.strandedEdges).toEqual([]);
+    expect(regionMapFingerprint(result.regionMap)).toBe(regionMapFingerprint(locked));
   });
 
   it('every region id still matches its own array index (an invariant computeRegions also holds)', () => {
     const puzzle = buildPuzzle(rectShape(6, 9), 0.28, mulberry32(7));
     let regionMap = computeRegions(puzzle);
     const edges = [...new Set([...puzzle.adj.entries()].flatMap(([a, bs]) => [...bs].map((b) => edgeKey(parseKey(a), parseKey(b)))))].slice(0, 8);
-    for (const ek of edges) regionMap = lockEdgeInRegionMap(regionMap, ek);
+    for (const ek of edges) ({ regionMap } = lockEdgeInRegionMap(regionMap, ek));
     regionMap.regions.forEach((r, i) => expect(r.id).toBe(i));
+  });
+
+  describe('merging two regions that share more than one real edge (regression coverage)', () => {
+    it('excludes every shared connector from the merged boundary, not just the one being locked — symmetric difference, not union', () => {
+      const { puzzle, e1, e2 } = twoConnectorPuzzle();
+      const regionMap0 = computeRegions(puzzle);
+      // Sanity-check the fixture: both e1 and e2 separate the same two regions before locking.
+      expect(regionsForEdge(regionMap0, e1).sort()).toEqual(regionsForEdge(regionMap0, e2).sort());
+
+      const { regionMap: merged, strandedEdges } = lockEdgeInRegionMap(regionMap0, e1);
+      expect(strandedEdges).toEqual([e2]);
+
+      const mergedRegionId = merged.faceToRegion.get('0,0')!;
+      expect(merged.faceToRegion.get('1,0')).toBe(mergedRegionId); // A and B are now one region
+      // Neither connector is toggleable any more: e1 because it's locked,
+      // e2 because it's now interior (both faces in the same region).
+      expect(merged.regions[mergedRegionId].boundary).toEqual([]);
+    });
+
+    it('matches a from-scratch recompute once the stranded edge is also locked (the real-world sequence puzzleGen.ts follows)', () => {
+      const { puzzle, e1, e2 } = twoConnectorPuzzle();
+      const regionMap0 = computeRegions(puzzle);
+      const { regionMap: afterE1, strandedEdges } = lockEdgeInRegionMap(regionMap0, e1);
+      expect(strandedEdges).toEqual([e2]);
+
+      // e2 is already excluded everywhere, so locking it too is a no-op on the regionMap shape (see the "returns unchanged" test above) but still needs recording in `lockedEdges` for a real caller.
+      const { regionMap: afterBoth } = lockEdgeInRegionMap(afterE1, e2);
+      const fromScratch = computeRegions({ ...puzzle, lockedEdges: new Set([e1, e2]) });
+      expect(regionMapFingerprint(afterBoth)).toBe(regionMapFingerprint(fromScratch));
+    });
+
+    it('keeps a connector edge unique to one side in the merged boundary (only *shared* connectors get excluded)', () => {
+      // Same two-column fixture, plus a third edge E3 bordering region A's
+      // own outer (true board) edge — E3 has nothing to do with region B at
+      // all, so merging A into B by locking E1 must leave E3 exactly as
+      // toggleable as it always was.
+      const { puzzle: base, e1 } = twoConnectorPuzzle();
+      const e3 = edgeKey([0, 0], [1, 0]); // (0,0)'s own top wall — a true board edge, unique to region A
+      const adj = new Map(base.adj);
+      const addEdge = (a: [number, number], b: [number, number]) => {
+        adj.set(key(...a), new Set(adj.get(key(...a))));
+        adj.set(key(...b), new Set(adj.get(key(...b))));
+        adj.get(key(...a))!.add(key(...b));
+        adj.get(key(...b))!.add(key(...a));
+      };
+      addEdge([0, 0], [1, 0]);
+      const puzzle: Puzzle = { ...base, adj };
+
+      const regionMap0 = computeRegions(puzzle);
+      expect(regionsForEdge(regionMap0, e3)).toHaveLength(1); // only region A borders it
+
+      const { regionMap: merged, strandedEdges } = lockEdgeInRegionMap(regionMap0, e1);
+      expect(strandedEdges).not.toContain(e3);
+      const mergedRegionId = merged.faceToRegion.get('0,0')!;
+      expect(merged.regions[mergedRegionId].boundary).toEqual([e3]);
+    });
   });
 });
 

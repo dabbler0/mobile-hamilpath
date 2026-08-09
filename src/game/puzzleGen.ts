@@ -267,9 +267,22 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
  * `buildPuzzleForId` happened to consume, so the selection doesn't depend
  * on exactly how many rng calls generation itself made (which varies with
  * density/edge-collection rolls) — the same reasoning `generateSolutionEdges`
- * already relies on for Give Up. `Math.floor` (not `Math.round`) on the
- * count keeps this strictly at-or-under the requested fraction, never over
- * it — "no more than 5%" per this feature's spec.
+ * already relies on for Give Up. `Math.floor` (not `Math.round`) keeps the
+ * count strictly at-or-under the requested fraction, never over it — "no
+ * more than 5%" per this feature's spec — and exactly that many end up in
+ * `puzzle.lockedEdges`; this is a plain loop, not a worklist.
+ *
+ * Locking one edge can *strand* others — see `lockEdge`'s/`regions.ts`'s
+ * `lockEdgeInRegionMap`'s doc comments: merging two regions that share more
+ * than one real edge between them leaves every edge but the one just locked
+ * permanently unreachable by any tap, without itself ever being locked —
+ * but a stranded edge never needs a *separate* fix here: it was, by
+ * construction, already on the boundary of whichever region just got
+ * toggled to fix the edge actually being locked, so that same toggle
+ * already marks/unmarks it correctly too (see `edgeLock.ts`'s doc comment
+ * for the full reasoning, and `puzzleGen.test.ts`'s "never strands a
+ * required solution edge" test, which checks this holds for every edge in
+ * the graph, not just the ones chosen as candidates).
  *
  * A locked-and-marked edge can never be marked by the player themselves
  * (it's excluded from every region's boundary from the moment it locks —
@@ -284,14 +297,15 @@ function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
   const fraction = id.lockedEdgeFraction ?? 0;
   if (fraction <= 0) return puzzle;
 
-  const candidates = shuffled([...generateSolutionEdges(id)], mulberry32(hashStringToSeed(`${puzzleIdKey(id)}::lock`)));
-  const count = Math.floor(candidates.length * fraction);
+  const solutionEdges = generateSolutionEdges(id);
+  const shuffledSolutionEdges = shuffled([...solutionEdges], mulberry32(hashStringToSeed(`${puzzleIdKey(id)}::lock`)));
+  const count = Math.floor(shuffledSolutionEdges.length * fraction);
 
   let lockedPuzzle = puzzle;
   let regionMap = computeRegions(lockedPuzzle);
   let state = createInitialPath();
-  for (let i = 0; i < count; i++) {
-    const result = lockEdge(lockedPuzzle, regionMap, state, candidates[i], true);
+  for (const edge of shuffledSolutionEdges.slice(0, count)) {
+    const result = lockEdge(lockedPuzzle, regionMap, state, edge, true);
     lockedPuzzle = result.puzzle;
     regionMap = result.regionMap;
     state = result.state;

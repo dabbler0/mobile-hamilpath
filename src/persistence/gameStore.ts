@@ -19,6 +19,8 @@ export interface InProgressRecord {
   history?: HistoryState;
   /** The edge-collection params this puzzle was generated with. Absent when the feature is off (equivalent to `NO_EDGE_COLLECTIONS`) — needed to regenerate the exact same puzzle graph on resume. */
   collections?: EdgeCollectionParams;
+  /** The locked-edge fraction this puzzle was generated with (see `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction`). Absent when the feature is off — needed to regenerate the *exact* same puzzle graph on resume: `lockedEdgeFraction` is folded into the puzzle's hash/seed exactly like `collections` is, so a resumed id missing it would regenerate a completely different board, not just one missing its locked edges. */
+  lockedEdgeFraction?: number;
   /** When this save was last written — sorts the Resume menu's list, most-recently-played first. */
   updatedAt: number;
 }
@@ -68,6 +70,7 @@ export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: H
     edges,
     history,
     collections: id.collections,
+    lockedEdgeFraction: id.lockedEdgeFraction,
     updatedAt: Date.now(),
   };
   await putRecord(STORES.inProgress, record);
@@ -88,6 +91,8 @@ export interface CompletedRecord {
   moveLog?: MoveLogEntry[];
   /** The edge-collection params this puzzle was generated with. Absent when the feature is off (equivalent to `NO_EDGE_COLLECTIONS`) — needed to regenerate the exact same puzzle graph for review. */
   collections?: EdgeCollectionParams;
+  /** The locked-edge fraction this puzzle was generated with — see `InProgressRecord`'s matching field for why this has to round-trip exactly, not just for rendering the locked edges but to regenerate the identical puzzle graph at all. */
+  lockedEdgeFraction?: number;
 }
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
@@ -115,12 +120,13 @@ export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?:
     completedAt: Date.now(),
     moveLog,
     collections: id.collections,
+    lockedEdgeFraction: id.lockedEdgeFraction,
   };
   await putRecord(STORES.completed, record);
   await clearInProgress(id);
 }
 
 /** Re-derives a full `PuzzleId` from a stored record — every record already carries every field a `PuzzleId` needs. */
-export function puzzleIdOf(record: { sizeKey: string; shapeMode: ShapeMode; seed: number; collections?: EdgeCollectionParams }): PuzzleId {
-  return { sizeKey: record.sizeKey, shapeMode: record.shapeMode, seed: record.seed, collections: record.collections };
+export function puzzleIdOf(record: { sizeKey: string; shapeMode: ShapeMode; seed: number; collections?: EdgeCollectionParams; lockedEdgeFraction?: number }): PuzzleId {
+  return { sizeKey: record.sizeKey, shapeMode: record.shapeMode, seed: record.seed, collections: record.collections, lockedEdgeFraction: record.lockedEdgeFraction };
 }
