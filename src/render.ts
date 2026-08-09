@@ -89,6 +89,17 @@ export function midgameRippleDelayMs(distance: number): number {
 const PULSE_BULGE = 0.85;
 /** Below this a stroke is treated as invisible and skipped — canvas ignores/normalizes `ctx.lineWidth = 0` rather than actually drawing nothing, so a grow/shrink's endpoints would otherwise flash a stray hairline. */
 const MIN_VISIBLE_WIDTH = 0.5;
+/**
+ * A marked edge that's locked (`Puzzle.lockedEdges` — see `game/edgeLock.ts`)
+ * draws at this fraction of normal opacity instead of the usual fully-opaque
+ * 1, so a pre-marked "given" edge reads visually distinct from one the
+ * player actually toggled themselves — same color/component, same width and
+ * animation behavior otherwise, just dimmer. Suppressed once `won` (a win's
+ * flat, uniform "solved" color has nothing left to distinguish — see
+ * `drawMarkedEdges`/`drawWrapped`'s own `components = won ? null : ...`
+ * reasoning), so the celebratory win state stays visually clean.
+ */
+const LOCKED_EDGE_OPACITY = 0.55;
 
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
@@ -352,7 +363,7 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawEdgeCollectionHalos(ctx, puzzle, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
-  drawMarkedEdges(ctx, edges, won, layout, anim, componentColors);
+  drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
@@ -405,19 +416,23 @@ interface MarkedEdgeDraw {
   sy2: number;
   color: string;
   lineWidth: number;
+  /** `LOCKED_EDGE_OPACITY` for a locked edge, 1 for an ordinary one — see its doc comment. */
+  alpha: number;
 }
 
-/** Draws a batch of marked-edge segments, widest last — see `drawMarkedEdges`'s doc comment for why draw order matters here. */
+/** Draws a batch of marked-edge segments, widest last — see `drawMarkedEdges`'s doc comment for why draw order matters here. Resets `ctx.globalAlpha` back to 1 before returning, so a dimmed locked edge never bleeds into whatever's drawn right after (collection badges, the keyboard cursor). */
 function strokeMarkedEdges(ctx: CanvasRenderingContext2D, draws: MarkedEdgeDraw[]): void {
   draws.sort((a, b) => a.lineWidth - b.lineWidth);
-  for (const { sx1, sy1, sx2, sy2, color, lineWidth } of draws) {
+  for (const { sx1, sy1, sx2, sy2, color, lineWidth, alpha } of draws) {
     ctx.strokeStyle = color;
     ctx.lineWidth = lineWidth;
+    ctx.globalAlpha = alpha;
     ctx.beginPath();
     ctx.moveTo(sx1, sy1);
     ctx.lineTo(sx2, sy2);
     ctx.stroke();
   }
+  ctx.globalAlpha = 1;
 }
 
 /**
@@ -445,6 +460,10 @@ function strokeMarkedEdges(ctx: CanvasRenderingContext2D, draws: MarkedEdgeDraw[
  * into the wide edge's join, reading as a notch right at a moving wave's
  * leading edge. Sorting so wider edges always draw last keeps a bulging
  * edge's join on top everywhere, regardless of `edges`' iteration order.
+ *
+ * `lockedEdges` (`Puzzle.lockedEdges`) draws any of its members at
+ * `LOCKED_EDGE_OPACITY` instead of fully opaque — see that constant's doc
+ * comment.
  */
 function drawMarkedEdges(
   ctx: CanvasRenderingContext2D,
@@ -453,6 +472,7 @@ function drawMarkedEdges(
   layout: Layout,
   anim?: AnimationState,
   componentColors?: ReadonlyMap<EdgeKey, number> | null,
+  lockedEdges?: ReadonlySet<EdgeKey>,
 ): void {
   const baseWidth = Math.max(3, layout.cellSize * 0.32);
   ctx.lineCap = 'round';
@@ -491,7 +511,8 @@ function drawMarkedEdges(
     }
 
     if (lineWidth < MIN_VISIBLE_WIDTH) continue;
-    draws.push({ sx1, sy1, sx2, sy2, color: strokeStyle, lineWidth });
+    const alpha = !won && lockedEdges?.has(ek) ? LOCKED_EDGE_OPACITY : 1;
+    draws.push({ sx1, sy1, sx2, sy2, color: strokeStyle, lineWidth, alpha });
   }
 
   if (anim?.shrinking) {
@@ -502,7 +523,11 @@ function drawMarkedEdges(
       const [a, b] = parseEdgeKey(ek);
       const [sx1, sy1] = toScreen(a, layout);
       const [sx2, sy2] = toScreen(b, layout);
-      draws.push({ sx1, sy1, sx2, sy2, color: shrink.color, lineWidth });
+      // A locked edge can never transition back to unmarked (it's excluded
+      // from every region's boundary the moment it locks — see
+      // `game/edgeLock.ts`), so it can never actually be shrinking; alpha 1
+      // here is just completeness, not a real case this hits today.
+      draws.push({ sx1, sy1, sx2, sy2, color: shrink.color, lineWidth, alpha: 1 });
     }
   }
 
@@ -700,7 +725,9 @@ function drawWrapped(
   const components = won ? null : componentColors;
   const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
   const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
-  const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number }> = [];
+  // `alpha` mirrors `drawMarkedEdges`'s own locked-edge dimming — see
+  // `LOCKED_EDGE_OPACITY`'s doc comment.
+  const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number; alpha: number }> = [];
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
     const cometStyle = cometStyles?.get(ek);
@@ -722,7 +749,10 @@ function drawWrapped(
         color = t < 0.5 ? pulse.fromColor : liveColor;
       }
     }
-    if (lineWidth >= MIN_VISIBLE_WIDTH) tiledMarkedEdges.push({ ...classified, color, lineWidth });
+    if (lineWidth >= MIN_VISIBLE_WIDTH) {
+      const alpha = !won && puzzle.lockedEdges?.has(ek) ? LOCKED_EDGE_OPACITY : 1;
+      tiledMarkedEdges.push({ ...classified, color, lineWidth, alpha });
+    }
   }
   if (anim?.shrinking) {
     for (const [ek, shrink] of anim.shrinking) {
@@ -731,7 +761,9 @@ function drawWrapped(
       if (lineWidth < MIN_VISIBLE_WIDTH) continue;
       const [a, b] = parseEdgeKey(ek);
       const classified = classifyEdge(a, b, topology, W, H);
-      tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth });
+      // A locked edge can never become unmarked again — see the matching
+      // note in `drawMarkedEdges` — so alpha 1 here is just completeness.
+      tiledMarkedEdges.push({ ...classified, color: shrink.color, lineWidth, alpha: 1 });
     }
   }
   // Widest last, same reasoning (and same fix) as `drawMarkedEdges`'s own
@@ -830,19 +862,21 @@ function drawWrapped(
   ctx.lineCap = 'round';
   forEachTile((tileX, tileY) => {
     const oFrom = topology.tileOrientation(tileX, tileY);
-    for (const { from, to, tileDX, tileDY, color, lineWidth } of tiledMarkedEdges) {
+    for (const { from, to, tileDX, tileDY, color, lineWidth, alpha } of tiledMarkedEdges) {
       const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
       const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
       const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
       const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
       ctx.strokeStyle = color;
       ctx.lineWidth = lineWidth;
+      ctx.globalAlpha = alpha;
       ctx.beginPath();
       ctx.moveTo(sx1, sy1);
       ctx.lineTo(sx2, sy2);
       ctx.stroke();
     }
   });
+  ctx.globalAlpha = 1; // don't let a dimmed locked edge bleed into the collection badges/cursor drawn next
 
   if (tiledCollectionBadges.length > 0) {
     const r = Math.max(7, layout.cellSize * 0.26);
