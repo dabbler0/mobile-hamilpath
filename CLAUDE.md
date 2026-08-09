@@ -742,20 +742,48 @@ never needs to re-run `lockEdge` on a stranded edge to fix its mark
 state — that half of the old worklist really is gone for good.
 
 Its *mark state* isn't the only thing a stranded edge needs, though:
-`applyLockedEdges` also folds every `strandedEdges` entry it collects along
-the way into the final puzzle's `lockedEdges` set — purely for rendering.
-Without this, a stranded edge sits on screen looking exactly like an
-ordinary, still-live candidate edge (full opacity, no visual distinction)
-even though no tap can ever reach it again, which reads as a rendering
-glitch rather than the deliberate region merge it actually is; folding it
-in dims it consistently with the rest of its now-merged region and makes
-that merge visually legible. This is a pure flag flip, not a second
-`lockEdge` call — no risk of an extra toggle, since the mark-state
-guarantee above already means there's nothing left to fix. (This is, in
-effect, reinstating only the harmless half of the old worklist: the
-recursive re-*toggling* it did was unnecessary and is gone; the recursive
-*flagging* it did is back, just applied as a single batch union at the end
-instead of chased edge-by-edge.)
+`applyLockedEdges` also folds every edge a candidate strands into the final
+puzzle's `lockedEdges` set — purely for rendering. Without this, a stranded
+edge sits on screen looking exactly like an ordinary, still-live candidate
+edge (full opacity, no visual distinction) even though no tap can ever
+reach it again, which reads as a rendering glitch rather than the
+deliberate region merge it actually is; folding it in dims it consistently
+with the rest of its now-merged region and makes that merge visually
+legible. This is a pure flag flip, not a second `lockEdge` call — no risk
+of an extra toggle, since the mark-state guarantee above already means
+there's nothing left to fix. (This is, in effect, reinstating only the
+harmless half of the old worklist: the recursive re-*toggling* it did was
+unnecessary and is gone; the recursive *flagging* it did is back.)
+
+**The stranded count now counts against the same budget the candidates
+themselves draw from**, rather than being additional overhead on top of it
+— a deliberate follow-up tightening: an earlier version of this fold-in
+locked every candidate unconditionally and only *then* swept in whatever
+got stranded, so the final `lockedEdges` size could end up well over the
+nominal fraction (a real measured case: 32 candidates ballooning to 80
+total locked edges on one board). `applyLockedEdges` now treats
+`budget = Math.floor(solutionEdges.size * fraction)` as a hard cap on the
+*final* `lockedEdges` size, not just on how many candidates get chosen, and
+tries each shuffled candidate *speculatively* — `lockEdge` is a pure
+function, so nothing is actually committed to `lockedPuzzle`/`regionMap`/
+`state` until this step decides to keep the result — only committing it
+(folding both the candidate and its own newly-stranded edges into
+`lockedEdges`) if doing so wouldn't push the total past `budget`. A
+candidate whose own stranding is too expensive is simply skipped in favor
+of trying the next one instead of being locked anyway: "if locking the next
+edge would bring along so many other edges that we go over the budget, we
+don't do it." The loop stops the moment the locked count reaches `budget`
+(no room left for even a single-cost edge) or the shuffled candidate list
+is exhausted — so `lockedEdges.size` never exceeds `budget`, though which
+specific solution edges end up locked (and how close to `budget` the final
+count actually lands) now depends on how cheap the shuffled order's
+candidates happen to be, not just on a fixed prefix of them.
+`puzzleGen.test.ts`'s "never locks more than the budget's worth" test pins
+the cap itself down across shapes/seeds, and its "skip-and-try-the-next-
+candidate" test reproduces the exact hash+shuffle `applyLockedEdges` uses
+internally to confirm the final locked set is genuinely *different* from
+what an unconditional "take the first `budget` candidates" version would
+pick, not just coincidentally under budget.
 
 The mark-state guarantee above is specific to `applyLockedEdges`'s own
 usage pattern — locking a batch of solution edges to *marked*,
@@ -779,20 +807,21 @@ alone, where the guarantee is actually proven to hold.
 
 `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction` (default `0`, off) is a
 generation-time application of the capability above: `generatePuzzle`'s
-`applyLockedEdges` step picks a random subset of the puzzle's own hidden
-solution edges — exactly `Math.floor(solutionEdges.size *
-LOCKED_EDGE_FRACTION)` of them (0.05, "no more than 5%" per this feature's
-spec) — and locks each one to marked, via a fresh, separately-hashed rng
+`applyLockedEdges` step tries candidates, in shuffled order, from the
+puzzle's own hidden solution edges — via a fresh, separately-hashed rng
 stream (`` `${puzzleIdKey(id)}::lock` ``, the same "don't depend on how
 many calls generation itself happened to make" reasoning
 `generateSolutionEdges` already relies on for Give Up) so the selection
 doesn't depend on collections/density having consumed a different number of
-rng calls. As covered above ("Stranding"), locking any of them can strand
-others — their mark state never needs a separate fix, but every one
-collected along the way *is* folded into the final `lockedEdges` set (for
-rendering, not correctness), so the final `lockedEdges` count can end up
-somewhat above this initial selection's own count — an accepted, purely
-cosmetic side effect, not a bug.
+rng calls — and locks each one to marked, up to a hard cap of
+`Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION)` total locked edges
+(0.05, "no more than 5%" per this feature's spec). As covered above
+("Stranding"), locking a candidate can strand others; their mark state
+never needs a separate fix, but every one collected along the way *does*
+count against this same budget — a candidate whose own stranding would push
+the total over budget is skipped in favor of a cheaper one later in the
+shuffle, so `lockedEdges.size` never exceeds the nominal 5%, only
+approaches it as closely as the available candidates allow.
 `lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
 `puzzleIdKey`/`puzzleSeed` exactly like `collectionsKeySuffix` already does
 for edge collections — absent or `0` hashes byte-identically to a puzzle id

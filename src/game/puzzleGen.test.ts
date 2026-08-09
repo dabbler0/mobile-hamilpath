@@ -19,6 +19,7 @@ import {
 import { computeWin, createInitialPath, toggleRegion } from './pathEdit';
 import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
 import { computeRegions, type EdgeKey } from './regions';
+import { mulberry32 } from './rng';
 
 describe('sizeOption', () => {
   it('finds every declared size by key', () => {
@@ -190,6 +191,27 @@ describe('edge collections in the puzzle id', () => {
   });
 });
 
+/** FNV-1a, replicated from `puzzleGen.ts`'s own private `hashStringToSeed` — used only to reproduce the exact locked-edge candidate order `applyLockedEdges` tries internally, for the "skip-and-try-the-next-candidate" test below. */
+function hashStringToSeedForTest(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/** Fisher-Yates, replicated from `puzzleGen.ts`'s own private `shuffled` — see `hashStringToSeedForTest` above for why. */
+function shuffledSolutionEdgesForLockKey(id: PuzzleId, solutionEdges: ReadonlySet<EdgeKey>): EdgeKey[] {
+  const rng = mulberry32(hashStringToSeedForTest(`${puzzleIdKey(id)}::lock`));
+  const arr = [...solutionEdges];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 describe('locked edges in the puzzle id', () => {
   const base: PuzzleId = { sizeKey: 'mini', shapeMode: 'rect', seed: 5 };
 
@@ -212,19 +234,21 @@ describe('locked edges in the puzzle id', () => {
     expect(puzzle.initialEdges).toBeUndefined();
   });
 
-  it('locks at least the nominal fraction\'s worth of solution edges, plus any edges stranded along the way, each already correctly marked or unmarked', () => {
+  it('never locks more than the budget\'s worth of edges in total, including anything stranded along the way', () => {
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
 
     expect(puzzle.lockedEdges).toBeDefined();
-    // At least the nominal fraction's worth — but can legitimately exceed
-    // it: every edge this batch's locks happen to strand (see
-    // `applyLockedEdges`'s own doc comment) gets folded into `lockedEdges`
-    // too, purely for rendering, not just the ones explicitly chosen as
-    // candidates.
-    const initialLockCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
-    expect(puzzle.lockedEdges!.size).toBeGreaterThanOrEqual(initialLockCount);
+    // `budget` is a hard cap on the *final* `lockedEdges` size, not just on
+    // how many candidates get chosen — see `applyLockedEdges`'s own doc
+    // comment. A candidate whose own stranding would blow the budget is
+    // skipped in favor of a later, cheaper one instead of being locked
+    // anyway, so this must never be exceeded regardless of how much
+    // stranding any individual candidate happens to cause.
+    const budget = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+    expect(puzzle.lockedEdges!.size).toBeLessThanOrEqual(budget);
+    expect(puzzle.lockedEdges!.size).toBeGreaterThan(0); // still actually locks something at this size/fraction
 
     // Every locked edge starts in the state its own role calls for — marked
     // if it's part of the intended solution, unmarked if it's a distractor
@@ -233,29 +257,31 @@ describe('locked edges in the puzzle id', () => {
     for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
   });
 
-  it('actually exercises stranding on this seed, not just theoretically allowing it — confirming the >= above isn\'t vacuously ==', () => {
-    // large/rect/seed=1 (same id as the test above) locks 32 solution edges
-    // by nominal count but ends up with 80 total locked edges — 48 extra
-    // solution-cycle edges the batch's own toggles happened to strand along
-    // the way, plus (in this specific case) one distractor edge stranded
-    // unmarked. Pinning the exact numbers here means a future change that
-    // accidentally stops folding stranded edges into `lockedEdges` (or
-    // starts over-locking) fails loudly, rather than this behavior only
-    // being checked by a `>=` bound that a regression could vacuously
-    // satisfy by locking nothing extra at all.
+  it('actually reaches the budget exactly, and picks a different set of solution edges than an unbounded version would, proving the skip-and-try-the-next-candidate logic really engages', () => {
+    // large/rect/seed=1 (same id as the test above) has budget 32 — and,
+    // before this follow-up, unconditionally locking the first 32 shuffled
+    // solution-edge candidates (with no regard for how much stranding any
+    // of them caused) ended up flagging 80 edges total as locked, 48 of
+    // them extra solution-cycle edges stranded along the way (see the
+    // previous version of this test, and this feature's own follow-up
+    // history). Reproducing that exact same shuffled candidate order here
+    // (mirroring `applyLockedEdges`'s own hash+shuffle) and comparing its
+    // first-32-candidates prefix against what actually ended up locked
+    // demonstrates the new budget-aware algorithm doesn't just happen to
+    // land under budget by coincidence — it locks a genuinely *different*
+    // set of solution edges than the naive "always take the first N"
+    // approach would, because it skipped some of those original candidates
+    // for being too expensive and substituted cheaper ones from later in
+    // the shuffle instead.
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
-    const nominalCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+    const budget = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+    expect(budget).toBe(32);
+    expect(puzzle.lockedEdges!.size).toBe(32); // reaches the budget exactly on this seed
 
-    expect(nominalCount).toBe(32);
-    expect(puzzle.lockedEdges!.size).toBe(80);
-    expect(puzzle.lockedEdges!.size).toBeGreaterThan(nominalCount); // the batch really did strand extra edges
-
-    const distractorLocked = [...puzzle.lockedEdges!].filter((ek) => !solutionEdges.has(ek));
-    expect(distractorLocked).toHaveLength(1); // a distractor edge, stranded and correctly locked to unmarked
-    const initialEdges = new Set(puzzle.initialEdges);
-    for (const ek of distractorLocked) expect(initialEdges.has(ek)).toBe(false);
+    const naiveFirstBudgetCandidates = new Set(shuffledSolutionEdgesForLockKey(id, solutionEdges).slice(0, budget));
+    expect(new Set(puzzle.lockedEdges)).not.toEqual(naiveFirstBudgetCandidates);
   });
 
   it('never strands a required (unlocked) solution edge in the wrong mark state — every edge that ends up unreachable, locked or not, is already correctly marked or unmarked', () => {
@@ -280,6 +306,12 @@ describe('locked edges in the puzzle id', () => {
         const regionMap = computeRegions(puzzle);
         const reachable = new Set(regionMap.regions.flatMap((r) => r.boundary));
         const initialEdges = new Set(puzzle.initialEdges);
+
+        // The budget cap (see `applyLockedEdges`'s own doc comment) has to
+        // hold across every shape/seed this feature can run on, not just
+        // the one pinned example above.
+        const budget = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+        expect(puzzle.lockedEdges!.size).toBeLessThanOrEqual(budget);
 
         const seen = new Set<EdgeKey>();
         for (const [k, neighbors] of puzzle.adj) {

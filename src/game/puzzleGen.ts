@@ -258,44 +258,60 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
 
 /**
  * Applies `id.lockedEdgeFraction` (see `PuzzleId`'s doc comment) to a
- * freshly-built puzzle: locks a random subset of the intended solution's
- * own edges — always locking them *into* the marked state, never out of it
+ * freshly-built puzzle: locks a subset of the intended solution's own
+ * edges — always locking them *into* the marked state, never out of it
  * (this feature's spec is specifically about pre-marking a few solution
  * edges, not deleting distractor ones) — via `edgeLock.ts`'s `lockEdge`.
- * The edges to lock are picked with a *separate*, freshly-hashed rng
- * (`` `${puzzleIdKey(id)}::lock` ``) rather than continuing whatever stream
- * `buildPuzzleForId` happened to consume, so the selection doesn't depend
- * on exactly how many rng calls generation itself made (which varies with
- * density/edge-collection rolls) — the same reasoning `generateSolutionEdges`
- * already relies on for Give Up. `Math.floor` (not `Math.round`) keeps the
- * count strictly at-or-under the requested fraction, never over it — "no
- * more than 5%" per this feature's spec — and exactly that many end up in
- * `puzzle.lockedEdges`; this is a plain loop, not a worklist.
+ * Candidates are tried, in order, from a shuffle of every solution edge,
+ * built with a *separate*, freshly-hashed rng (`` `${puzzleIdKey(id)}::lock` ``)
+ * rather than continuing whatever stream `buildPuzzleForId` happened to
+ * consume, so the selection doesn't depend on exactly how many rng calls
+ * generation itself made (which varies with density/edge-collection rolls)
+ * — the same reasoning `generateSolutionEdges` already relies on for Give
+ * Up.
  *
- * Locking one edge can *strand* others — see `lockEdge`'s/`regions.ts`'s
+ * `budget` (`Math.floor(solutionEdges.size * fraction)`, "no more than 5%"
+ * per this feature's spec) is a hard cap on the *final* `puzzle.lockedEdges`
+ * size, not just on how many candidates get chosen — because locking one
+ * edge can *strand* others (see `lockEdge`'s/`regions.ts`'s
  * `lockEdgeInRegionMap`'s doc comments: merging two regions that share more
  * than one real edge between them leaves every edge but the one just locked
- * permanently unreachable by any tap, without itself ever being locked —
- * but a stranded edge never needs a *separate* fix to its mark state here:
- * it was, by construction, already on the boundary of whichever region just
- * got toggled to fix the edge actually being locked, so that same toggle
+ * permanently unreachable by any tap, without itself ever being locked), and
+ * every stranded edge gets folded into `lockedEdges` right alongside the
+ * edge that stranded it, purely for rendering — see below. A single
+ * candidate can therefore cost anywhere from 1 (itself, no stranding at all)
+ * up to however many edges its region merge happens to sweep in, and that
+ * cost isn't knowable until the candidate is actually tried.
+ *
+ * The loop walks the shuffled candidates in order and, for each one, tries
+ * it — `lockEdge` is a pure function, so nothing about `lockedPuzzle`/
+ * `regionMap`/`state` is touched until this step decides to keep the
+ * result — and only *commits* it (folding both `edge` itself and its own
+ * newly-stranded edges into `lockedEdges`) if doing so wouldn't push the
+ * total past `budget`; otherwise the speculative result is simply discarded
+ * and the loop moves on to try the next candidate instead, exactly per this
+ * follow-up's own spec: "if locking the next edge would bring along so many
+ * other edges that we go over the budget, we don't do it." A candidate
+ * that's already been folded in as an *earlier* candidate's stranded edge
+ * is skipped for free (nothing left to do, no budget cost). The loop stops
+ * the moment the locked count reaches `budget` (no room left for even a
+ * single-cost edge) or the candidate list is exhausted, whichever comes
+ * first — so which solution edges actually end up locked, and how many,
+ * depends on how cheap the shuffled order's candidates happen to be, but
+ * `lockedEdges.size` itself never exceeds `budget`.
+ *
+ * A stranded edge never needs a *separate* fix to its mark state: it was,
+ * by construction, already on the boundary of whichever region just got
+ * toggled to fix the candidate actually being tried, so that same toggle
  * already marks/unmarks it correctly too (see `edgeLock.ts`'s doc comment
  * for the full reasoning, and `puzzleGen.test.ts`'s "never strands a
  * required solution edge" test, which checks this holds for every edge in
- * the graph, not just the ones chosen as candidates).
- *
- * Every stranded edge collected along the way *is* still folded into the
- * final `lockedEdges` set, though — not because it's required (it isn't;
- * see above), but purely for rendering: without this, a stranded edge sits
- * on screen looking like an ordinary, still-live candidate edge even though
- * no tap can ever reach it again, which reads as a rendering glitch rather
- * than the deliberate region merge it actually is. Since its mark state is
- * already correct by the time it's stranded, adding it to `lockedEdges`
- * here is a pure flag flip — no extra `lockEdge` call, no risk of an extra
- * toggle. (An earlier version of this feature *did* re-run `lockEdge` on
- * every stranded edge, via a worklist, in the mistaken belief that was
- * necessary for solvability; it wasn't, and that recursive toggling was
- * removed — this is only reinstating the harmless "flag it too" half.)
+ * the graph, not just the ones chosen as candidates) — folding it into
+ * `lockedEdges` is a pure flag flip, purely for rendering: without it, a
+ * stranded edge sits on screen looking like an ordinary, still-live
+ * candidate edge even though no tap can ever reach it again, which reads as
+ * a rendering glitch rather than the deliberate region merge it actually
+ * is.
  *
  * A locked-and-marked edge can never be marked by the player themselves
  * (it's excluded from every region's boundary from the moment it locks —
@@ -303,8 +319,8 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
  * exactly those edges for `pathEdit.ts`'s `createInitialPath` to seed a
  * fresh game with. A complete no-op — consuming no extra rng calls,
  * returning `puzzle` completely unchanged — whenever the fraction is
- * `0`/absent, so a puzzle generated with this feature off is
- * byte-identical to one from before it existed.
+ * `0`/absent (or rounds `budget` down to `0`), so a puzzle generated with
+ * this feature off is byte-identical to one from before it existed.
  */
 function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
   const fraction = id.lockedEdgeFraction ?? 0;
@@ -312,23 +328,31 @@ function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
 
   const solutionEdges = generateSolutionEdges(id);
   const shuffledSolutionEdges = shuffled([...solutionEdges], mulberry32(hashStringToSeed(`${puzzleIdKey(id)}::lock`)));
-  const count = Math.floor(shuffledSolutionEdges.length * fraction);
+  const budget = Math.floor(shuffledSolutionEdges.length * fraction);
 
   let lockedPuzzle = puzzle;
   let regionMap = computeRegions(lockedPuzzle);
   let state = createInitialPath();
-  const allStrandedEdges = new Set<EdgeKey>();
-  for (const edge of shuffledSolutionEdges.slice(0, count)) {
+  for (const edge of shuffledSolutionEdges) {
+    const lockedCount = lockedPuzzle.lockedEdges?.size ?? 0;
+    if (lockedCount >= budget) break; // no room left for even a single-cost edge
+    if (lockedPuzzle.lockedEdges?.has(edge)) continue; // already folded in as an earlier candidate's stranded edge — free, nothing to do
+
     const result = lockEdge(lockedPuzzle, regionMap, state, edge, true);
-    lockedPuzzle = result.puzzle;
+    // `strandedEdges` should never include anything already in
+    // `lockedPuzzle.lockedEdges` (a locked edge is excluded from every
+    // region's boundary, so it can never be found bordering both halves of
+    // a later merge) — filtered defensively anyway, so a violation of that
+    // invariant would undercount a candidate's cost rather than silently
+    // double-add an edge already accounted for.
+    const newlyStranded = result.strandedEdges.filter((se) => !lockedPuzzle.lockedEdges?.has(se));
+    if (lockedCount + 1 + newlyStranded.length > budget) continue; // this candidate would bring the budget over — skip it, try the next one
+
+    const lockedEdges = new Set(result.puzzle.lockedEdges ?? []);
+    for (const se of newlyStranded) lockedEdges.add(se);
+    lockedPuzzle = { ...result.puzzle, lockedEdges };
     regionMap = result.regionMap;
     state = result.state;
-    for (const stranded of result.strandedEdges) allStrandedEdges.add(stranded);
-  }
-  if (allStrandedEdges.size > 0) {
-    const lockedEdges = new Set(lockedPuzzle.lockedEdges ?? []);
-    for (const stranded of allStrandedEdges) lockedEdges.add(stranded);
-    lockedPuzzle = { ...lockedPuzzle, lockedEdges };
   }
   return { ...lockedPuzzle, initialEdges: [...state.edges] };
 }
