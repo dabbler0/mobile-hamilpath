@@ -88,6 +88,29 @@ export const SHAPE_DIFFICULTY_MULTIPLIER: Record<ShapeMode, number> = {
 };
 
 /**
+ * Multiplier applied on top of `SHAPE_DIFFICULTY_MULTIPLIER` when a board
+ * starts with a few solution edges already locked (`edgeLock.ts`'s
+ * `lockEdge`, `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction`) — a locked
+ * puzzle reads as easier than the same board without one, since a slice of
+ * the solution is already given away. CLAUDE.md's spec: "a puzzle that
+ * starts with locked edges should be treated as 90% as difficult as the
+ * corresponding puzzle without locked edges" (so a locked toroidal board
+ * rates 90% of 150% = 135% of the same-size rectangle). Treated as a second,
+ * independent axis of "which board to generate" alongside shape mode — see
+ * `chooseBlitzBoard` — rather than the fixed size/shape threshold this
+ * feature used before: the old approach *always* locked a board above the
+ * threshold, so a run this deep would never show an unlocked board of that
+ * difficulty again. Choosing shape and lock-status together, uniformly among
+ * whatever's eligible, is what makes both a locked and an unlocked board of
+ * the same difficulty stay in the running side by side — since 0.9x is close
+ * to 1x, at high difficulties roughly half of the eligible (shape,
+ * lock-status) combinations are locked and half aren't, so a player keeps
+ * seeing both about equally often instead of the run permanently switching
+ * over.
+ */
+export const LOCKED_EDGE_DIFFICULTY_MULTIPLIER = 0.9;
+
+/**
  * A board's raw edge count for difficulty purposes: `4 * m * n`, the total
  * number of cells (and so, since a Hamiltonian cycle has exactly one edge
  * per cell, the total number of *solution* edges too) for the given size
@@ -105,9 +128,20 @@ export function boardEdgeCount(sizeKey: string): number {
   return 4 * m * n;
 }
 
-/** A size/shape combination's first-pass difficulty rating: its raw edge count times `SHAPE_DIFFICULTY_MULTIPLIER`. Easy to redefine later (e.g. to also weight distractor density) without touching `chooseBlitzBoard`/`createBlitzSequence`, which only ever compare ratings, never assume how they're computed. */
-export function boardDifficultyRating(sizeKey: string, shapeMode: ShapeMode): number {
-  return boardEdgeCount(sizeKey) * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
+/**
+ * A size/shape combination's first-pass difficulty rating: its raw edge
+ * count times `SHAPE_DIFFICULTY_MULTIPLIER`, further scaled by
+ * `LOCKED_EDGE_DIFFICULTY_MULTIPLIER` when `hasLockedEdges` is true. Easy to
+ * redefine later (e.g. to also weight distractor density) without touching
+ * `chooseBlitzBoard`/`createBlitzSequence`, which only ever compare ratings,
+ * never assume how they're computed. `hasLockedEdges` defaults to `false` so
+ * every caller that only ever cared about shape (the budget-unit math below,
+ * and any external caller from before the locked-edge dimension existed)
+ * keeps getting the plain shape-only rating unchanged.
+ */
+export function boardDifficultyRating(sizeKey: string, shapeMode: ShapeMode, hasLockedEdges = false): number {
+  const rating = boardEdgeCount(sizeKey) * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
+  return hasLockedEdges ? rating * LOCKED_EDGE_DIFFICULTY_MULTIPLIER : rating;
 }
 
 /** Every selectable shape mode Blitz is willing to ever generate — klein/projective stay excluded exactly as they are from New Game's picker (see CLAUDE.md's "Board shapes and topologies"). */
@@ -122,9 +156,10 @@ const SELECTABLE_BLITZ_SHAPES: readonly ShapeMode[] = SELECTABLE_SHAPE_MODE_OPTI
 const MIN_BLITZ_BLOCK_DIM = 2;
 const MIN_BLITZ_BOARD_AREA = MIN_BLITZ_BLOCK_DIM * MIN_BLITZ_BLOCK_DIM;
 
-/** A shape mode's own cheapest possible rating — even the smallest board Blitz ever generates (`MIN_BLITZ_BOARD_AREA` blocks) still costs this much of the difficulty budget. `eligibleBlitzShapes` gates on this instead of any one fixed size, now that board size is chosen continuously rather than looked up from a table. */
-function minBlitzRating(shapeMode: ShapeMode): number {
-  return 4 * MIN_BLITZ_BOARD_AREA * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
+/** A (shape, locked-edges) combination's own cheapest possible rating — even the smallest board Blitz ever generates (`MIN_BLITZ_BOARD_AREA` blocks) still costs this much of the difficulty budget. `eligibleBlitzOptions` gates on this instead of any one fixed size, now that board size is chosen continuously rather than looked up from a table. */
+function minBlitzRating(shapeMode: ShapeMode, hasLockedEdges: boolean): number {
+  const rating = 4 * MIN_BLITZ_BOARD_AREA * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
+  return hasLockedEdges ? rating * LOCKED_EDGE_DIFFICULTY_MULTIPLIER : rating;
 }
 
 /**
@@ -161,9 +196,35 @@ export const BLITZ_BUDGET_INCREMENT = BLITZ_BUDGET_UNIT;
  */
 export const BLITZ_INITIAL_BUDGET = BLITZ_BUDGET_UNIT * 2;
 
-/** Every shape mode whose cheapest possible board still fits within the current difficulty budget — the continuous-size analogue of the old fixed-size-table `eligibleBlitzOptions`, gating only on shape now that dimensions are chosen separately (see `chooseBlitzBoard`). Always non-empty: the budget only ever grows from `BLITZ_INITIAL_BUDGET`, which already clears every shape's minimum rating. */
-export function eligibleBlitzShapes(budget: number): readonly ShapeMode[] {
-  return SELECTABLE_BLITZ_SHAPES.filter((shape) => minBlitzRating(shape) <= budget);
+/**
+ * One concrete "kind" of board `chooseBlitzBoard` can choose to generate:
+ * a shape mode, crossed with whether it starts with a few solution edges
+ * locked (see `LOCKED_EDGE_DIFFICULTY_MULTIPLIER`'s doc comment for why
+ * locking is a second selection axis rather than a fixed threshold).
+ */
+export interface BlitzBoardOption {
+  shapeMode: ShapeMode;
+  hasLockedEdges: boolean;
+}
+
+/**
+ * Every (shape, locked-edges) combination whose cheapest possible board
+ * still fits within the current difficulty budget — the continuous-size
+ * analogue of the old fixed-size-table lookup, gating only on shape and
+ * lock-status now that dimensions themselves are chosen separately (see
+ * `chooseBlitzBoard`). Always non-empty: the budget only ever grows from
+ * `BLITZ_INITIAL_BUDGET`, which already clears every shape's unlocked
+ * minimum rating (and so, since locking only ever makes a board *cheaper*,
+ * its locked minimum too).
+ */
+export function eligibleBlitzOptions(budget: number): readonly BlitzBoardOption[] {
+  const options: BlitzBoardOption[] = [];
+  for (const shapeMode of SELECTABLE_BLITZ_SHAPES) {
+    for (const hasLockedEdges of [false, true]) {
+      if (minBlitzRating(shapeMode, hasLockedEdges) <= budget) options.push({ shapeMode, hasLockedEdges });
+    }
+  }
+  return options;
 }
 
 /**
@@ -200,11 +261,16 @@ const MAX_ASPECT_RATIO = Math.max(...SIZE_OPTIONS.map((s) => Math.max(s.m, s.n) 
 const MAX_BLITZ_BOARD_AREA = 14 * 20;
 
 /**
- * Picks a board's shape and block dimensions for the current difficulty
- * budget — the continuous-size replacement for the old fixed-size-table
- * lookup (see CLAUDE.md's "Blitz mode"). Shape is chosen uniformly among
- * whatever's affordable at all (`eligibleBlitzShapes`); a random target
- * difficulty *for that shape* is then rolled somewhere between its own
+ * Picks a board's shape, block dimensions, and locked-edges setting for the
+ * current difficulty budget — the continuous-size replacement for the old
+ * fixed-size-table lookup (see CLAUDE.md's "Blitz mode"). The (shape,
+ * locked-edges) combination is chosen uniformly among whatever's affordable
+ * at all (`eligibleBlitzOptions`) — treating "does this board start locked"
+ * as just another value alongside shape mode, rather than a separate
+ * threshold gate, is what lets both a locked and an unlocked board of the
+ * same difficulty stay available side by side (see
+ * `LOCKED_EDGE_DIFFICULTY_MULTIPLIER`'s doc comment). A random target
+ * difficulty *for that combination* is then rolled somewhere between its own
  * cheapest possible board and the full budget ("choose a random difficulty
  * up to the present budget"), capped at `MAX_BLITZ_BOARD_AREA` so an
  * extremely large budget still tops out at a sane board size — which sets
@@ -217,13 +283,15 @@ const MAX_BLITZ_BOARD_AREA = 14 * 20;
  * `budget` either — and then explicitly re-clamped to the aspect-ratio cap
  * in case rounding still pushed it over. Which of the two dimensions ends
  * up wider is randomly swapped, so boards aren't always elongated in the
- * same direction.
+ * same direction. The returned `lockedEdgeFraction` is exactly
+ * `puzzleGen.ts`'s `LOCKED_EDGE_FRACTION` when `hasLockedEdges` was chosen,
+ * `undefined` otherwise — ready to drop straight into a `PuzzleId`.
  */
-export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMode; m: number; n: number } {
-  const eligible = eligibleBlitzShapes(budget);
-  const shapeMode = eligible[Math.floor(rng() * eligible.length)];
-  const multiplier = SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
-  const minRating = minBlitzRating(shapeMode);
+export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMode; m: number; n: number; lockedEdgeFraction?: number } {
+  const eligible = eligibleBlitzOptions(budget);
+  const { shapeMode, hasLockedEdges } = eligible[Math.floor(rng() * eligible.length)];
+  const multiplier = SHAPE_DIFFICULTY_MULTIPLIER[shapeMode] * (hasLockedEdges ? LOCKED_EDGE_DIFFICULTY_MULTIPLIER : 1);
+  const minRating = minBlitzRating(shapeMode, hasLockedEdges);
   const targetRating = minRating + rng() * Math.max(0, budget - minRating);
   const targetArea = Math.min(MAX_BLITZ_BOARD_AREA, targetRating / (4 * multiplier));
   const ratio = MIN_ASPECT_RATIO + rng() * (MAX_ASPECT_RATIO - MIN_ASPECT_RATIO);
@@ -231,34 +299,7 @@ export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMo
   let long = Math.max(MIN_BLITZ_BLOCK_DIM, Math.floor(targetArea / short));
   long = Math.min(long, Math.floor(short * MAX_ASPECT_RATIO));
   const [m, n] = rng() < 0.5 ? [short, long] : [long, short];
-  return { shapeMode, m, n };
-}
-
-/**
- * Difficulty rating above which Blitz starts locking a small portion of
- * each puzzle's solution edges too (see `puzzleGen.ts`'s
- * `PuzzleId.lockedEdgeFraction` and `game/edgeLock.ts`'s `lockEdge`) —
- * CLAUDE.md's spec: "once the difficulty level gets higher than that of
- * boards that are about 10x10 after doubling", i.e. a plain rectangular
- * board of 5x5 blocks (`boardDifficultyRating`'s rect multiplier is 1x, so
- * this is also that board's raw edge count). Boards below this threshold
- * play exactly as they did before this feature existed; once a run's
- * difficulty budget climbs past it, every puzzle handed out — regardless of
- * its own shape's multiplier — gets `LOCKED_EDGE_FRACTION` of its solution
- * edges locked.
- */
-export const LOCK_EDGES_DIFFICULTY_THRESHOLD = boardDifficultyRating(customSizeKey(5, 5), 'rect');
-
-/**
- * The locking decision for one board, as a pure function of the same
- * `sizeKey`/`shapeMode` a `BlitzEvent.puzzleStart` already records —
- * shared by `createBlitzSequence` (live play) and `main.ts`'s Blitz replay
- * (`applyBlitzReplayEvent`) so both agree without the recorded event needing
- * to carry the decision itself, matching every other `puzzleStart` field
- * (resolved data, not something replay re-derives via `createBlitzSequence`).
- */
-export function lockedEdgeFractionForBoard(sizeKey: string, shapeMode: ShapeMode): number | undefined {
-  return boardDifficultyRating(sizeKey, shapeMode) > LOCK_EDGES_DIFFICULTY_THRESHOLD ? LOCKED_EDGE_FRACTION : undefined;
+  return { shapeMode, m, n, lockedEdgeFraction: hasLockedEdges ? LOCKED_EDGE_FRACTION : undefined };
 }
 
 /**
@@ -280,18 +321,25 @@ export function lockedEdgeFractionForBoard(sizeKey: string, shapeMode: ShapeMode
  * replayed without needing to re-run this generator at all. Each puzzle's
  * dimensions are encoded into a synthetic `sizeKey` via `customSizeKey` (see
  * its doc comment) rather than needing a second, parallel dimensions field
- * on `PuzzleId`.
+ * on `PuzzleId`. `lockedEdgeFraction` comes straight from `chooseBlitzBoard`
+ * — since whether a board starts locked is now a per-puzzle random choice
+ * (see `LOCKED_EDGE_DIFFICULTY_MULTIPLIER`'s doc comment) rather than a
+ * deterministic function of `sizeKey`/`shapeMode` alone, it can't be
+ * re-derived from those two fields the way it used to be — `BlitzEvent.
+ * puzzleStart` carries its own `lockedEdgeFraction` explicitly for exactly
+ * this reason, so replay (`main.ts`'s `applyBlitzReplayEvent`) never needs
+ * to re-run this generator either.
  */
 export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
   const rng = mulberry32(runSeed);
   let budget = BLITZ_INITIAL_BUDGET;
   return {
     next(): PuzzleId {
-      const { shapeMode, m, n } = chooseBlitzBoard(rng, budget);
+      const { shapeMode, m, n, lockedEdgeFraction } = chooseBlitzBoard(rng, budget);
       const sizeKey = customSizeKey(m, n);
       const seed = Math.floor(rng() * 0x100000000);
       budget += BLITZ_BUDGET_INCREMENT;
-      return { sizeKey, shapeMode, seed, collections: NO_EDGE_COLLECTIONS, lockedEdgeFraction: lockedEdgeFractionForBoard(sizeKey, shapeMode) };
+      return { sizeKey, shapeMode, seed, collections: NO_EDGE_COLLECTIONS, lockedEdgeFraction };
     },
   };
 }
@@ -312,21 +360,30 @@ export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
  * (rather than just an index into `createBlitzSequence`'s output) so replay
  * never needs to re-run the sequence generator — it just regenerates that
  * exact `PuzzleId` via `generatePuzzle`, exactly like the ordinary
- * Replays/review feature already does for a single puzzle. It also carries
- * `timeAwardedMs`: the time-back bonus for *that* puzzle (proportional to
- * its own edge count, `timeBackPerEdgeSec * 1000 * totalCells(puzzle)`) is
- * credited to the clock the instant the puzzle appears, not when it's
- * solved — so `puzzleStart` is where the award lives now, and applying it
- * (live or in replay) means crediting the clock right away, before a single
- * move has been made on that puzzle. `move` reuses `PathOp` verbatim, same
- * compact shape `history.ts` already uses. There is no `jump`/undo entry:
- * Blitz play has no Undo/Redo (see CLAUDE.md), so every state transition
- * within a puzzle is a real forward move. `puzzleSolved` no longer carries
- * an award — solving a puzzle doesn't move the clock at all any more, it
- * only ever unblocks the next `puzzleStart`.
+ * Replays/review feature already does for a single puzzle. It likewise
+ * carries its own `lockedEdgeFraction` explicitly — since whether a board
+ * starts locked is now a random per-puzzle choice rather than a
+ * deterministic function of `sizeKey`/`shapeMode` (see
+ * `LOCKED_EDGE_DIFFICULTY_MULTIPLIER`'s doc comment), replay can't re-derive
+ * it from those two fields the way an earlier, threshold-based version of
+ * this feature could; a run recorded before this field existed simply
+ * regenerates unlocked on replay, the same "accept the loss" tradeoff
+ * CLAUDE.md's "Persistence (IndexedDB)" section already documents for other
+ * puzzle-identity-affecting fields. It also carries `timeAwardedMs`: the
+ * time-back bonus for *that* puzzle (proportional to its own edge count,
+ * `timeBackPerEdgeSec * 1000 * totalCells(puzzle)`) is credited to the clock
+ * the instant the puzzle appears, not when it's solved — so `puzzleStart` is
+ * where the award lives now, and applying it (live or in replay) means
+ * crediting the clock right away, before a single move has been made on
+ * that puzzle. `move` reuses `PathOp` verbatim, same compact shape
+ * `history.ts` already uses. There is no `jump`/undo entry: Blitz play has
+ * no Undo/Redo (see CLAUDE.md), so every state transition within a puzzle
+ * is a real forward move. `puzzleSolved` no longer carries an award —
+ * solving a puzzle doesn't move the clock at all any more, it only ever
+ * unblocks the next `puzzleStart`.
  */
 export type BlitzEvent =
-  | { kind: 'puzzleStart'; t: number; sizeKey: string; shapeMode: ShapeMode; seed: number; timeAwardedMs: number }
+  | { kind: 'puzzleStart'; t: number; sizeKey: string; shapeMode: ShapeMode; seed: number; lockedEdgeFraction?: number; timeAwardedMs: number }
   | { kind: 'move'; t: number; ops: PathOp[] }
   | { kind: 'puzzleSolved'; t: number }
   | { kind: 'runEnd'; t: number; scoreMs: number };

@@ -51,6 +51,27 @@ export function recordMove(history: HistoryState, prev: PathState, ops: PathOp[]
   return { undoStack, redoStack: [], moveLog: [...history.moveLog, { kind: 'ops', ops }] };
 }
 
+/**
+ * Records a "Hint me" edge lock (`edgeLock.ts`'s `lockEdge`, `main.ts`'s
+ * `hintMe`) into the move log for replay — but, unlike `recordMove`, clears
+ * both the undo *and* redo stacks instead of pushing onto the undo stack.
+ * A hint permanently excludes its edge (and merges its two regions) from
+ * ever being toggled again; if a later Undo restored a `pathState.edges`
+ * snapshot from before the hint, that edge's marked state would revert to
+ * "wrong" with no way to fix it via tapping any more (it's excluded from
+ * every region's boundary for good) — an unrecoverable state. Clearing both
+ * stacks instead makes a hint a clean checkpoint Undo can't reach past;
+ * ordinary moves made afterward build up a fresh, safe undo history exactly
+ * as usual. `ops` is a single synthetic `PathOp` (see `hintMe`'s doc
+ * comment) carrying whichever edges the hint's own toggle actually changed —
+ * always non-empty, since a hint only ever targets an edge that started
+ * incorrect, guaranteeing at least that one edge flips.
+ */
+export function recordHint(history: HistoryState, ops: PathOp[]): HistoryState {
+  if (ops.length === 0) return history;
+  return { undoStack: [], redoStack: [], moveLog: [...history.moveLog, { kind: 'ops', ops }] };
+}
+
 export interface HistoryStepResult {
   history: HistoryState;
   state: PathState;

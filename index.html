@@ -166,11 +166,6 @@
               -->
             </select>
           </label>
-          <label class="checkboxLabel">
-            <input type="checkbox" id="newGameLockEdgesCheckbox" />
-            Lock some solution edges (experimental)
-          </label>
-          <p class="fieldHint">Starts the game with a few of the correct loop's edges already marked and permanently fixed in place. Experimental: fixing an edge can pull in a few of its neighbors too, so the exact effect can vary.</p>
           <button class="menuBtn menuBtnPrimary" id="newGameStartBtn">Start</button>
         </div>
       </div>
@@ -264,6 +259,7 @@
           <div id="activeControls" class="controlGroup">
             <button class="secondary" id="undoBtn" disabled>Undo</button>
             <button class="secondary" id="redoBtn" disabled>Redo</button>
+            <button class="secondary" id="hintBtn" disabled title="Locks a random incorrect edge into its correct state">Hint me (beta)</button>
             <button class="secondary" id="giveUpBtn" disabled>Give Up</button>
           </div>
           <div id="completeControls" class="controlGroup hidden">

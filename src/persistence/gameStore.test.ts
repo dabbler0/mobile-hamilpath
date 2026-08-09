@@ -217,6 +217,23 @@ describe('completed games', () => {
     expect((await getCompleted(id))?.lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
   });
 
+  it('leaves hintedEdges undefined for a save that never used "Hint me"', async () => {
+    const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 0 };
+    await saveInProgress(id, ['0,0|1,0']);
+    expect((await getInProgress(id))?.hintedEdges).toBeUndefined();
+    await recordCompletion(id, ['0,0|1,0']);
+    expect((await getCompleted(id))?.hintedEdges).toBeUndefined();
+  });
+
+  it('round-trips hintedEdges, in order, on in-progress and completed records', async () => {
+    const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 0 };
+    const hinted = ['0,0|1,0', '1,0|2,0'];
+    await saveInProgress(id, ['0,0|1,0'], undefined, hinted);
+    expect((await getInProgress(id))?.hintedEdges).toEqual(hinted);
+    await recordCompletion(id, ['0,0|1,0'], undefined, hinted);
+    expect((await getCompleted(id))?.hintedEdges).toEqual(hinted);
+  });
+
   it('a resumed/reviewed locked puzzle regenerates the *exact same* puzzle graph, not just a puzzle with the field present', async () => {
     // The real severity of this bug: lockedEdgeFraction is folded into the
     // puzzle's hash (`puzzleGen.ts`'s `puzzleIdKey`/`puzzleSeed`), so a

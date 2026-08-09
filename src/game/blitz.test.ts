@@ -9,15 +9,14 @@ import {
   chooseBlitzBoard,
   createBlitzSequence,
   DEFAULT_BLITZ_PACE,
-  eligibleBlitzShapes,
-  LOCK_EDGES_DIFFICULTY_THRESHOLD,
-  lockedEdgeFractionForBoard,
+  eligibleBlitzOptions,
+  LOCKED_EDGE_DIFFICULTY_MULTIPLIER,
   paceForParams,
   SHAPE_DIFFICULTY_MULTIPLIER,
 } from './blitz';
 import { mulberry32 } from './rng';
 import { totalCells } from './puzzle';
-import { customSizeKey, generatePuzzle, LOCKED_EDGE_FRACTION, sizeOption, SIZE_OPTIONS, type ShapeMode } from './puzzleGen';
+import { generatePuzzle, LOCKED_EDGE_FRACTION, sizeOption, SIZE_OPTIONS, type ShapeMode } from './puzzleGen';
 
 describe('BLITZ_PACE_PARAMS', () => {
   it('matches the three specified pace presets exactly', () => {
@@ -93,36 +92,53 @@ describe('boardDifficultyRating', () => {
   });
 });
 
-describe('eligibleBlitzShapes', () => {
-  it('at the initial budget, allows every selectable shape (rect/random/toroidal)', () => {
-    const eligible = eligibleBlitzShapes(BLITZ_INITIAL_BUDGET);
-    expect([...eligible].sort()).toEqual(['random', 'rect', 'toroidal']);
+describe('eligibleBlitzOptions', () => {
+  it('at the initial budget, allows every selectable shape (rect/random/toroidal), locked and unlocked alike', () => {
+    const eligible = eligibleBlitzOptions(BLITZ_INITIAL_BUDGET);
+    const shapes = [...new Set(eligible.map((o) => o.shapeMode))];
+    expect(shapes.sort()).toEqual(['random', 'rect', 'toroidal']);
+    for (const shapeMode of shapes) {
+      expect(eligible).toContainEqual({ shapeMode, hasLockedEdges: false });
+      expect(eligible).toContainEqual({ shapeMode, hasLockedEdges: true });
+    }
   });
 
   it('never offers klein or projective (matching the New Game picker restriction)', () => {
-    const eligible = eligibleBlitzShapes(Number.MAX_SAFE_INTEGER);
-    expect(eligible).not.toContain('klein');
-    expect(eligible).not.toContain('projective');
+    const eligible = eligibleBlitzOptions(Number.MAX_SAFE_INTEGER);
+    const shapes = eligible.map((o) => o.shapeMode);
+    expect(shapes).not.toContain('klein');
+    expect(shapes).not.toContain('projective');
   });
 
-  it('grows monotonically: a strictly larger budget never loses a shape that was already eligible', () => {
-    const small = eligibleBlitzShapes(4);
-    const big = eligibleBlitzShapes(BLITZ_INITIAL_BUDGET);
-    for (const shape of small) expect(big).toContain(shape);
+  it('a locked variant is never *more* expensive than its unlocked counterpart, so it never lags it into eligibility', () => {
+    for (let budget = 0; budget <= BLITZ_INITIAL_BUDGET; budget += 5) {
+      const eligible = eligibleBlitzOptions(budget);
+      for (const shapeMode of ['rect', 'random', 'toroidal'] as const) {
+        const unlockedEligible = eligible.some((o) => o.shapeMode === shapeMode && !o.hasLockedEdges);
+        const lockedEligible = eligible.some((o) => o.shapeMode === shapeMode && o.hasLockedEdges);
+        if (unlockedEligible) expect(lockedEligible).toBe(true);
+      }
+    }
   });
 
-  it('is empty for a budget below every shape\'s cheapest possible rating', () => {
-    expect(eligibleBlitzShapes(0)).toEqual([]);
+  it('grows monotonically: a strictly larger budget never loses an option that was already eligible', () => {
+    const small = eligibleBlitzOptions(4);
+    const big = eligibleBlitzOptions(BLITZ_INITIAL_BUDGET);
+    for (const opt of small) expect(big).toContainEqual(opt);
+  });
+
+  it('is empty for a budget below every combination\'s cheapest possible rating', () => {
+    expect(eligibleBlitzOptions(0)).toEqual([]);
   });
 });
 
 describe('chooseBlitzBoard', () => {
-  it('never picks a board whose rating exceeds the given budget', () => {
+  it('never picks a board whose (shape- and lock-adjusted) rating exceeds the given budget', () => {
     const rng = mulberry32(456);
     for (let i = 0; i < 500; i++) {
       const budget = BLITZ_INITIAL_BUDGET + i * 11;
-      const { shapeMode, m, n } = chooseBlitzBoard(rng, budget);
-      const rating = 4 * m * n * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode];
+      const { shapeMode, m, n, lockedEdgeFraction } = chooseBlitzBoard(rng, budget);
+      const rating = 4 * m * n * SHAPE_DIFFICULTY_MULTIPLIER[shapeMode] * (lockedEdgeFraction !== undefined ? LOCKED_EDGE_DIFFICULTY_MULTIPLIER : 1);
       expect(rating).toBeLessThanOrEqual(budget);
     }
   });
@@ -165,23 +181,50 @@ describe('chooseBlitzBoard', () => {
       expect(shapeMode).not.toBe('projective');
     }
   });
+
+  it('produces both locked and unlocked boards at a comfortably high budget, roughly half the time each', () => {
+    const rng = mulberry32(999);
+    const n = 400;
+    let locked = 0;
+    for (let i = 0; i < n; i++) {
+      const { lockedEdgeFraction } = chooseBlitzBoard(rng, BLITZ_INITIAL_BUDGET * 6);
+      if (lockedEdgeFraction !== undefined) locked++;
+    }
+    expect(locked / n).toBeGreaterThan(0.35);
+    expect(locked / n).toBeLessThan(0.65);
+  });
+
+  it('a locked board\'s lockedEdgeFraction is always exactly LOCKED_EDGE_FRACTION', () => {
+    const rng = mulberry32(222);
+    let sawLocked = false;
+    for (let i = 0; i < 200; i++) {
+      const { lockedEdgeFraction } = chooseBlitzBoard(rng, BLITZ_INITIAL_BUDGET * 3);
+      if (lockedEdgeFraction !== undefined) {
+        expect(lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
+        sawLocked = true;
+      }
+    }
+    expect(sawLocked).toBe(true);
+  });
 });
 
-describe('LOCK_EDGES_DIFFICULTY_THRESHOLD / lockedEdgeFractionForBoard', () => {
-  it('is the difficulty rating of a plain rectangular 5x5-block (~10x10-after-doubling) board', () => {
-    expect(LOCK_EDGES_DIFFICULTY_THRESHOLD).toBe(boardDifficultyRating(customSizeKey(5, 5), 'rect'));
-    expect(LOCK_EDGES_DIFFICULTY_THRESHOLD).toBe(100);
+describe('LOCKED_EDGE_DIFFICULTY_MULTIPLIER', () => {
+  it('is 0.9 — a locked board rates 90% as difficult as the same board unlocked', () => {
+    expect(LOCKED_EDGE_DIFFICULTY_MULTIPLIER).toBe(0.9);
   });
 
-  it('locks nothing at or below the threshold, and exactly LOCKED_EDGE_FRACTION above it', () => {
-    expect(lockedEdgeFractionForBoard(customSizeKey(5, 5), 'rect')).toBeUndefined(); // exactly at threshold
-    expect(lockedEdgeFractionForBoard(customSizeKey(4, 4), 'rect')).toBeUndefined(); // rating 64
-    expect(lockedEdgeFractionForBoard(customSizeKey(6, 6), 'rect')).toBe(LOCKED_EDGE_FRACTION); // rating 144
+  it('scales boardDifficultyRating multiplicatively on top of the shape multiplier', () => {
+    for (const shapeMode of ['rect', 'random', 'toroidal'] as const) {
+      const unlocked = boardDifficultyRating('small', shapeMode);
+      const locked = boardDifficultyRating('small', shapeMode, true);
+      expect(locked).toBeCloseTo(unlocked * LOCKED_EDGE_DIFFICULTY_MULTIPLIER);
+    }
   });
 
-  it('accounts for the shape multiplier, not just raw board size', () => {
-    // Same raw edge count (100) as the threshold board, but toroidal's 1.5x multiplier pushes its rating over.
-    expect(lockedEdgeFractionForBoard(customSizeKey(5, 5), 'toroidal')).toBe(LOCKED_EDGE_FRACTION);
+  it('a locked toroidal board rates 90% of 150% (135%) of the same-size unlocked rectangle, per CLAUDE.md\'s spec', () => {
+    const rect = boardDifficultyRating('small', 'rect');
+    const lockedToroidal = boardDifficultyRating('small', 'toroidal', true);
+    expect(lockedToroidal).toBeCloseTo(rect * 1.5 * 0.9);
   });
 });
 
@@ -205,7 +248,7 @@ describe('createBlitzSequence', () => {
   it('starts within the initial budget and never generates edge collections', () => {
     const seq = createBlitzSequence(999);
     const first = seq.next();
-    expect(boardDifficultyRating(first.sizeKey, first.shapeMode)).toBeLessThanOrEqual(BLITZ_INITIAL_BUDGET);
+    expect(boardDifficultyRating(first.sizeKey, first.shapeMode, Boolean(first.lockedEdgeFraction))).toBeLessThanOrEqual(BLITZ_INITIAL_BUDGET);
     expect(first.collections).toEqual({ maxCollections: 0, minSize: 2, maxSize: 4 });
   });
 
@@ -249,24 +292,40 @@ describe('createBlitzSequence', () => {
     let budget = BLITZ_INITIAL_BUDGET;
     for (let i = 0; i < 200; i++) {
       const id = seq.next();
-      expect(boardDifficultyRating(id.sizeKey, id.shapeMode)).toBeLessThanOrEqual(budget);
+      expect(boardDifficultyRating(id.sizeKey, id.shapeMode, Boolean(id.lockedEdgeFraction))).toBeLessThanOrEqual(budget);
       budget += BLITZ_BUDGET_INCREMENT;
     }
   });
 
-  it('only sets lockedEdgeFraction on puzzles above LOCK_EDGES_DIFFICULTY_THRESHOLD, and eventually does so as difficulty climbs', () => {
+  it('produces both locked and unlocked puzzles over a long run, every locked one at exactly LOCKED_EDGE_FRACTION', () => {
     const seq = createBlitzSequence(77);
     let sawLocked = false;
+    let sawUnlocked = false;
     for (let i = 0; i < 300; i++) {
       const id = seq.next();
-      const rating = boardDifficultyRating(id.sizeKey, id.shapeMode);
-      if (rating > LOCK_EDGES_DIFFICULTY_THRESHOLD) {
+      if (id.lockedEdgeFraction !== undefined) {
         expect(id.lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
         sawLocked = true;
       } else {
-        expect(id.lockedEdgeFraction).toBeUndefined();
+        sawUnlocked = true;
       }
     }
     expect(sawLocked).toBe(true);
+    expect(sawUnlocked).toBe(true);
+  });
+
+  it('locks roughly half of puzzles once the budget comfortably clears every (shape, lock) combination\'s minimum rating', () => {
+    const seq = createBlitzSequence(4321);
+    // Burn through enough puzzles that the budget grows well past the point
+    // every shape's locked *and* unlocked variant is eligible (see
+    // `eligibleBlitzOptions`) before sampling.
+    for (let i = 0; i < 60; i++) seq.next();
+    const n = 300;
+    let locked = 0;
+    for (let i = 0; i < n; i++) {
+      if (seq.next().lockedEdgeFraction !== undefined) locked++;
+    }
+    expect(locked / n).toBeGreaterThan(0.35);
+    expect(locked / n).toBeLessThan(0.65);
   });
 });
