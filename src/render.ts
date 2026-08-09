@@ -212,12 +212,50 @@ function collectionColor(id: number): string {
   return COLLECTION_COLORS[id % COLLECTION_COLORS.length];
 }
 
+/** Converts an `h` (degrees, any real number — wrapped mod 360)/`s`/`l` (both `0..1`) color to a `#rrggbb` string, so `segmentColor` below can hand back the same hex-string shape every other color in this file uses. */
+function hslToHex(h: number, s: number, l: number): string {
+  const hue = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const hp = hue / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  let r1: number, g1: number, b1: number;
+  if (hp < 1) [r1, g1, b1] = [c, x, 0];
+  else if (hp < 2) [r1, g1, b1] = [x, c, 0];
+  else if (hp < 3) [r1, g1, b1] = [0, c, x];
+  else if (hp < 4) [r1, g1, b1] = [0, x, c];
+  else if (hp < 5) [r1, g1, b1] = [x, 0, c];
+  else [r1, g1, b1] = [c, 0, x];
+  const m = l - c / 2;
+  const toHex = (v: number) => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return `#${toHex(r1)}${toHex(g1)}${toHex(b1)}`;
+}
+
+/** Hue (degrees) of `COLORS.markedWon`, derived from its actual RGB rather than a hand-copied number, so the exclusion band `segmentColor` steers clear of below always tracks whatever that color actually is. */
+function hueOf(hex: string): number {
+  const [r, g, b] = hexToRgb(hex).map((v) => v / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const delta = max - min;
+  if (delta === 0) return 0;
+  let h: number;
+  if (max === r) h = ((g - b) / delta) % 6;
+  else if (max === g) h = (b - r) / delta + 2;
+  else h = (r - g) / delta + 4;
+  h *= 60;
+  return h < 0 ? h + 360 : h;
+}
+const WON_HUE = hueOf(COLORS.markedWon);
+/** Half-width, in degrees, of the hue band kept clear on either side of `WON_HUE` — wide enough that no procedurally-generated component color reads as "basically the victory green" while a puzzle is still in progress. */
+const WON_HUE_EXCLUSION = 30;
+/** Fractional part of the golden ratio — an irrational step, so `frac(i * GOLDEN_RATIO_CONJUGATE)` never lands on the same value twice for distinct integer `i` (up to floating-point precision) and spreads new values evenly between whatever's already been used, rather than needing to know in advance how many colors will ever be requested. Same "golden angle" trick used to scatter points/hues with maximal, ever-increasing coverage. */
+const GOLDEN_RATIO_CONJUGATE = 0.6180339887498949;
+const SEGMENT_SATURATION = 0.68;
+const SEGMENT_LIGHTNESS = 0.58;
+
 /**
  * One color per connected component of marked edges, so it's easy to tell
  * how many separate segments/cycles are on the board and which edges belong
- * to which — a categorical palette (CVD- and contrast-validated against
- * `COLORS.background`), cycling if there are ever more segments than colors.
- * The *index* passed in here is a persistent color assignment from
+ * to which. The *index* passed in here is a persistent color assignment from
  * `game/componentColors.ts`, not the raw, iteration-order id
  * `edgeComponents.ts`'s `computeEdgeComponents` returns — a component keeps
  * showing the same color across edits (merges resolve to the lower-index
@@ -225,12 +263,30 @@ function collectionColor(id: number): string {
  * shifting everything after it down) instead of an arbitrary color swap
  * whenever some unrelated component's numbering happens to shift. See
  * `componentColors.ts`'s doc comment for the full assignment rules.
+ *
+ * Colors are generated procedurally rather than picked from a fixed
+ * palette (an earlier version of this game cycled through eight hand-picked
+ * `SEGMENT_COLORS`, which meant a board with a ninth live component reused
+ * color #0 and became visually indistinguishable from it) — every distinct
+ * `component` index gets a hue found by walking the golden-angle sequence
+ * above, so two components are never colored alike no matter how many are
+ * ever on screen at once, without needing an upper bound baked in anywhere.
+ * The hue walk's range excludes a band around `WON_HUE` (the "solved" green
+ * — see `COLORS.markedWon`) so an in-progress segment is never mistakable,
+ * even briefly, for the fully-solved color: the walk covers only the
+ * `360 - 2 * WON_HUE_EXCLUSION` degrees *outside* that band, mapped back
+ * onto the real hue circle starting right past the band's far edge.
+ * Saturation/lightness are held constant (rather than also varied
+ * procedurally) so every generated color stays similarly legible against
+ * `COLORS.background`, matching the readability the old hand-picked palette
+ * was tuned for.
  */
-const SEGMENT_COLORS = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
-
-/** Exported so `main.ts` can freeze the same color a component was showing at the moment an animation starts (a shrinking edge's last color, a pulse's `fromColor`) — see its "Animations" section. */
 export function segmentColor(component: number): string {
-  return SEGMENT_COLORS[component % SEGMENT_COLORS.length];
+  const available = 360 - 2 * WON_HUE_EXCLUSION;
+  const arcStart = WON_HUE + WON_HUE_EXCLUSION; // the far edge of the excluded band, where the walkable arc begins
+  const frac = (component * GOLDEN_RATIO_CONJUGATE) % 1;
+  const hue = arcStart + frac * available;
+  return hslToHex(hue, SEGMENT_SATURATION, SEGMENT_LIGHTNESS);
 }
 
 /**
