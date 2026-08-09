@@ -171,6 +171,34 @@ body {
   border-radius: 6px;
 }
 
+/* Settings screen's volume slider — reuses `.newGameForm`'s label/button
+   layout, just with a range input + a live percentage readout sharing one
+   row instead of a plain select/number field. */
+.volumeLabel {
+  width: min(280px, 80vw);
+}
+.volumeRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.volumeRow input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: #4f7cff;
+}
+#sfxVolumeReadout {
+  min-width: 3em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #c8c8d0;
+}
+#settingsScreen .menuContent .menuBtn,
+#settingsScreen .menuContent .secondary {
+  width: min(280px, 80vw);
+}
+
 /* ---- Game screen ---- */
 header {
   padding: 10px 14px 6px;

@@ -1,3 +1,4 @@
+import { playSfx, setSfxVolume } from './audio/sfx';
 import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
@@ -14,6 +15,7 @@ import { startMenuBackground } from './menuBackground';
 import { deleteBlitzRun, deleteBlitzRunsForParams, listBlitzDifficulties, listBlitzRunsForParams, saveBlitzRun, type BlitzDifficultySummary, type BlitzRunRecord } from './persistence/blitzStore';
 import { clearInProgress, deleteCompleted, getCompleted, listCompleted, listInProgress, puzzleIdOf, recordCompletion, saveInProgress, type CompletedRecord, type InProgressRecord } from './persistence/gameStore';
 import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
+import { loadSfxVolume, saveSfxVolume } from './settings';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -44,13 +46,20 @@ function byId<T extends HTMLElement>(id: string): T {
 // runs each screen's enter/leave side effects (starting/stopping the main
 // menu's animated background, refreshing the Resume/Replays lists, halting
 // the live game's animation loop when it's no longer on screen).
-type Screen = 'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' | 'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' | 'blitzGameOver';
+type Screen = 'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' | 'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' | 'blitzGameOver' | 'settings';
 let screen: Screen = 'mainMenu';
 
 const mainMenuScreenEl = byId<HTMLDivElement>('mainMenuScreen');
 const menuCanvas = byId<HTMLCanvasElement>('menuCanvas');
 const freePlayEntryBtn = byId<HTMLButtonElement>('freePlayEntryBtn');
 const blitzEntryBtn = byId<HTMLButtonElement>('blitzEntryBtn');
+const settingsEntryBtn = byId<HTMLButtonElement>('settingsEntryBtn');
+
+const settingsScreenEl = byId<HTMLDivElement>('settingsScreen');
+const settingsBackBtn = byId<HTMLButtonElement>('settingsBackBtn');
+const sfxVolumeSlider = byId<HTMLInputElement>('sfxVolumeSlider');
+const sfxVolumeReadout = byId<HTMLSpanElement>('sfxVolumeReadout');
+const sfxVolumePreviewBtn = byId<HTMLButtonElement>('sfxVolumePreviewBtn');
 
 const freePlayMenuScreenEl = byId<HTMLDivElement>('freePlayMenuScreen');
 const freePlayBackBtn = byId<HTMLButtonElement>('freePlayBackBtn');
@@ -426,7 +435,19 @@ function scheduleToggleAnimation(colorState: ComponentColorState, prevEdges: Rea
     pulsingEdges.set(edge, { start: now, delay, fromColor: segmentColor(prevColors.get(edge)!) });
   }
 
+  // `rippleEdges` is exactly "which edges just recolored" (see above) —
+  // the chime plays once per toggle that actually caused one, not once per
+  // recolored edge, since a single merge/split reads as one event even when
+  // it recolors a whole component's worth of edges at once. Fires for both
+  // a live toggle and a replayed one (every call site above funnels through
+  // here), since the ripple itself already plays either way. The win case
+  // is deliberately excluded: every remaining edge "recoloring" to the flat
+  // solved color on a win isn't a component color *change* in the same
+  // sense — that gets its own distinct win sound below instead.
+  if (!justWon && rippleEdges.length > 0) playSfx('componentColorChange');
+
   if (justWon) {
+    playSfx('win');
     const farthest = computeFarthestCell(nextEdges, toggledEdges);
     pendingCometStart = farthest ? { cell: farthest.cell, edgesRef: nextEdges, at: now + farthest.distance * RIPPLE_STAGGER_MS + PULSE_MS } : null;
   }
@@ -675,8 +696,19 @@ function setFreePlayPathState(next: PathState, ops: PathOp[]): void {
   persistLiveState();
 }
 
-/** The single `GameInputHost`/`KeyboardInputHost` edit funnel, routed by `mode` — Free Play's own history/persistence (`setFreePlayPathState`) or a live Blitz run's move recording + puzzle-solved handling (`setBlitzPathState`, defined in the Blitz section below). */
+/**
+ * The single `GameInputHost`/`KeyboardInputHost` edit funnel, routed by
+ * `mode` — Free Play's own history/persistence (`setFreePlayPathState`) or a
+ * live Blitz run's move recording + puzzle-solved handling
+ * (`setBlitzPathState`, defined in the Blitz section below). Every call here
+ * represents one real tap/keypress toggling a region (`input.ts`/
+ * `keyboard.ts` are the only callers), so this is also the one place that
+ * plays the region-toggle click — deliberately *not* played from inside
+ * `scheduleToggleAnimation`, which is shared with replay's simulated
+ * toggles (see its own sfx hooks) and shouldn't re-click for those.
+ */
 function setPathState(next: PathState, ops: PathOp[]): void {
+  playSfx('regionToggle');
   if (mode === 'blitz') {
     setBlitzPathState(next, ops);
     return;
@@ -914,7 +946,7 @@ function renderListItem(title: string, dateText: string, onOpen: () => void, onD
   const chevron = document.createElement('span');
   chevron.textContent = '›';
   main.append(info, chevron);
-  main.addEventListener('click', onOpen);
+  main.addEventListener('click', navClick(onOpen));
 
   const del = document.createElement('button');
   del.className = 'listItemDelete';
@@ -1575,7 +1607,16 @@ function advanceBlitzReplayTo(target: number, animate: boolean): void {
       applyBlitzReplayEvent(ev);
     }
     if (ev.kind === 'puzzleStart') showToast(`+${(ev.timeAwardedMs / 1000).toFixed(1)}s for this puzzle`);
-    if (ev.kind === 'puzzleSolved') showToast('Solved!');
+    if (ev.kind === 'puzzleSolved') {
+      showToast('Solved!');
+      // The per-move `scheduleToggleAnimation` call above always passes
+      // `justWon: false` (a Blitz run's real win detection is this separate
+      // `puzzleSolved` event, not derived from the move's own `PathState`
+      // transition — see `BlitzEvent`'s doc comment), so the win sound
+      // needs its own trigger here to match what a live Blitz run's
+      // `setBlitzPathState` already plays on every solve.
+      playSfx('win');
+    }
     blitzReplayEventCursor++;
   }
   blitzReplayT = target;
@@ -1672,9 +1713,10 @@ function closeBlitzReplay(): void {
  * its two fixed-layout screens (`blitzMenu`, `blitzSetup`, plus the
  * game-over screen) opt in, its variable-length leaderboard lists
  * (`blitzLeaderboard`, `blitzLeaderboardRuns`) don't — same reasoning as
- * Resume/Replays.
+ * Resume/Replays. Settings is fixed-layout too (a single slider + a preview
+ * button, same shape as New Game's form), so it opts in as well.
  */
-const BACKGROUND_SCREENS: readonly Screen[] = ['mainMenu', 'freePlay', 'newGame', 'blitzMenu', 'blitzSetup', 'blitzGameOver'];
+const BACKGROUND_SCREENS: readonly Screen[] = ['mainMenu', 'freePlay', 'newGame', 'blitzMenu', 'blitzSetup', 'blitzGameOver', 'settings'];
 
 /**
  * Hides every screen but `next` and runs each screen's enter/leave side
@@ -1724,6 +1766,7 @@ function showScreen(next: Screen): void {
   blitzLeaderboardScreenEl.classList.toggle('hidden', next !== 'blitzLeaderboard');
   blitzLeaderboardRunsScreenEl.classList.toggle('hidden', next !== 'blitzLeaderboardRuns');
   blitzGameOverScreenEl.classList.toggle('hidden', next !== 'blitzGameOver');
+  settingsScreenEl.classList.toggle('hidden', next !== 'settings');
   gameScreenEl.classList.toggle('hidden', next !== 'game');
 
   if (nextIsBackgroundScreen && !stopMenuBackground) stopMenuBackground = startMenuBackground(menuCanvas);
@@ -1738,36 +1781,63 @@ function exitGame(): void {
   showScreen('freePlay');
 }
 
-freePlayEntryBtn.addEventListener('click', () => showScreen('freePlay'));
-blitzEntryBtn.addEventListener('click', () => showScreen('blitzMenu'));
-freePlayBackBtn.addEventListener('click', () => showScreen('mainMenu'));
-newGameEntryBtn.addEventListener('click', () => showScreen('newGame'));
-resumeEntryBtn.addEventListener('click', () => showScreen('resume'));
-replaysEntryBtn.addEventListener('click', () => showScreen('replays'));
-newGameBackBtn.addEventListener('click', () => showScreen('freePlay'));
-resumeBackBtn.addEventListener('click', () => showScreen('freePlay'));
-replaysBackBtn.addEventListener('click', () => showScreen('freePlay'));
-newGameStartBtn.addEventListener('click', () => {
-  startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode);
-});
+/**
+ * Wraps a click handler that navigates somewhere (a plain screen swap,
+ * starting a fresh puzzle/run, entering or leaving review/replay) with the
+ * shared menu-nav sound (`SfxRole` `'menuNav'` — see `audio/sfx.ts`).
+ * Deliberately *not* applied to every button: Undo/Redo/Give Up, a list
+ * row's Delete, and playback play/pause/scrub controls all act in place
+ * without navigating anywhere, so they stay silent for now (easy to opt in
+ * later, per-button, without touching this helper).
+ */
+function navClick(action: () => void): () => void {
+  return () => {
+    playSfx('menuNav');
+    action();
+  };
+}
 
-blitzMenuBackBtn.addEventListener('click', () => showScreen('mainMenu'));
-blitzPlayEntryBtn.addEventListener('click', () => showScreen('blitzSetup'));
-blitzLeaderboardEntryBtn.addEventListener('click', () => showScreen('blitzLeaderboard'));
-blitzSetupBackBtn.addEventListener('click', () => showScreen('blitzMenu'));
-blitzLeaderboardBackBtn.addEventListener('click', () => showScreen('blitzMenu'));
-blitzLeaderboardRunsBackBtn.addEventListener('click', () => showScreen('blitzLeaderboard'));
-blitzStartBtn.addEventListener('click', () => {
-  const pace = (blitzPaceSelect.value as BlitzPace) in BLITZ_PACE_PARAMS ? (blitzPaceSelect.value as BlitzPace) : DEFAULT_BLITZ_PACE;
-  startBlitzRun(BLITZ_PACE_PARAMS[pace]);
-});
-blitzExitBtn.addEventListener('click', forfeitBlitzRun);
-blitzPlayAgainBtn.addEventListener('click', () => startBlitzRun(blitzParams));
-blitzGameOverReplayBtn.addEventListener('click', () => {
-  if (blitzLastRecord) openBlitzReplay(blitzLastRecord, 'blitzGameOver');
-});
-blitzGameOverMenuBtn.addEventListener('click', () => showScreen('blitzMenu'));
-blitzReplayCloseBtn.addEventListener('click', closeBlitzReplay);
+freePlayEntryBtn.addEventListener('click', navClick(() => showScreen('freePlay')));
+blitzEntryBtn.addEventListener('click', navClick(() => showScreen('blitzMenu')));
+settingsEntryBtn.addEventListener('click', navClick(() => showScreen('settings')));
+settingsBackBtn.addEventListener('click', navClick(() => showScreen('mainMenu')));
+freePlayBackBtn.addEventListener('click', navClick(() => showScreen('mainMenu')));
+newGameEntryBtn.addEventListener('click', navClick(() => showScreen('newGame')));
+resumeEntryBtn.addEventListener('click', navClick(() => showScreen('resume')));
+replaysEntryBtn.addEventListener('click', navClick(() => showScreen('replays')));
+newGameBackBtn.addEventListener('click', navClick(() => showScreen('freePlay')));
+resumeBackBtn.addEventListener('click', navClick(() => showScreen('freePlay')));
+replaysBackBtn.addEventListener('click', navClick(() => showScreen('freePlay')));
+newGameStartBtn.addEventListener(
+  'click',
+  navClick(() => {
+    startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode);
+  }),
+);
+
+blitzMenuBackBtn.addEventListener('click', navClick(() => showScreen('mainMenu')));
+blitzPlayEntryBtn.addEventListener('click', navClick(() => showScreen('blitzSetup')));
+blitzLeaderboardEntryBtn.addEventListener('click', navClick(() => showScreen('blitzLeaderboard')));
+blitzSetupBackBtn.addEventListener('click', navClick(() => showScreen('blitzMenu')));
+blitzLeaderboardBackBtn.addEventListener('click', navClick(() => showScreen('blitzMenu')));
+blitzLeaderboardRunsBackBtn.addEventListener('click', navClick(() => showScreen('blitzLeaderboard')));
+blitzStartBtn.addEventListener(
+  'click',
+  navClick(() => {
+    const pace = (blitzPaceSelect.value as BlitzPace) in BLITZ_PACE_PARAMS ? (blitzPaceSelect.value as BlitzPace) : DEFAULT_BLITZ_PACE;
+    startBlitzRun(BLITZ_PACE_PARAMS[pace]);
+  }),
+);
+blitzExitBtn.addEventListener('click', navClick(forfeitBlitzRun));
+blitzPlayAgainBtn.addEventListener('click', navClick(() => startBlitzRun(blitzParams)));
+blitzGameOverReplayBtn.addEventListener(
+  'click',
+  navClick(() => {
+    if (blitzLastRecord) openBlitzReplay(blitzLastRecord, 'blitzGameOver');
+  }),
+);
+blitzGameOverMenuBtn.addEventListener('click', navClick(() => showScreen('blitzMenu')));
+blitzReplayCloseBtn.addEventListener('click', navClick(closeBlitzReplay));
 blitzReplayPlayPauseBtn.addEventListener('click', () => {
   if (blitzReplayPlaying) pauseBlitzReplay();
   else playBlitzReplay();
@@ -1780,17 +1850,20 @@ blitzReplaySpeedSelect.addEventListener('change', () => {
   blitzReplaySpeed = Number(blitzReplaySpeedSelect.value) || 1;
 });
 
-exitBtn.addEventListener('click', exitGame);
+exitBtn.addEventListener('click', navClick(exitGame));
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 giveUpBtn.addEventListener('click', revealSolution);
-rematchBtn.addEventListener('click', rematch);
-viewReplayBtn.addEventListener('click', () => {
-  void viewReplayFromGame();
-});
-replayBtn.addEventListener('click', startReplay);
-replayCloseBtn.addEventListener('click', closeReplay);
-byId('exitReviewBtn').addEventListener('click', exitReview);
+rematchBtn.addEventListener('click', navClick(rematch));
+viewReplayBtn.addEventListener(
+  'click',
+  navClick(() => {
+    void viewReplayFromGame();
+  }),
+);
+replayBtn.addEventListener('click', navClick(startReplay));
+replayCloseBtn.addEventListener('click', navClick(closeReplay));
+byId('exitReviewBtn').addEventListener('click', navClick(exitReview));
 replayPlayPauseBtn.addEventListener('click', () => {
   if (replayTimerId !== null) stopReplayTimer();
   else playReplay();
@@ -1867,5 +1940,27 @@ if (REPLAY_SPEED_OPTIONS.includes(lastReplaySpeed)) {
   replaySpeed = lastReplaySpeed;
   replaySpeedSelect.value = String(lastReplaySpeed);
 }
+
+// ---- Settings ----
+// Currently just sfx volume (`settings.ts`), applied live to `audio/sfx.ts`'s
+// shared gain node the instant the slider moves, and persisted only once the
+// player lets go (`change`, not `input`) — dragging shouldn't hammer
+// `localStorage` on every intermediate frame.
+function updateSfxVolumeReadout(volume: number): void {
+  sfxVolumeReadout.textContent = `${Math.round(volume * 100)}%`;
+}
+const initialSfxVolume = loadSfxVolume();
+setSfxVolume(initialSfxVolume);
+sfxVolumeSlider.value = String(Math.round(initialSfxVolume * 100));
+updateSfxVolumeReadout(initialSfxVolume);
+sfxVolumeSlider.addEventListener('input', () => {
+  const volume = Number(sfxVolumeSlider.value) / 100;
+  setSfxVolume(volume);
+  updateSfxVolumeReadout(volume);
+});
+sfxVolumeSlider.addEventListener('change', () => {
+  saveSfxVolume(Number(sfxVolumeSlider.value) / 100);
+});
+sfxVolumePreviewBtn.addEventListener('click', () => playSfx('menuNav'));
 
 showScreen('mainMenu');
