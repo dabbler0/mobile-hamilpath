@@ -6,7 +6,29 @@ export interface LockEdgeResult {
   puzzle: Puzzle;
   regionMap: RegionMap;
   state: PathState;
-  /** Every edge that just became interior to a merged region (see `regions.ts`'s `lockEdgeInRegionMap`) as a side effect of locking `edge` — a caller locking a whole batch of edges (`puzzleGen.ts`'s `applyLockedEdges`) needs to lock each of these too, or one of them being required for the solution would silently become impossible to ever mark. Always empty unless this lock happened to merge two distinct regions that shared more than one real edge between them. */
+  /**
+   * Every edge that just became interior to a merged region (see
+   * `regions.ts`'s `lockEdgeInRegionMap`) as a side effect of locking
+   * `edge` — reported for informational/verification purposes, not
+   * something every caller necessarily needs to act on: whenever step 1 of
+   * this function's own doc comment actually performs a toggle, a stranded
+   * edge was, by construction, on that same toggled region's boundary, so
+   * it gets flipped by the very same toggle too — whether that lands it in
+   * the *correct* final state depends on what state it was already in
+   * beforehand, which this function has no way to know for an edge other
+   * than the one it was actually asked to lock. `puzzleGen.ts`'s
+   * `applyLockedEdges` doesn't read this field at all; its own doc comment
+   * explains the specific structural reason its batch-of-solution-edges
+   * usage never needs to (verified by `puzzleGen.test.ts`'s "never strands
+   * a required solution edge" test) — that reasoning is particular to
+   * *that* usage pattern (virgin, from-empty-state, solution-edges-to-
+   * marked locking), not a general guarantee of `lockEdge` itself, so a
+   * different future caller (e.g. a live hint applied to an
+   * already-partially-solved board) should check this rather than assume
+   * the same thing holds for it. Always empty unless this lock happened to
+   * merge two distinct regions that shared more than one real edge between
+   * them.
+   */
   strandedEdges: EdgeKey[];
 }
 
@@ -44,10 +66,10 @@ export interface LockEdgeResult {
  *    `edge`'s two neighboring faces are permanently merged into one region
  *    and `edge` itself never appears in any region's boundary again (see
  *    `regions.ts`'s `isLocked`), so nothing going through `toggleRegion` can
- *    ever flip it a second time. Any *other* edge this merge stranded (see
- *    above) is reported back via `strandedEdges` rather than handled here —
- *    locking it too is the caller's decision (`puzzleGen.ts`'s
- *    `applyLockedEdges` always does, in a loop).
+ *    ever flip it a second time. Any *other* edge this merge stranded is
+ *    reported back via `strandedEdges` (see its own doc comment) — it was
+ *    touched by step 1's toggle too, so it may already be in whatever state
+ *    a caller wants it in, but that's not guaranteed in general.
  *
  * None of `puzzle`/`regionMap`/`state` are mutated in place — a fresh
  * `puzzle`/`regionMap`/`state` is returned, matching every other edit

@@ -361,11 +361,11 @@ export interface LockEdgeInRegionMapResult {
    * distinct regions. Such an edge is now permanently unreachable by any
    * tap (see `computeRegions`'s doc comment on why an interior edge must be
    * excluded from every boundary) without itself ever having been locked —
-   * a caller locking a whole batch of edges (`puzzleGen.ts`'s
-   * `applyLockedEdges`) needs to explicitly lock each of these too (to
-   * whichever state is actually correct for it), or a stranded edge that
-   * happens to be *required* for the solution would silently become
-   * impossible to ever mark.
+   * reported here for informational/verification purposes (`edgeLock.ts`'s
+   * `lockEdge` passes it straight through on its own result). Whether a
+   * stranded edge needs any further attention from a caller depends on the
+   * caller's own usage pattern, not on anything this function can determine
+   * — see `edgeLock.ts`'s `LockEdgeResult.strandedEdges` doc comment.
    */
   strandedEdges: EdgeKey[];
 }

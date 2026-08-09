@@ -710,52 +710,61 @@ fraction of one — `regions.test.ts`'s `lockEdgeInRegionMap` tests assert it
 produces the exact same partition a from-scratch `computeRegions` recompute
 would, on both hand-built and real generated puzzles.
 
-**Stranding, and why locking a batch has to be a worklist, not a plain
-loop**: merging two regions that share *more than one* real edge between
-them — routine once a puzzle has any real density of distractor edges, and
+**Stranding, and why `applyLockedEdges` doesn't need to chase it**: merging
+two regions that share *more than one* real edge between them — routine
+once a puzzle has any real density of distractor edges, and
 `lockEdgeInRegionMap`'s doc comment covers exactly this — leaves every
 edge but the one just locked permanently unreachable by any tap, without
 itself ever having been locked. `lockEdge` reports each of these back as
-`strandedEdges` on its result. A stranded edge is often a *different*
-solution-cycle edge (the hidden cycle can cross the same region boundary
-more than once, in different places) — if nothing locks it explicitly, a
-puzzle could ship with a required edge no combination of taps can ever
-reach, i.e. genuinely unsolvable. `puzzleGen.ts`'s `applyLockedEdges`
-handles this with a worklist: every stranded edge reported by a lock gets
-queued and explicitly locked too (to whichever state is actually correct
-for it — marked if it's a solution edge, unmarked/deleted if it's a
-distractor that got swept in), until the queue drains. Since a stranded
-edge is, by definition, already excluded from every region's boundary,
-`lockEdge` can't fix its mark state with a toggle at all in that case — it
-sets the edge directly instead, which is safe precisely because nothing
-else can ever touch it either, before or after. This cascade can lock more
-than the nominal fraction's worth of edges in an unlucky layout (a handful
-of regions sharing many solution-cycle crossings); that's an accepted cost
-of guaranteeing solvability, the same spirit as the collateral flipping a
-single lock already causes above. `puzzleGen.test.ts`'s "never strands a
-required solution edge" test (checking, across seeds/shapes, that every
-solution edge is either locked or still present in some region's boundary)
-and its "actually *reachable*" test (an exhaustive search over every
-combination of a small locked puzzle's region toggles, confirming the
-intended solution is a real reachable state and not just theoretically
-valid per `computeWin`) are what pin this down.
+`strandedEdges` on its result, purely as information (`LockEdgeResult`'s
+own doc comment). A stranded edge is often a *different* solution-cycle
+edge (the hidden cycle can cross the same region boundary more than once,
+in different places) — an earlier version of `applyLockedEdges` worried
+this could leave a required edge no combination of taps could ever reach,
+and handled it with a worklist that explicitly re-locked every stranded
+edge too.
+
+That worklist turned out to be unnecessary. A stranded edge, by
+construction, was *already on the boundary of whichever region the current
+lock's own toggle just flipped* — that's exactly why it became stranded —
+so that same toggle already flips the stranded edge too, at the same
+moment. Checked broadly (a sweep across five sizes, three shapes, and
+twenty seeds each — 300 puzzles, 6,876 stranded edges total): every single
+one ended up in exactly the state it needed to be in, with zero
+exceptions, whether it was a solution edge that needed marking or a
+distractor edge that needed to stay unmarked. `applyLockedEdges` is back to
+a plain loop over just its randomly-chosen candidates, locking exactly
+`Math.floor(solutionEdges.size * fraction)` of them — never more.
+`puzzleGen.test.ts`'s "never strands a required solution edge" test pins
+this down for every edge in the graph, not just the chosen candidates, and
+its "actually *reachable*" test (an exhaustive search over every
+combination of a small locked puzzle's region toggles) confirms the
+intended solution stays a genuinely reachable state, not just
+`computeWin`-valid in principle.
+
+This guarantee is specific to `applyLockedEdges`'s own usage pattern —
+locking a batch of solution edges to *marked*, sequentially, starting from
+a completely empty board — not a general property of `lockEdge` itself.
+`LockEdgeResult.strandedEdges`' doc comment is explicit about this: a
+different future caller (e.g. a live hint applied mid-game, to an
+already-partially-solved board with edges in arbitrary states) would need
+to re-derive whether the same reasoning holds for it, not assume it does.
 
 ### First use: pre-marking a few solution edges
 
 `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction` (default `0`, off) is a
 generation-time application of the capability above: `generatePuzzle`'s
-`applyLockedEdges` step starts from a random subset of the puzzle's own
-hidden solution edges — up to `LOCKED_EDGE_FRACTION` (0.05, "no more than
-5%" per this feature's spec) of them, `Math.floor`ed so that *initial*
-selection is never rounded over the cap — and locks each one to marked,
-via a fresh, separately-hashed rng stream (`` `${puzzleIdKey(id)}::lock` ``,
-the same "don't depend on how many calls generation itself happened to
-make" reasoning `generateSolutionEdges` already relies on for Give Up) so
-the selection doesn't depend on collections/density having consumed a
-different number of rng calls. As covered above, locking any of them can
-strand others, which also get locked as part of the same step — so the
-final `lockedEdges` count can end up somewhat above the nominal 5%; see
-"Stranding" above for why that's necessary rather than a bug.
+`applyLockedEdges` step picks a random subset of the puzzle's own hidden
+solution edges — exactly `Math.floor(solutionEdges.size *
+LOCKED_EDGE_FRACTION)` of them (0.05, "no more than 5%" per this feature's
+spec) — and locks each one to marked, via a fresh, separately-hashed rng
+stream (`` `${puzzleIdKey(id)}::lock` ``, the same "don't depend on how
+many calls generation itself happened to make" reasoning
+`generateSolutionEdges` already relies on for Give Up) so the selection
+doesn't depend on collections/density having consumed a different number of
+rng calls. As covered above ("Stranding"), locking any of them can strand
+others — but never needs to *separately* lock those too, so the final
+`lockedEdges` count always matches this initial selection exactly.
 `lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
 `puzzleIdKey`/`puzzleSeed` exactly like `collectionsKeySuffix` already does
 for edge collections — absent or `0` hashes byte-identically to a puzzle id

@@ -267,23 +267,22 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
  * `buildPuzzleForId` happened to consume, so the selection doesn't depend
  * on exactly how many rng calls generation itself made (which varies with
  * density/edge-collection rolls) — the same reasoning `generateSolutionEdges`
- * already relies on for Give Up. `Math.floor` (not `Math.round`) on the
- * count keeps the *initial* selection strictly at-or-under the requested
- * fraction, never over it — "no more than 5%" per this feature's spec.
+ * already relies on for Give Up. `Math.floor` (not `Math.round`) keeps the
+ * count strictly at-or-under the requested fraction, never over it — "no
+ * more than 5%" per this feature's spec — and exactly that many end up in
+ * `puzzle.lockedEdges`; this is a plain loop, not a worklist.
  *
- * Locking one edge can *strand* others (see `lockEdge`'s/`regions.ts`'s
+ * Locking one edge can *strand* others — see `lockEdge`'s/`regions.ts`'s
  * `lockEdgeInRegionMap`'s doc comments: merging two regions that share more
  * than one real edge between them leaves every edge but the one just locked
- * permanently unreachable by any tap, without itself ever being locked) —
- * this loop is a worklist, not a plain `for`, precisely so every stranded
- * edge also gets explicitly locked (to whichever state is actually correct
- * for it, from `solutionEdges`) before generation finishes. Without this, a
- * stranded edge that happens to be *required* for the solution would
- * silently make the puzzle unwinnable. This can end up locking more than
- * the nominal fraction's worth of edges in an unlucky layout (a handful of
- * regions sharing many solution-cycle crossings) — an accepted cost of
- * guaranteeing solvability, same spirit as the collateral flipping a single
- * lock already causes (see `edgeLock.ts`'s doc comment).
+ * permanently unreachable by any tap, without itself ever being locked —
+ * but a stranded edge never needs a *separate* fix here: it was, by
+ * construction, already on the boundary of whichever region just got
+ * toggled to fix the edge actually being locked, so that same toggle
+ * already marks/unmarks it correctly too (see `edgeLock.ts`'s doc comment
+ * for the full reasoning, and `puzzleGen.test.ts`'s "never strands a
+ * required solution edge" test, which checks this holds for every edge in
+ * the graph, not just the ones chosen as candidates).
  *
  * A locked-and-marked edge can never be marked by the player themselves
  * (it's excluded from every region's boundary from the moment it locks —
@@ -305,19 +304,11 @@ function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
   let lockedPuzzle = puzzle;
   let regionMap = computeRegions(lockedPuzzle);
   let state = createInitialPath();
-  const queue: EdgeKey[] = shuffledSolutionEdges.slice(0, count);
-  const queued = new Set<EdgeKey>(queue);
-  for (let i = 0; i < queue.length; i++) {
-    const edge = queue[i];
-    const result = lockEdge(lockedPuzzle, regionMap, state, edge, solutionEdges.has(edge));
+  for (const edge of shuffledSolutionEdges.slice(0, count)) {
+    const result = lockEdge(lockedPuzzle, regionMap, state, edge, true);
     lockedPuzzle = result.puzzle;
     regionMap = result.regionMap;
     state = result.state;
-    for (const stranded of result.strandedEdges) {
-      if (queued.has(stranded)) continue;
-      queued.add(stranded);
-      queue.push(stranded);
-    }
   }
   return { ...lockedPuzzle, initialEdges: [...state.edges] };
 }

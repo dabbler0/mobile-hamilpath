@@ -18,7 +18,7 @@ import {
 } from './puzzleGen';
 import { computeWin, createInitialPath, toggleRegion } from './pathEdit';
 import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
-import { computeRegions } from './regions';
+import { computeRegions, type EdgeKey } from './regions';
 
 describe('sizeOption', () => {
   it('finds every declared size by key', () => {
@@ -212,40 +212,37 @@ describe('locked edges in the puzzle id', () => {
     expect(puzzle.initialEdges).toBeUndefined();
   });
 
-  it('locks at least the nominal 5% of solution edges (marked), plus any edges the cascade had to sweep in, each correctly marked or unmarked', () => {
+  it('locks exactly floor(solutionEdges.size * fraction) solution edges, each starting marked', () => {
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
 
     expect(puzzle.lockedEdges).toBeDefined();
-    expect(puzzle.lockedEdges!.size).toBeGreaterThan(0);
-    // At least the nominal fraction's worth — but can legitimately exceed it:
-    // locking one edge can strand *other* edges (both faces of an unlocked
-    // edge merged into the same region — see `edgeLock.ts`'s
-    // `strandedEdges`), and every stranded edge gets explicitly locked too,
-    // so it doesn't silently become impossible to ever mark/unmark (see the
-    // "never strands a required solution edge" test below). A stranded edge
-    // isn't necessarily a solution edge itself — a distractor edge can get
-    // swept in this way too, correctly locked to *unmarked*.
-    const initialLockCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
-    expect(puzzle.lockedEdges!.size).toBeGreaterThanOrEqual(initialLockCount);
+    expect(puzzle.lockedEdges!.size).toBe(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
+    for (const ek of puzzle.lockedEdges!) expect(solutionEdges.has(ek)).toBe(true);
 
-    // Every locked edge starts marked iff it belongs to the intended
-    // solution — though `initialEdges` can legitimately contain a few
-    // *other* (unlocked) edges too: fixing one locked edge's mark state
-    // means toggling its whole region (the only edit primitive this game
-    // has — see `edgeLock.ts`), which can flip other, unrelated boundary
-    // edges in that region right along with it.
+    // Every locked edge starts marked, per this feature's spec — though
+    // `initialEdges` can legitimately contain a few *other* edges too: fixing
+    // one locked edge's mark state means toggling its whole region (the only
+    // edit primitive this game has — see `edgeLock.ts`), which can flip
+    // other, unrelated boundary edges in that region right along with it.
     const initialEdges = new Set(puzzle.initialEdges);
-    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
+    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(true);
   });
 
-  it('never strands a required (unlocked) solution edge: every one is either locked, or still reachable via some region', () => {
-    // The core correctness guarantee this feature depends on — see
-    // `edgeLock.ts`'s `strandedEdges` and `applyLockedEdges`'s cascading
-    // worklist. Checked across several seeds/shapes since the specific
-    // region layout (and so whether any stranding happens at all) varies
-    // with generation.
+  it('never strands a required (unlocked) solution edge in the wrong mark state — every edge that ends up unreachable, locked or not, is already correctly marked or unmarked', () => {
+    // The core correctness guarantee `applyLockedEdges` depends on, and the
+    // reason it doesn't need to explicitly re-lock a `strandedEdges` entry
+    // (see `edgeLock.ts`'s doc comment): any edge that ends up unreachable
+    // as a side effect of locking edge E was, by construction, *already on
+    // the boundary of whichever region got toggled to fix E's own mark
+    // state* — that's exactly why merging strands it. So the very same
+    // toggle that correctly marks E also marks/unmarks every one of its
+    // now-stranded siblings correctly, automatically — whether they're
+    // other solution edges (need marking) or distractor edges that
+    // happened to share the same connector (need to stay unmarked). Checked
+    // across every real edge in the graph, not just the ones this puzzle
+    // happened to choose as candidates.
     const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
     for (const shapeMode of shapeModes) {
       for (const seed of [1, 2, 3]) {
@@ -254,9 +251,17 @@ describe('locked edges in the puzzle id', () => {
         const solutionEdges = generateSolutionEdges(id);
         const regionMap = computeRegions(puzzle);
         const reachable = new Set(regionMap.regions.flatMap((r) => r.boundary));
-        for (const ek of solutionEdges) {
-          const ok = puzzle.lockedEdges?.has(ek) || reachable.has(ek);
-          expect(ok).toBe(true);
+        const initialEdges = new Set(puzzle.initialEdges);
+
+        const seen = new Set<EdgeKey>();
+        for (const [k, neighbors] of puzzle.adj) {
+          for (const nk of neighbors) {
+            const ek = k < nk ? `${k}|${nk}` : `${nk}|${k}`;
+            if (seen.has(ek)) continue;
+            seen.add(ek);
+            if (puzzle.lockedEdges!.has(ek) || reachable.has(ek)) continue; // formally locked, or still toggleable — not what this test is about
+            expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
+          }
         }
       }
     }
