@@ -1,5 +1,4 @@
 import type { Cell } from './hamiltonianCycle';
-import { computeEdgeComponents } from './edgeComponents';
 import { key, parseKey, type CellKey } from './puzzle';
 import { parseEdgeKey, type EdgeKey } from './regions';
 
@@ -64,33 +63,58 @@ function edgeDistance(dist: ReadonlyMap<CellKey, number>, ek: EdgeKey): number |
 }
 
 /**
- * Given a region toggle's before/after edge sets, finds every *other*
+ * Given a region toggle's before/after edge sets plus each one's *actual
+ * persistent display color* per edge (`componentColors.ts`'s
+ * `snapshotEdgeColors`/`previewComponentColors` — not `edgeComponents.ts`'s
+ * raw, iteration-order-assigned ids, see below), finds every *other*
  * still-marked edge (present both before and after — a toggled edge itself
- * is handled separately, as a grow/shrink, not a recolor) whose connected
- * component changed identity as a side effect of the toggle (a merge or
- * split), together with how many marked-edge hops it sits from the toggle
- * location in the post-toggle graph.
+ * is handled separately, as a grow/shrink, not a recolor) whose color
+ * actually changed as a side effect of the toggle (a merge or split),
+ * together with how many marked-edge hops it sits from the toggle location
+ * in the post-toggle graph.
  *
- * Only edges actually graph-reachable from the toggle are returned. A
- * split or merge can also renumber an entirely unrelated component simply
- * because `computeEdgeComponents`'s ids are assigned by iteration order,
- * not identity — see its doc comment — and that reordering is deliberately
- * excluded here (main.ts's caller lets it recolor instantly instead of
- * animating a "ripple" that has nowhere real to travel from).
+ * This deliberately compares *persistent* colors rather than recomputing
+ * `computeEdgeComponents` fresh on `prevEdges`/`nextEdges` and comparing
+ * *those* raw ids, which is what an earlier version of this function did.
+ * That raw-id comparison was only a proxy for "did this edge's component
+ * identity change" — `computeEdgeComponents`'s ids are assigned purely by
+ * Set-iteration order within each call (see its doc comment), which has no
+ * necessary relationship to which side of a merge `componentColors.ts`'s
+ * "blue (lowest color) wins" rule (or which side of a split its "larger
+ * piece keeps the color" rule) actually keeps unchanged. Whenever a
+ * puzzle's edges `Set` had been edited enough times that its current
+ * insertion order no longer lined up with the order colors were originally
+ * assigned in, the raw-id comparison could flag the *wrong* side of a
+ * merge/split — rippling the component that already had the right color
+ * while the one that actually changed silently snapped with no animation
+ * at all. Comparing the real persistent colors instead has no such failure
+ * mode, since it's exactly the same color assignment `render()` goes on to
+ * display, not an independent stand-in for it.
+ *
+ * Only edges actually graph-reachable from the toggle are returned — this
+ * naturally excludes an entirely unrelated component whose raw
+ * `computeEdgeComponents` numbering might shift as an incidental side
+ * effect of the merge/split elsewhere (its persistent color can't actually
+ * change unless it's connected to the toggle, so the reachability check is
+ * mostly a redundant safety net now, not the primary filter it used to be).
  */
-export function computeRecoloredEdges(prevEdges: ReadonlySet<EdgeKey>, nextEdges: ReadonlySet<EdgeKey>, toggledEdges: ReadonlySet<EdgeKey>): RippleEdge[] {
-  const prevComponents = computeEdgeComponents(prevEdges);
-  const nextComponents = computeEdgeComponents(nextEdges);
+export function computeRecoloredEdges(
+  prevEdges: ReadonlySet<EdgeKey>,
+  nextEdges: ReadonlySet<EdgeKey>,
+  toggledEdges: ReadonlySet<EdgeKey>,
+  prevColors: ReadonlyMap<EdgeKey, number>,
+  nextColors: ReadonlyMap<EdgeKey, number>,
+): RippleEdge[] {
   const dist = cellDistancesFromToggle(nextEdges, toggledEdges);
 
   const result: RippleEdge[] = [];
   for (const ek of nextEdges) {
     if (toggledEdges.has(ek) || !prevEdges.has(ek)) continue;
-    const prevId = prevComponents.get(ek);
-    const nextId = nextComponents.get(ek);
-    if (prevId === undefined || nextId === undefined || prevId === nextId) continue;
+    const prevColor = prevColors.get(ek);
+    const nextColor = nextColors.get(ek);
+    if (prevColor === undefined || nextColor === undefined || prevColor === nextColor) continue;
     const distance = edgeDistance(dist, ek);
-    if (distance === undefined) continue; // unreachable from the toggle -> unrelated renumbering, no ripple
+    if (distance === undefined) continue; // unreachable from the toggle -> shouldn't happen for a genuine color change, but keep the guard
     result.push({ edge: ek, distance });
   }
   return result;

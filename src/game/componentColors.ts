@@ -51,9 +51,10 @@ function cellsByComponentOf(edges: ReadonlySet<EdgeKey>, components: ReadonlyMap
 }
 
 /**
- * Recomputes connected components for `edges` (fresh union-find, same as
- * `computeEdgeComponents`) and assigns each one a *persistent* color index,
- * updating `state` in place to remember the new snapshot:
+ * The actual color-assignment algorithm, factored out from `state` so it can
+ * be run either as the real, `state`-mutating update (`updateComponentColors`)
+ * or as a side-effect-free dry run (`previewComponentColors`) against
+ * whatever `oldCellsByColor` is handed to it:
  *
  * - A component that shares cells with exactly one previous color (grew,
  *   shrank, or is simply unchanged) keeps that color.
@@ -69,20 +70,20 @@ function cellsByComponentOf(edges: ReadonlySet<EdgeKey>, components: ReadonlyMap
  *   vanished, or lost a split/merge collision) is exactly what a new
  *   component picks up.
  * - A color no longer claimed by anything this frame is simply absent from
- *   the updated `state` — freeing it for reuse next time, and leaving every
- *   *other* still-live color's assignment completely undisturbed (this is
- *   what makes a vanished component's neighbor's color stay put instead of
- *   shifting down to fill the gap).
- *
- * Returns a fresh `EdgeKey -> persistent color index` map for immediate use
- * as `segmentColor`'s argument.
+ *   the result — freeing it for reuse next time, and leaving every *other*
+ *   still-live color's assignment completely undisturbed (this is what makes
+ *   a vanished component's neighbor's color stay put instead of shifting
+ *   down to fill the gap).
  */
-export function updateComponentColors(state: ComponentColorState, edges: ReadonlySet<EdgeKey>): Map<EdgeKey, number> {
+function computeColorAssignment(
+  oldCellsByColor: ReadonlyMap<number, ReadonlySet<CellKey>>,
+  edges: ReadonlySet<EdgeKey>,
+): { edgeColors: Map<EdgeKey, number>; cellsByColor: Map<number, Set<CellKey>> } {
   const components = computeEdgeComponents(edges);
   const cellsByComponent = cellsByComponentOf(edges, components);
 
   const oldColorOfCell = new Map<CellKey, number>();
-  for (const [color, cells] of state.cellsByColor) {
+  for (const [color, cells] of oldCellsByColor) {
     for (const cell of cells) oldColorOfCell.set(cell, color);
   }
 
@@ -135,12 +136,54 @@ export function updateComponentColors(state: ComponentColorState, edges: Readonl
     usedColors.add(nextFree);
   }
 
-  state.cellsByColor = new Map();
-  for (const [cid, cells] of cellsByComponent) state.cellsByColor.set(colorForComponent.get(cid)!, cells);
+  const newCellsByColor = new Map<number, Set<CellKey>>();
+  for (const [cid, cells] of cellsByComponent) newCellsByColor.set(colorForComponent.get(cid)!, cells);
 
   const edgeColors = new Map<EdgeKey, number>();
   for (const [ek, cid] of components) edgeColors.set(ek, colorForComponent.get(cid)!);
+  return { edgeColors, cellsByColor: newCellsByColor };
+}
+
+/**
+ * Recomputes connected components for `edges` and assigns each one a
+ * *persistent* color index (see `computeColorAssignment`'s doc comment for
+ * the merge/split rules), updating `state` in place to remember the new
+ * snapshot. Returns a fresh `EdgeKey -> persistent color index` map for
+ * immediate use as `segmentColor`'s argument.
+ */
+export function updateComponentColors(state: ComponentColorState, edges: ReadonlySet<EdgeKey>): Map<EdgeKey, number> {
+  const { edgeColors, cellsByColor } = computeColorAssignment(state.cellsByColor, edges);
+  state.cellsByColor = cellsByColor;
   return edgeColors;
+}
+
+/**
+ * Same color assignment as `updateComponentColors`, but *without* committing
+ * the result to `state` — a dry run against `state`'s current colors. Used
+ * by `edgeRipple.ts`/`main.ts`'s recolor-ripple detection, which needs to
+ * know a toggle's actual before/after *persistent display colors* to decide
+ * what should ripple, without prematurely advancing `state` past whatever
+ * `render()`'s own (authoritative) `updateComponentColors` call will
+ * independently compute right afterward for the exact same edge set — see
+ * `main.ts`'s `scheduleToggleAnimation`.
+ *
+ * This replaced an earlier approach that compared *raw* `computeEdgeComponents`
+ * ids from two independent calls (one on the before-edges, one on the
+ * after-edges) instead of actual persistent colors. Those raw ids are
+ * assigned purely by Set-iteration order within each call, which is
+ * unrelated to (and, after enough edits reshuffle a Set's insertion order,
+ * can easily disagree with) which side of a merge/split the "blue wins" /
+ * "larger piece keeps its color" persistent-color rules actually keep
+ * unchanged — so the raw-id comparison could flag the wrong side of a
+ * merge/split as recolored (rippling the component that already had the
+ * right color while the one that silently snapped to a new color got no
+ * animation at all). Comparing actual persistent colors, as this function
+ * (and `updateComponentColors`) does, doesn't have that failure mode: it's
+ * exactly the same color assignment `render()` will display, not an
+ * independent proxy for it.
+ */
+export function previewComponentColors(state: ComponentColorState, edges: ReadonlySet<EdgeKey>): Map<EdgeKey, number> {
+  return computeColorAssignment(state.cellsByColor, edges).edgeColors;
 }
 
 /**

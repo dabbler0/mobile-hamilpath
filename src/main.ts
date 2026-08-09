@@ -1,5 +1,5 @@
 import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
-import { createComponentColorState, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
+import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
@@ -374,8 +374,11 @@ function stopLiveAnimationLoop(): void {
  * `ShrinkingEdges`).
  *
  * For the recolor ripple: an ordinary toggle uses `computeRecoloredEdges`,
- * which only flags an edge whose component id actually changed (a merge or
- * split). The winning toggle instead uses `computeReachableEdges` — since a
+ * which only flags an edge whose *persistent display color* actually
+ * changed (a merge or split) — comparing `colorState`'s actual before/after
+ * colors (via `snapshotEdgeColors`/`previewComponentColors`), not raw
+ * `computeEdgeComponents` ids, see `computeRecoloredEdges`'s doc comment for
+ * why that distinction matters. The winning toggle instead uses `computeReachableEdges` — since a
  * win means every remaining edge is now one single component about to
  * switch to the solved color, filtering by "did the id change" would (by
  * incidental id-numbering luck) leave a chunk of the board jumping straight
@@ -398,6 +401,12 @@ function scheduleToggleAnimation(colorState: ComponentColorState, prevEdges: Rea
 
   const now = performance.now();
   const prevColors = snapshotEdgeColors(colorState, prevEdges);
+  // Non-mutating dry run of the same color assignment `render()`'s own
+  // `updateComponentColors` call will commit for `nextEdges` right after
+  // this returns — see `previewComponentColors`'s doc comment for why this
+  // has to be the actual persistent colors, not a fresh, independent
+  // `computeEdgeComponents` numbering.
+  const nextColors = previewComponentColors(colorState, nextEdges);
 
   for (const ek of toggledEdges) {
     growingEdges.delete(ek);
@@ -410,7 +419,7 @@ function scheduleToggleAnimation(colorState: ComponentColorState, prevEdges: Rea
     }
   }
 
-  const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggledEdges) : computeRecoloredEdges(prevEdges, nextEdges, toggledEdges);
+  const rippleEdges = justWon ? computeReachableEdges(prevEdges, nextEdges, toggledEdges) : computeRecoloredEdges(prevEdges, nextEdges, toggledEdges, prevColors, nextColors);
   for (const { edge, distance } of rippleEdges) {
     if (growingEdges.has(edge) || shrinkingEdges.has(edge)) continue;
     const delay = justWon ? distance * RIPPLE_STAGGER_MS : midgameRippleDelayMs(distance);

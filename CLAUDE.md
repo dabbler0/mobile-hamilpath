@@ -423,19 +423,34 @@ for the pre-toggle edge set on the frame just before the toggle.
   instead (see below). Each pulse (`render.ts`'s `PULSE_MS`, 260ms) bulges
   the edge's line width up and back down, swapping from its old color to its
   live one right at the peak — "growing and then shrinking as it changes
-  color". A merge/split can also renumber an entirely *unrelated* component
-  in `edgeComponents.ts`'s raw, iteration-order ids (see its doc comment) —
-  `computeRecoloredEdges` deliberately excludes anything not reachable from
-  the toggle, so that case doesn't ripple at all; thanks to persistent
-  component colors (above), it doesn't even *recolor* any more, since the
-  persistent color assignment is keyed by which cells a component actually
-  spans, not by that raw id — matching the fact that nothing about what's
-  on screen actually changed.
+  color". `computeRecoloredEdges` decides "did this edge actually recolor"
+  by comparing `componentColors.ts`'s *persistent* colors before/after the
+  toggle (`snapshotEdgeColors`/`previewComponentColors`), not
+  `edgeComponents.ts`'s raw, iteration-order-assigned ids (see its doc
+  comment) — an earlier version compared those raw ids instead, which was
+  only a loose proxy for "did this edge's component identity change" and
+  had a real bug as a result: since a raw id's numbering depends purely on
+  the current `Set`'s iteration order (which drifts over the course of a
+  game as edges are toggled off and back on) while a persistent color's
+  identity doesn't, the two could disagree about *which side* of a
+  merge/split actually changed color once a puzzle had been edited enough
+  to desync them — occasionally rippling the component that already had the
+  right color while the one that actually changed silently snapped with no
+  animation. Comparing real persistent colors instead can't have that
+  failure mode, since it's exactly the same color assignment `render()`
+  goes on to display. A merge/split can also renumber an entirely
+  *unrelated* component in `edgeComponents.ts`'s raw ids purely as an
+  incidental side effect — `computeRecoloredEdges` deliberately excludes
+  anything not reachable from the toggle, so that case doesn't ripple at
+  all; thanks to persistent component colors (above), it doesn't even
+  *recolor* any more regardless, since the persistent color assignment is
+  keyed by which cells a component actually spans, not by that raw id —
+  matching the fact that nothing about what's on screen actually changed.
   - **The winning move gets a bigger version of the same ripple, but at
     constant speed (endgame)**: the instant a toggle completes the puzzle,
     literally every already-marked edge is about to switch to the single
     "solved" green — so instead of `computeRecoloredEdges`'s "did the
-    component id actually change" filter (which, on a win, would by
+    persistent color actually change" filter (which, on a win, would by
     incidental id-numbering luck leave whichever pre-existing segment kept
     id 0 jumping straight to green with no animation), `main.ts` uses
     `edgeRipple.ts`'s `computeReachableEdges`, which ripples *every*

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createComponentColorState, resetComponentColorState, snapshotEdgeColors, updateComponentColors } from './componentColors';
+import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors } from './componentColors';
 import { edgeKey } from './regions';
 
 describe('updateComponentColors', () => {
@@ -94,6 +94,36 @@ describe('updateComponentColors', () => {
     const b = edgeKey([9, 9], [10, 9]);
     const colors = updateComponentColors(state, new Set([b]));
     expect(colors.get(b)).toBe(0);
+  });
+});
+
+describe('previewComponentColors', () => {
+  it('matches what updateComponentColors would assign, without committing it to state', () => {
+    const state = createComponentColorState();
+    const a = edgeKey([0, 0], [1, 0]); // small, will become color 0
+    const b1 = edgeKey([5, 0], [6, 0]);
+    const b2 = edgeKey([6, 0], [7, 0]);
+    const b3 = edgeKey([7, 0], [8, 0]); // bigger, will become color 1
+    updateComponentColors(state, new Set([a, b1, b2, b3]));
+
+    const bridge = edgeKey([1, 0], [5, 0]);
+    const merged = new Set([a, b1, b2, b3, bridge]);
+    const preview = previewComponentColors(state, merged);
+
+    // Same merge-resolution rule as updateComponentColors: blue (a's lower
+    // color) wins, regardless of which side has more cells.
+    expect(preview.get(a)).toBe(0);
+    expect(preview.get(b1)).toBe(0);
+    expect(preview.get(b3)).toBe(0);
+
+    // Nothing was actually committed -- state still reflects the pre-merge
+    // components, so a fresh updateComponentColors call from here produces
+    // exactly the same result the preview predicted.
+    expect(state.cellsByColor.size).toBe(2);
+    const committed = updateComponentColors(state, merged);
+    expect(committed.get(a)).toBe(preview.get(a));
+    expect(committed.get(b1)).toBe(preview.get(b1));
+    expect(committed.get(b3)).toBe(preview.get(b3));
   });
 });
 
