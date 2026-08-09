@@ -1,4 +1,6 @@
+import { lockEdge } from './edgeLock';
 import { generateHamiltonianCycle, generateShapeAndCycle, type Cell } from './hamiltonianCycle';
+import { createInitialPath } from './pathEdit';
 import {
   buildKleinBottlePuzzle,
   buildProjectivePlanePuzzle,
@@ -9,8 +11,8 @@ import {
   type EdgeCollectionParams,
   type Puzzle,
 } from './puzzle';
-import { edgeKey, type EdgeKey } from './regions';
-import { mulberry32 } from './rng';
+import { computeRegions, edgeKey, type EdgeKey } from './regions';
+import { mulberry32, type Rng } from './rng';
 import { randomShape, randomToroidalShape, rectShape } from './shape';
 
 export interface SizeOption {
@@ -137,6 +139,16 @@ export interface PuzzleId {
    * present at all.
    */
   collections?: EdgeCollectionParams;
+  /**
+   * Fraction (0-1) of the intended solution's own edges to lock at
+   * generation time — see `edgeLock.ts`'s `lockEdge` and
+   * `LOCKED_EDGE_FRACTION`. Optional, defaulting to `0` (no locking)
+   * wherever read, and — like `collections` — *not* a distinct identity
+   * from explicitly passing `0` (see `lockedEdgeKeySuffix`), so a
+   * `PuzzleId` generated with this feature left off keeps exactly the same
+   * hash/seed and storage keys as before this feature existed.
+   */
+  lockedEdgeFraction?: number;
 }
 
 /**
@@ -167,8 +179,20 @@ export function collectionsKeySuffix(params: EdgeCollectionParams | undefined): 
   return `::c${params.maxCollections}.${params.minSize}.${params.maxSize}`;
 }
 
+/**
+ * Suffix appended to a puzzle's hash/storage keys for its locked-edge
+ * fraction — `''` whenever the feature is off (`fraction` absent or `<= 0`),
+ * for the same reason `collectionsKeySuffix` returns `''` when collections
+ * are off: a puzzle id with the feature untouched hashes and stores
+ * byte-identically to one with the feature never mentioned.
+ */
+export function lockedEdgeKeySuffix(fraction: number | undefined): string {
+  if (!fraction || fraction <= 0) return '';
+  return `::lk${fraction}`;
+}
+
 export function puzzleIdKey(id: PuzzleId): string {
-  return `${id.sizeKey}::${id.shapeMode}::${id.seed}${collectionsKeySuffix(id.collections)}`;
+  return `${id.sizeKey}::${id.shapeMode}::${id.seed}${collectionsKeySuffix(id.collections)}${lockedEdgeKeySuffix(id.lockedEdgeFraction)}`;
 }
 
 /** FNV-1a: a small, deterministic string hash, used to turn a puzzle id into a mulberry32 seed. */
@@ -193,7 +217,19 @@ export function puzzleSeed(id: PuzzleId): number {
   return hashStringToSeed(puzzleIdKey(id));
 }
 
-export function generatePuzzle(id: PuzzleId): Puzzle {
+/**
+ * Fraction of a puzzle's intended-solution edges the "lock some solution
+ * edges" feature locks when turned on — Free Play's experimental toggle
+ * (`main.ts`'s New Game screen) and Blitz's own difficulty-gated locking
+ * (`blitz.ts`'s `LOCK_EDGES_DIFFICULTY_THRESHOLD`) both use this same
+ * constant, rather than two independently-tuned numbers that could drift
+ * apart. Deliberately small ("no more than 5%" per this feature's spec) —
+ * this is meant to read as a light nudge, not a large chunk of the solution
+ * handed over for free.
+ */
+export const LOCKED_EDGE_FRACTION = 0.05;
+
+function buildPuzzleForId(id: PuzzleId): Puzzle {
   const { m, n } = sizeOption(id.sizeKey);
   const rng = mulberry32(puzzleSeed(id));
   const collections = id.collections ?? NO_EDGE_COLLECTIONS;
@@ -209,6 +245,62 @@ export function generatePuzzle(id: PuzzleId): Puzzle {
     case 'projective':
       return buildProjectivePlanePuzzle(m, n, PUZZLE_DENSITY, rng, collections);
   }
+}
+
+function shuffled<T>(items: readonly T[], rng: Rng): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/**
+ * Applies `id.lockedEdgeFraction` (see `PuzzleId`'s doc comment) to a
+ * freshly-built puzzle: locks a random subset of the intended solution's
+ * own edges — always locking them *into* the marked state, never out of it
+ * (this feature's spec is specifically about pre-marking a few solution
+ * edges, not deleting distractor ones) — via `edgeLock.ts`'s `lockEdge`.
+ * The edges to lock are picked with a *separate*, freshly-hashed rng
+ * (`` `${puzzleIdKey(id)}::lock` ``) rather than continuing whatever stream
+ * `buildPuzzleForId` happened to consume, so the selection doesn't depend
+ * on exactly how many rng calls generation itself made (which varies with
+ * density/edge-collection rolls) — the same reasoning `generateSolutionEdges`
+ * already relies on for Give Up. `Math.floor` (not `Math.round`) on the
+ * count keeps this strictly at-or-under the requested fraction, never over
+ * it — "no more than 5%" per this feature's spec.
+ *
+ * A locked-and-marked edge can never be marked by the player themselves
+ * (it's excluded from every region's boundary from the moment it locks —
+ * see `regions.ts`), so the resulting puzzle's `initialEdges` records
+ * exactly those edges for `pathEdit.ts`'s `createInitialPath` to seed a
+ * fresh game with. A complete no-op — consuming no extra rng calls,
+ * returning `puzzle` completely unchanged — whenever the fraction is
+ * `0`/absent, so a puzzle generated with this feature off is
+ * byte-identical to one from before it existed.
+ */
+function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
+  const fraction = id.lockedEdgeFraction ?? 0;
+  if (fraction <= 0) return puzzle;
+
+  const candidates = shuffled([...generateSolutionEdges(id)], mulberry32(hashStringToSeed(`${puzzleIdKey(id)}::lock`)));
+  const count = Math.floor(candidates.length * fraction);
+
+  let lockedPuzzle = puzzle;
+  let regionMap = computeRegions(lockedPuzzle);
+  let state = createInitialPath();
+  for (let i = 0; i < count; i++) {
+    const result = lockEdge(lockedPuzzle, regionMap, state, candidates[i], true);
+    lockedPuzzle = result.puzzle;
+    regionMap = result.regionMap;
+    state = result.state;
+  }
+  return { ...lockedPuzzle, initialEdges: [...state.edges] };
+}
+
+export function generatePuzzle(id: PuzzleId): Puzzle {
+  return applyLockedEdges(id, buildPuzzleForId(id));
 }
 
 /**

@@ -1,6 +1,6 @@
 import type { PathOp } from './pathEdit';
 import { NO_EDGE_COLLECTIONS } from './puzzle';
-import { customSizeKey, sizeOption, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, type PuzzleId, type ShapeMode } from './puzzleGen';
+import { customSizeKey, LOCKED_EDGE_FRACTION, sizeOption, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, type PuzzleId, type ShapeMode } from './puzzleGen';
 import { mulberry32, type Rng } from './rng';
 
 /**
@@ -235,6 +235,33 @@ export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMo
 }
 
 /**
+ * Difficulty rating above which Blitz starts locking a small portion of
+ * each puzzle's solution edges too (see `puzzleGen.ts`'s
+ * `PuzzleId.lockedEdgeFraction` and `game/edgeLock.ts`'s `lockEdge`) —
+ * CLAUDE.md's spec: "once the difficulty level gets higher than that of
+ * boards that are about 10x10 after doubling", i.e. a plain rectangular
+ * board of 5x5 blocks (`boardDifficultyRating`'s rect multiplier is 1x, so
+ * this is also that board's raw edge count). Boards below this threshold
+ * play exactly as they did before this feature existed; once a run's
+ * difficulty budget climbs past it, every puzzle handed out — regardless of
+ * its own shape's multiplier — gets `LOCKED_EDGE_FRACTION` of its solution
+ * edges locked.
+ */
+export const LOCK_EDGES_DIFFICULTY_THRESHOLD = boardDifficultyRating(customSizeKey(5, 5), 'rect');
+
+/**
+ * The locking decision for one board, as a pure function of the same
+ * `sizeKey`/`shapeMode` a `BlitzEvent.puzzleStart` already records —
+ * shared by `createBlitzSequence` (live play) and `main.ts`'s Blitz replay
+ * (`applyBlitzReplayEvent`) so both agree without the recorded event needing
+ * to carry the decision itself, matching every other `puzzleStart` field
+ * (resolved data, not something replay re-derives via `createBlitzSequence`).
+ */
+export function lockedEdgeFractionForBoard(sizeKey: string, shapeMode: ShapeMode): number | undefined {
+  return boardDifficultyRating(sizeKey, shapeMode) > LOCK_EDGES_DIFFICULTY_THRESHOLD ? LOCKED_EDGE_FRACTION : undefined;
+}
+
+/**
  * A live, stepping generator of the puzzle sequence a Blitz run of the given
  * `runSeed` encounters — call `.next()` once per puzzle, in order, starting
  * from the first. Entirely independent of `BlitzParams`: the only state
@@ -261,9 +288,10 @@ export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
   return {
     next(): PuzzleId {
       const { shapeMode, m, n } = chooseBlitzBoard(rng, budget);
+      const sizeKey = customSizeKey(m, n);
       const seed = Math.floor(rng() * 0x100000000);
       budget += BLITZ_BUDGET_INCREMENT;
-      return { sizeKey: customSizeKey(m, n), shapeMode, seed, collections: NO_EDGE_COLLECTIONS };
+      return { sizeKey, shapeMode, seed, collections: NO_EDGE_COLLECTIONS, lockedEdgeFraction: lockedEdgeFractionForBoard(sizeKey, shapeMode) };
     },
   };
 }

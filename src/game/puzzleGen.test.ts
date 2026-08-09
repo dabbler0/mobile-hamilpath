@@ -4,6 +4,7 @@ import {
   generatePuzzle,
   generateSolutionCells,
   generateSolutionEdges,
+  LOCKED_EDGE_FRACTION,
   PUZZLE_DENSITY,
   puzzleIdKey,
   puzzleSeed,
@@ -15,7 +16,9 @@ import {
   type PuzzleId,
   type ShapeMode,
 } from './puzzleGen';
+import { computeWin } from './pathEdit';
 import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
+import { computeRegions } from './regions';
 
 describe('sizeOption', () => {
   it('finds every declared size by key', () => {
@@ -184,6 +187,74 @@ describe('edge collections in the puzzle id', () => {
   it('generatePuzzle gives no collections when the field is omitted', () => {
     const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed: 1 };
     expect(generatePuzzle(id).edgeCollections).toEqual([]);
+  });
+});
+
+describe('locked edges in the puzzle id', () => {
+  const base: PuzzleId = { sizeKey: 'mini', shapeMode: 'rect', seed: 5 };
+
+  it('leaves the hash/key untouched when the feature is left off — absent or explicit 0', () => {
+    const untouched = puzzleIdKey(base);
+    expect(puzzleIdKey({ ...base, lockedEdgeFraction: 0 })).toBe(untouched);
+    expect(puzzleSeed({ ...base, lockedEdgeFraction: 0 })).toBe(puzzleSeed(base));
+  });
+
+  it('changes the hash/key once the fraction is actually turned on', () => {
+    const on = { ...base, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    expect(puzzleIdKey(on)).not.toBe(puzzleIdKey(base));
+    expect(puzzleSeed(on)).not.toBe(puzzleSeed(base));
+  });
+
+  it('generatePuzzle attaches no lockedEdges/initialEdges when the fraction is 0/absent', () => {
+    const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed: 1 };
+    const puzzle = generatePuzzle(id);
+    expect(puzzle.lockedEdges).toBeUndefined();
+    expect(puzzle.initialEdges).toBeUndefined();
+  });
+
+  it('locks a non-empty, at-most-5% subset of the solution edges, and every locked edge starts out marked', () => {
+    const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const puzzle = generatePuzzle(id);
+    const solutionEdges = generateSolutionEdges(id);
+
+    expect(puzzle.lockedEdges).toBeDefined();
+    expect(puzzle.lockedEdges!.size).toBeGreaterThan(0);
+    expect(puzzle.lockedEdges!.size).toBeLessThanOrEqual(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
+    for (const ek of puzzle.lockedEdges!) expect(solutionEdges.has(ek)).toBe(true);
+
+    // Every locked edge starts marked, per this feature's spec — though
+    // `initialEdges` can legitimately contain a few *other* edges too: fixing
+    // one locked edge's mark state means toggling its whole region (the only
+    // edit primitive this game has — see `edgeLock.ts`), which can flip
+    // other, unrelated boundary edges in that region right along with it.
+    const initialEdges = new Set(puzzle.initialEdges);
+    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(true);
+  });
+
+  it('is fully deterministic for the same id', () => {
+    const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const a = generatePuzzle(id);
+    const b = generatePuzzle(id);
+    expect([...a.lockedEdges!].sort()).toEqual([...b.lockedEdges!].sort());
+    expect([...a.initialEdges!].sort()).toEqual([...b.initialEdges!].sort());
+  });
+
+  it('a locked edge never appears in any region\'s boundary — nothing can toggle it away from its locked state', () => {
+    const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const puzzle = generatePuzzle(id);
+    const regionMap = computeRegions(puzzle);
+    const allBoundary = new Set(regionMap.regions.flatMap((r) => r.boundary));
+    for (const ek of puzzle.lockedEdges!) expect(allBoundary.has(ek)).toBe(false);
+  });
+
+  it('a locked puzzle is still winnable by marking exactly the intended solution, for every shape mode', () => {
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
+    for (const shapeMode of shapeModes) {
+      const id: PuzzleId = { sizeKey: 'small', shapeMode, seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+      const puzzle = generatePuzzle(id);
+      const solutionEdges = generateSolutionEdges(id);
+      expect(computeWin(puzzle, solutionEdges)).toBe(true);
+    }
   });
 });
 

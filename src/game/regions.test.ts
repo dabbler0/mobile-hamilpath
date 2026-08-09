@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { computeRegions, edgeKey, regionAt, type EdgeKey } from './regions';
-import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
+import { computeRegions, edgeKey, lockEdgeInRegionMap, regionAt, regionsForEdge, type EdgeKey, type RegionMap } from './regions';
+import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, parseKey, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
+import { rectShape } from './shape';
 import { KLEIN_BOTTLE, PROJECTIVE_PLANE, topologyFor, type TopologyKind } from './topology';
 
 /**
@@ -237,6 +238,109 @@ describe('computeRegions', () => {
     const region = regions[[...regionIds][0]!];
     expect(region.faces).toHaveLength(W * H);
     expect(region.boundary).toEqual([edgeKey([3, 1], [0, 2])]);
+  });
+});
+
+describe('computeRegions with locked edges', () => {
+  it('treats a locked edge exactly like a permanent wall: fuses its two faces and excludes it from every boundary', () => {
+    // Same setup as the very first `computeRegions` test above, where this
+    // edge being a real (unlocked) candidate edge is exactly what keeps the
+    // two faces in separate regions. Locking it should flip that: the two
+    // faces fuse into one region, and the edge disappears from every
+    // boundary (nothing can ever toggle it again).
+    const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const lockedEk = edgeKey([1, 0], [1, 1]);
+    const puzzle: Puzzle = { ...base, lockedEdges: new Set([lockedEk]) };
+    const { faceToRegion, regions } = computeRegions(puzzle);
+
+    expect(faceToRegion.get('0,0')).toBe(faceToRegion.get('1,0'));
+    const region = regions[faceToRegion.get('0,0')!];
+    expect(region.faces).toHaveLength(2);
+    expect(region.boundary).toEqual([]);
+  });
+
+  it('a puzzle with no lockedEdges field behaves exactly as before this feature existed', () => {
+    const puzzle = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    expect(puzzle.lockedEdges).toBeUndefined();
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    expect(faceToRegion.get('0,0')).not.toBe(faceToRegion.get('1,0'));
+    expect(regions.some((r) => r.boundary.length > 0)).toBe(true);
+  });
+});
+
+describe('regionsForEdge', () => {
+  it('finds both regions sharing a boundary edge', () => {
+    const puzzle = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const regionMap = computeRegions(puzzle);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const ids = regionsForEdge(regionMap, ek).sort();
+    expect(ids).toEqual([regionMap.faceToRegion.get('0,0'), regionMap.faceToRegion.get('1,0')].sort());
+  });
+
+  it('returns nothing for an edge that is not on any boundary (already locked)', () => {
+    const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const puzzle: Puzzle = { ...base, lockedEdges: new Set([ek]) };
+    const regionMap = computeRegions(puzzle);
+    expect(regionsForEdge(regionMap, ek)).toEqual([]);
+  });
+
+  it('returns nothing for a coordinate pair that was never a real puzzle-graph edge at all', () => {
+    const puzzle = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const regionMap = computeRegions(puzzle);
+    expect(regionsForEdge(regionMap, edgeKey([0, 0], [1, 0]))).toEqual([]);
+  });
+});
+
+/** Sorted, comparable snapshot of a `RegionMap`'s actual partition — which faces group together and what each group's boundary is — independent of the specific ids/ordering `computeRegions` vs. `lockEdgeInRegionMap` happen to assign, since only the grouping/boundary content should agree between the two, not the incidental numbering (`lockEdgeInRegionMap` deliberately reuses/tombstones ids for stability, which `computeRegions` has no reason to reproduce from scratch). */
+function regionMapFingerprint(regionMap: RegionMap): string {
+  const groups = regionMap.regions
+    .filter((r) => r.faces.length > 0)
+    .map((r) => ({
+      faces: [...r.faces].map(([x, y]) => `${x},${y}`).sort(),
+      boundary: [...r.boundary].sort(),
+    }))
+    .sort((a, b) => a.faces[0]!.localeCompare(b.faces[0]!));
+  return JSON.stringify(groups);
+}
+
+describe('lockEdgeInRegionMap', () => {
+  it('matches a from-scratch computeRegions recompute after locking a single edge', () => {
+    const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const regionMap0 = computeRegions(base);
+
+    const incremental = lockEdgeInRegionMap(regionMap0, ek);
+    const fromScratch = computeRegions({ ...base, lockedEdges: new Set([ek]) });
+    expect(regionMapFingerprint(incremental)).toBe(regionMapFingerprint(fromScratch));
+  });
+
+  it('matches a from-scratch recompute after locking a whole batch of edges, one at a time, on a real generated puzzle', () => {
+    const puzzle = buildPuzzle(rectShape(6, 9), 0.28, mulberry32(2024));
+    const solutionAndDistractorEdges = [...new Set([...puzzle.adj.entries()].flatMap(([a, bs]) => [...bs].map((b) => edgeKey(parseKey(a), parseKey(b)))))];
+    const toLock = solutionAndDistractorEdges.slice(0, 12);
+
+    let regionMap = computeRegions(puzzle);
+    for (const ek of toLock) {
+      regionMap = lockEdgeInRegionMap(regionMap, ek);
+    }
+    const fromScratch = computeRegions({ ...puzzle, lockedEdges: new Set(toLock) });
+    expect(regionMapFingerprint(regionMap)).toBe(regionMapFingerprint(fromScratch));
+  });
+
+  it('throws for an edge not on any boundary (already locked, or not real)', () => {
+    const base = puzzleFromEdges(3, 2, [[[1, 0], [1, 1]]]);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const locked = lockEdgeInRegionMap(computeRegions(base), ek);
+    expect(() => lockEdgeInRegionMap(locked, ek)).toThrow();
+  });
+
+  it('every region id still matches its own array index (an invariant computeRegions also holds)', () => {
+    const puzzle = buildPuzzle(rectShape(6, 9), 0.28, mulberry32(7));
+    let regionMap = computeRegions(puzzle);
+    const edges = [...new Set([...puzzle.adj.entries()].flatMap(([a, bs]) => [...bs].map((b) => edgeKey(parseKey(a), parseKey(b)))))].slice(0, 8);
+    for (const ek of edges) regionMap = lockEdgeInRegionMap(regionMap, ek);
+    regionMap.regions.forEach((r, i) => expect(r.id).toBe(i));
   });
 });
 

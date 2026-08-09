@@ -90,6 +90,11 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     return adj.get(key(x1, y1))?.has(key(x2, y2)) ?? false;
   }
 
+  /** Whether `ek` has been locked (`puzzle.lockedEdges` — see its doc comment): a locked edge is a real `adj` edge but is treated exactly like a permanent wall for region purposes below — merged across, and excluded from every boundary. */
+  function isLocked(ek: EdgeKey): boolean {
+    return puzzle.lockedEdges?.has(ek) ?? false;
+  }
+
   /** Whether a face exists at all — for a wraparound board, always (it fills the whole rectangle); otherwise all 4 corners must be real graph vertices. */
   function faceExists(fx: number, fy: number): boolean {
     if (wrapped) return true;
@@ -244,7 +249,9 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
       if (!faceExists(fx, fy)) continue;
       for (const wall of faceWalls(fx, fy)) {
         if (!wall.neighbor) continue;
-        if (!hasEdge(wall.v1[0], wall.v1[1], wall.v2[0], wall.v2[1])) {
+        // A locked edge merges its two faces exactly like a permanent wall
+        // (no candidate edge) does — see `isLocked`'s doc comment.
+        if (!hasEdge(wall.v1[0], wall.v1[1], wall.v2[0], wall.v2[1]) || isLocked(edgeKey(wall.v1, wall.v2))) {
           union(faceId(fx, fy), faceId(wall.neighbor[0], wall.neighbor[1]));
         }
       }
@@ -286,6 +293,7 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
       for (const wall of faceWalls(fx, fy)) {
         if (!hasEdge(wall.v1[0], wall.v1[1], wall.v2[0], wall.v2[1])) continue; // no candidate edge here at all — not a boundary, not even a wall to toggle
         const ek = edgeKey(wall.v1, wall.v2);
+        if (isLocked(ek)) continue; // locked — permanently excluded from every region's boundary, so nothing can toggle it again (see `isLocked`'s doc comment)
         if (!wall.neighbor) {
           boundarySets[selfRegion].add(ek);
           continue;
@@ -311,4 +319,85 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
 
 export function regionAt(regionMap: RegionMap, face: Face): number | null {
   return regionMap.faceToRegion.get(key(face[0], face[1])) ?? null;
+}
+
+/**
+ * Every region whose boundary includes `edge` — normally one (an edge on
+ * the true board border) or two (an edge separating two distinct regions),
+ * occasionally the same region twice over (see `computeRegions`'s "lists a
+ * boundary edge once even when both its faces are already in the same
+ * region" case, deduped away here since it's still just one region to
+ * toggle). Empty for an edge that isn't in any region's boundary at all —
+ * either it's already locked (`Puzzle.lockedEdges`) or it isn't a real
+ * puzzle-graph edge to begin with. Used by `game/edgeLock.ts`'s `lockEdge`
+ * to find a region it can toggle to flip one specific edge.
+ */
+export function regionsForEdge(regionMap: RegionMap, edge: EdgeKey): number[] {
+  const ids: number[] = [];
+  for (const region of regionMap.regions) {
+    if (region.boundary.includes(edge)) ids.push(region.id);
+  }
+  return ids;
+}
+
+/**
+ * Incrementally updates `regionMap` to reflect one more locked edge, without
+ * recomputing the whole board from scratch. `computeRegions` costs O(board
+ * size) *every* call — fine once per puzzle, but `game/edgeLock.ts`'s
+ * `lockEdge` needs a fresh regionMap after every single lock, and locking a
+ * whole batch of edges at once (`puzzleGen.ts`'s experimental "lock some
+ * solution edges" generation step, or a future run of several live hints)
+ * would otherwise cost O(locks × board size) — measured at the better part
+ * of a second on the largest boards, a real stutter. This costs only
+ * O(the size of the one or two regions `edge` actually touches), which is
+ * what `lockEdge` uses instead.
+ *
+ * `edge` must currently be a real (unlocked) boundary edge somewhere in
+ * `regionMap` — i.e. `regionsForEdge(regionMap, edge)` must be non-empty
+ * (the same precondition `lockEdge` already enforces before calling this).
+ *
+ * Two cases, chosen to produce exactly what a from-scratch `computeRegions`
+ * recompute (with `edge` newly added to `puzzle.lockedEdges`) would:
+ *  - `edge` borders one region on both sides already (the true, one-sided
+ *    board edge, or the "lists a boundary edge once even when both its
+ *    faces are already in the same region" case from `computeRegions`'s own
+ *    doc comment) — nothing merges; `edge` is simply dropped from that one
+ *    region's boundary.
+ *  - `edge` borders two *different* regions — they merge into one (the
+ *    lower id survives; the higher one becomes an empty, permanently
+ *    unreachable tombstone at its old index, so every other region's id
+ *    stays stable and safe to keep referencing): faces concatenate, and the
+ *    merged boundary is the union of both regions' own boundaries minus
+ *    `edge` itself — any *other* real edge that already separated them (a
+ *    multi-edge shared border) stays a live boundary edge of the merged
+ *    region, matching `computeRegions`'s "same region, real edge" rule
+ *    above (a merge doesn't retroactively stop that edge from being real
+ *    and unlocked).
+ */
+export function lockEdgeInRegionMap(regionMap: RegionMap, edge: EdgeKey): RegionMap {
+  const ids = regionsForEdge(regionMap, edge);
+  if (ids.length === 0) {
+    throw new Error(`lockEdgeInRegionMap: edge ${edge} is not on any region's boundary — already locked, or not a real puzzle-graph edge`);
+  }
+
+  const faceToRegion = new Map(regionMap.faceToRegion);
+  const regions = [...regionMap.regions];
+
+  if (ids.length === 1) {
+    const id = ids[0];
+    regions[id] = { ...regions[id], boundary: regions[id].boundary.filter((ek) => ek !== edge) };
+    return { faceToRegion, regions };
+  }
+
+  const [idA, idB] = [...ids].sort((a, b) => a - b);
+  const regionA = regions[idA];
+  const regionB = regions[idB];
+  const mergedBoundary = new Set([...regionA.boundary, ...regionB.boundary]);
+  mergedBoundary.delete(edge);
+  regions[idA] = { id: idA, faces: [...regionA.faces, ...regionB.faces], boundary: [...mergedBoundary] };
+  regions[idB] = { id: idB, faces: [], boundary: [] }; // tombstone: unreachable, since every face that pointed here now points to idA below
+  for (const face of regionB.faces) {
+    faceToRegion.set(key(face[0], face[1]), idA);
+  }
+  return { faceToRegion, regions };
 }

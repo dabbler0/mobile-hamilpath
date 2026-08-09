@@ -10,12 +10,14 @@ import {
   createBlitzSequence,
   DEFAULT_BLITZ_PACE,
   eligibleBlitzShapes,
+  LOCK_EDGES_DIFFICULTY_THRESHOLD,
+  lockedEdgeFractionForBoard,
   paceForParams,
   SHAPE_DIFFICULTY_MULTIPLIER,
 } from './blitz';
 import { mulberry32 } from './rng';
 import { totalCells } from './puzzle';
-import { generatePuzzle, sizeOption, SIZE_OPTIONS, type ShapeMode } from './puzzleGen';
+import { customSizeKey, generatePuzzle, LOCKED_EDGE_FRACTION, sizeOption, SIZE_OPTIONS, type ShapeMode } from './puzzleGen';
 
 describe('BLITZ_PACE_PARAMS', () => {
   it('matches the three specified pace presets exactly', () => {
@@ -165,6 +167,24 @@ describe('chooseBlitzBoard', () => {
   });
 });
 
+describe('LOCK_EDGES_DIFFICULTY_THRESHOLD / lockedEdgeFractionForBoard', () => {
+  it('is the difficulty rating of a plain rectangular 5x5-block (~10x10-after-doubling) board', () => {
+    expect(LOCK_EDGES_DIFFICULTY_THRESHOLD).toBe(boardDifficultyRating(customSizeKey(5, 5), 'rect'));
+    expect(LOCK_EDGES_DIFFICULTY_THRESHOLD).toBe(100);
+  });
+
+  it('locks nothing at or below the threshold, and exactly LOCKED_EDGE_FRACTION above it', () => {
+    expect(lockedEdgeFractionForBoard(customSizeKey(5, 5), 'rect')).toBeUndefined(); // exactly at threshold
+    expect(lockedEdgeFractionForBoard(customSizeKey(4, 4), 'rect')).toBeUndefined(); // rating 64
+    expect(lockedEdgeFractionForBoard(customSizeKey(6, 6), 'rect')).toBe(LOCKED_EDGE_FRACTION); // rating 144
+  });
+
+  it('accounts for the shape multiplier, not just raw board size', () => {
+    // Same raw edge count (100) as the threshold board, but toroidal's 1.5x multiplier pushes its rating over.
+    expect(lockedEdgeFractionForBoard(customSizeKey(5, 5), 'toroidal')).toBe(LOCKED_EDGE_FRACTION);
+  });
+});
+
 describe('createBlitzSequence', () => {
   it('is fully deterministic for the same seed', () => {
     const a = createBlitzSequence(12345);
@@ -232,5 +252,21 @@ describe('createBlitzSequence', () => {
       expect(boardDifficultyRating(id.sizeKey, id.shapeMode)).toBeLessThanOrEqual(budget);
       budget += BLITZ_BUDGET_INCREMENT;
     }
+  });
+
+  it('only sets lockedEdgeFraction on puzzles above LOCK_EDGES_DIFFICULTY_THRESHOLD, and eventually does so as difficulty climbs', () => {
+    const seq = createBlitzSequence(77);
+    let sawLocked = false;
+    for (let i = 0; i < 300; i++) {
+      const id = seq.next();
+      const rating = boardDifficultyRating(id.sizeKey, id.shapeMode);
+      if (rating > LOCK_EDGES_DIFFICULTY_THRESHOLD) {
+        expect(id.lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
+        sawLocked = true;
+      } else {
+        expect(id.lockedEdgeFraction).toBeUndefined();
+      }
+    }
+    expect(sawLocked).toBe(true);
   });
 });
