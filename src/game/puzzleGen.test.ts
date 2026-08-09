@@ -212,22 +212,50 @@ describe('locked edges in the puzzle id', () => {
     expect(puzzle.initialEdges).toBeUndefined();
   });
 
-  it('locks exactly floor(solutionEdges.size * fraction) solution edges, each starting marked', () => {
+  it('locks at least the nominal fraction\'s worth of solution edges, plus any edges stranded along the way, each already correctly marked or unmarked', () => {
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
 
     expect(puzzle.lockedEdges).toBeDefined();
-    expect(puzzle.lockedEdges!.size).toBe(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
-    for (const ek of puzzle.lockedEdges!) expect(solutionEdges.has(ek)).toBe(true);
+    // At least the nominal fraction's worth — but can legitimately exceed
+    // it: every edge this batch's locks happen to strand (see
+    // `applyLockedEdges`'s own doc comment) gets folded into `lockedEdges`
+    // too, purely for rendering, not just the ones explicitly chosen as
+    // candidates.
+    const initialLockCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+    expect(puzzle.lockedEdges!.size).toBeGreaterThanOrEqual(initialLockCount);
 
-    // Every locked edge starts marked, per this feature's spec — though
-    // `initialEdges` can legitimately contain a few *other* edges too: fixing
-    // one locked edge's mark state means toggling its whole region (the only
-    // edit primitive this game has — see `edgeLock.ts`), which can flip
-    // other, unrelated boundary edges in that region right along with it.
+    // Every locked edge starts in the state its own role calls for — marked
+    // if it's part of the intended solution, unmarked if it's a distractor
+    // edge that happened to get swept in as a stranded connector.
     const initialEdges = new Set(puzzle.initialEdges);
-    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(true);
+    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
+  });
+
+  it('actually exercises stranding on this seed, not just theoretically allowing it — confirming the >= above isn\'t vacuously ==', () => {
+    // large/rect/seed=1 (same id as the test above) locks 32 solution edges
+    // by nominal count but ends up with 80 total locked edges — 48 extra
+    // solution-cycle edges the batch's own toggles happened to strand along
+    // the way, plus (in this specific case) one distractor edge stranded
+    // unmarked. Pinning the exact numbers here means a future change that
+    // accidentally stops folding stranded edges into `lockedEdges` (or
+    // starts over-locking) fails loudly, rather than this behavior only
+    // being checked by a `>=` bound that a regression could vacuously
+    // satisfy by locking nothing extra at all.
+    const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const puzzle = generatePuzzle(id);
+    const solutionEdges = generateSolutionEdges(id);
+    const nominalCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+
+    expect(nominalCount).toBe(32);
+    expect(puzzle.lockedEdges!.size).toBe(80);
+    expect(puzzle.lockedEdges!.size).toBeGreaterThan(nominalCount); // the batch really did strand extra edges
+
+    const distractorLocked = [...puzzle.lockedEdges!].filter((ek) => !solutionEdges.has(ek));
+    expect(distractorLocked).toHaveLength(1); // a distractor edge, stranded and correctly locked to unmarked
+    const initialEdges = new Set(puzzle.initialEdges);
+    for (const ek of distractorLocked) expect(initialEdges.has(ek)).toBe(false);
   });
 
   it('never strands a required (unlocked) solution edge in the wrong mark state — every edge that ends up unreachable, locked or not, is already correctly marked or unmarked', () => {
