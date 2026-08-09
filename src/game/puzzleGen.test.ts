@@ -16,7 +16,7 @@ import {
   type PuzzleId,
   type ShapeMode,
 } from './puzzleGen';
-import { computeWin } from './pathEdit';
+import { computeWin, createInitialPath, toggleRegion } from './pathEdit';
 import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
 import { computeRegions } from './regions';
 
@@ -212,23 +212,54 @@ describe('locked edges in the puzzle id', () => {
     expect(puzzle.initialEdges).toBeUndefined();
   });
 
-  it('locks a non-empty, at-most-5% subset of the solution edges, and every locked edge starts out marked', () => {
+  it('locks at least the nominal 5% of solution edges (marked), plus any edges the cascade had to sweep in, each correctly marked or unmarked', () => {
     const id: PuzzleId = { sizeKey: 'large', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     const puzzle = generatePuzzle(id);
     const solutionEdges = generateSolutionEdges(id);
 
     expect(puzzle.lockedEdges).toBeDefined();
     expect(puzzle.lockedEdges!.size).toBeGreaterThan(0);
-    expect(puzzle.lockedEdges!.size).toBeLessThanOrEqual(Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION));
-    for (const ek of puzzle.lockedEdges!) expect(solutionEdges.has(ek)).toBe(true);
+    // At least the nominal fraction's worth — but can legitimately exceed it:
+    // locking one edge can strand *other* edges (both faces of an unlocked
+    // edge merged into the same region — see `edgeLock.ts`'s
+    // `strandedEdges`), and every stranded edge gets explicitly locked too,
+    // so it doesn't silently become impossible to ever mark/unmark (see the
+    // "never strands a required solution edge" test below). A stranded edge
+    // isn't necessarily a solution edge itself — a distractor edge can get
+    // swept in this way too, correctly locked to *unmarked*.
+    const initialLockCount = Math.floor(solutionEdges.size * LOCKED_EDGE_FRACTION);
+    expect(puzzle.lockedEdges!.size).toBeGreaterThanOrEqual(initialLockCount);
 
-    // Every locked edge starts marked, per this feature's spec — though
-    // `initialEdges` can legitimately contain a few *other* edges too: fixing
-    // one locked edge's mark state means toggling its whole region (the only
-    // edit primitive this game has — see `edgeLock.ts`), which can flip
-    // other, unrelated boundary edges in that region right along with it.
+    // Every locked edge starts marked iff it belongs to the intended
+    // solution — though `initialEdges` can legitimately contain a few
+    // *other* (unlocked) edges too: fixing one locked edge's mark state
+    // means toggling its whole region (the only edit primitive this game
+    // has — see `edgeLock.ts`), which can flip other, unrelated boundary
+    // edges in that region right along with it.
     const initialEdges = new Set(puzzle.initialEdges);
-    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(true);
+    for (const ek of puzzle.lockedEdges!) expect(initialEdges.has(ek)).toBe(solutionEdges.has(ek));
+  });
+
+  it('never strands a required (unlocked) solution edge: every one is either locked, or still reachable via some region', () => {
+    // The core correctness guarantee this feature depends on — see
+    // `edgeLock.ts`'s `strandedEdges` and `applyLockedEdges`'s cascading
+    // worklist. Checked across several seeds/shapes since the specific
+    // region layout (and so whether any stranding happens at all) varies
+    // with generation.
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal', 'klein', 'projective'];
+    for (const shapeMode of shapeModes) {
+      for (const seed of [1, 2, 3]) {
+        const id: PuzzleId = { sizeKey: 'small', shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+        const puzzle = generatePuzzle(id);
+        const solutionEdges = generateSolutionEdges(id);
+        const regionMap = computeRegions(puzzle);
+        const reachable = new Set(regionMap.regions.flatMap((r) => r.boundary));
+        for (const ek of solutionEdges) {
+          const ok = puzzle.lockedEdges?.has(ek) || reachable.has(ek);
+          expect(ok).toBe(true);
+        }
+      }
+    }
   });
 
   it('is fully deterministic for the same id', () => {
@@ -254,6 +285,37 @@ describe('locked edges in the puzzle id', () => {
       const puzzle = generatePuzzle(id);
       const solutionEdges = generateSolutionEdges(id);
       expect(computeWin(puzzle, solutionEdges)).toBe(true);
+    }
+  });
+
+  it('the intended solution is actually *reachable* by some real combination of region taps, starting from the locked initial state (not just theoretically valid)', () => {
+    // A stronger check than the computeWin check above: computeWin alone
+    // doesn't care *how* the marked set was reached, but the whole point of
+    // region toggling is that every state has to be reachable through taps
+    // alone. Exhaustive over every subset of the puzzle's (small, so this
+    // stays fast) toggleable regions — same pattern as `pathEdit.test.ts`'s
+    // "toggleRegion reachability" tests.
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+    for (const shapeMode of shapeModes) {
+      for (const seed of [1, 2, 3]) {
+        const id: PuzzleId = { sizeKey: 'tiny', shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+        const puzzle = generatePuzzle(id);
+        const solutionEdges = generateSolutionEdges(id);
+        const regionMap = computeRegions(puzzle);
+        const R = regionMap.regions.length;
+
+        let reachedSolution = false;
+        for (let mask = 0; mask < 1 << R && !reachedSolution; mask++) {
+          let state = createInitialPath(puzzle);
+          for (let i = 0; i < R; i++) {
+            if (mask & (1 << i)) state = toggleRegion(puzzle, regionMap, state, i).state;
+          }
+          if (state.edges.size === solutionEdges.size && [...state.edges].every((ek) => solutionEdges.has(ek))) {
+            reachedSolution = true;
+          }
+        }
+        expect(reachedSolution).toBe(true);
+      }
     }
   });
 });

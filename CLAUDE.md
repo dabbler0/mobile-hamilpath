@@ -663,38 +663,100 @@ smaller-of-two-regions tie-break above softens this somewhat but doesn't
 eliminate it. This is exactly why the feature below is introduced as
 *experimental*.
 
+**A region's boundary must never include an edge whose two faces are
+already inside that same region** ("interior" to it) — `computeRegions`
+excludes any such edge outright rather than adding it once. An earlier
+version of this function *did* add it once (reasoning that the region's
+toggle should "still flip it," since it's a real, unlocked candidate edge),
+which is wrong: a region's toggle has to be exactly equivalent to toggling
+every one of its still-distinguishable sub-pieces in turn (this is what
+`lockEdgeInRegionMap` below relies on for a locked-edge-driven merge, and
+it's just as true of two pieces that only ever got fused by ordinary
+non-edge walls) — an edge bordering the *same* region on both sides would
+be toggled twice by that equivalent sequence, a net no-op, so it must never
+appear in the boundary the *actual* single-tap toggle uses either. Getting
+this wrong let a single tap unmark an edge that had nothing to do with the
+face the player actually meant to toggle, purely because that edge
+happened to sit inside a region that had grown large enough (via locking,
+see below) to border itself — see git history and `regions.test.ts` for
+the regression this fixes. This never mattered before locking existed:
+following the wall-follower's own tree-boundary construction, a real
+solution-cycle edge's two faces can never land in the same region through
+non-edge fusion alone (density only ever *splits* regions further, never
+merges unrelated faces via non-edge fusion) — so before this feature, the
+"both faces already the same region" case only ever arose for optional
+distractor edges, where silently making them unreachable was harmless.
+Locking is what makes it common and consequential (below).
+
 **Performance**: `computeRegions` recomputes an entire board from scratch —
 fine once per puzzle, but `lockEdge` needs a fresh region map after *every*
 single lock, and the generation feature below locks a whole batch at once.
 `regions.ts`'s `lockEdgeInRegionMap` is what actually backs this: an
 incremental update that touches only the one or two regions the
-just-locked edge itself bordered (concatenating their faces, unioning their
-boundaries minus the now-excluded edge) rather than re-walking the whole
-face grid — the same two cases `computeRegions`'s own boundary-construction
-doc comment describes (a real edge between two faces of the same region
-stays a live boundary edge even after a merge). Region ids are kept stable
-across this (the lower id survives a merge; the higher one becomes an
-empty, permanently unreachable tombstone at its old index) so nothing else
-referencing a region by id needs to know a merge happened. This dropped a
-"huge" board's full locked-generation cost from the better part of a second
-to a small fraction of one — `regions.test.ts`'s `lockEdgeInRegionMap`
-tests assert it produces the exact same partition a from-scratch
-`computeRegions` recompute would, on both hand-built and real generated
-puzzles.
+just-locked edge itself bordered, rather than re-walking the whole face
+grid. Merging two distinct regions takes their boundaries' *symmetric
+difference*, not their union: any edge that directly bordered *both* of
+them (the one just locked, and any other "multi-edge shared border" edge
+between them) now has both its faces inside the single merged region, so —
+per the boundary rule above — it must drop out of the merged boundary
+entirely, not just the one edge actually being locked. Every such edge
+*other* than the one just locked is reported back as `strandedEdges` (see
+below for why that report matters). Region ids are kept stable across a
+merge (the lower id survives; the higher one becomes an empty, permanently
+unreachable tombstone at its old index) so nothing else referencing a
+region by id needs to know a merge happened. This dropped a "huge" board's
+full locked-generation cost from the better part of a second to a small
+fraction of one — `regions.test.ts`'s `lockEdgeInRegionMap` tests assert it
+produces the exact same partition a from-scratch `computeRegions` recompute
+would, on both hand-built and real generated puzzles.
+
+**Stranding, and why locking a batch has to be a worklist, not a plain
+loop**: merging two regions that share *more than one* real edge between
+them — routine once a puzzle has any real density of distractor edges, and
+`lockEdgeInRegionMap`'s doc comment covers exactly this — leaves every
+edge but the one just locked permanently unreachable by any tap, without
+itself ever having been locked. `lockEdge` reports each of these back as
+`strandedEdges` on its result. A stranded edge is often a *different*
+solution-cycle edge (the hidden cycle can cross the same region boundary
+more than once, in different places) — if nothing locks it explicitly, a
+puzzle could ship with a required edge no combination of taps can ever
+reach, i.e. genuinely unsolvable. `puzzleGen.ts`'s `applyLockedEdges`
+handles this with a worklist: every stranded edge reported by a lock gets
+queued and explicitly locked too (to whichever state is actually correct
+for it — marked if it's a solution edge, unmarked/deleted if it's a
+distractor that got swept in), until the queue drains. Since a stranded
+edge is, by definition, already excluded from every region's boundary,
+`lockEdge` can't fix its mark state with a toggle at all in that case — it
+sets the edge directly instead, which is safe precisely because nothing
+else can ever touch it either, before or after. This cascade can lock more
+than the nominal fraction's worth of edges in an unlucky layout (a handful
+of regions sharing many solution-cycle crossings); that's an accepted cost
+of guaranteeing solvability, the same spirit as the collateral flipping a
+single lock already causes above. `puzzleGen.test.ts`'s "never strands a
+required solution edge" test (checking, across seeds/shapes, that every
+solution edge is either locked or still present in some region's boundary)
+and its "actually *reachable*" test (an exhaustive search over every
+combination of a small locked puzzle's region toggles, confirming the
+intended solution is a real reachable state and not just theoretically
+valid per `computeWin`) are what pin this down.
 
 ### First use: pre-marking a few solution edges
 
 `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction` (default `0`, off) is a
 generation-time application of the capability above: `generatePuzzle`'s
-`applyLockedEdges` step picks a random subset of the puzzle's own hidden
-solution edges — up to `LOCKED_EDGE_FRACTION` (0.05, "no more than 5%" per
-this feature's spec) of them, `Math.floor`ed so it's never rounded *over*
-that cap — and locks each one to marked, via a fresh, separately-hashed rng
-stream (`` `${puzzleIdKey(id)}::lock` ``, the same "don't depend on how
-many calls generation itself happened to make" reasoning
-`generateSolutionEdges` already relies on for Give Up) so the selection
-doesn't depend on collections/density having consumed a different number of
-rng calls. `lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
+`applyLockedEdges` step starts from a random subset of the puzzle's own
+hidden solution edges — up to `LOCKED_EDGE_FRACTION` (0.05, "no more than
+5%" per this feature's spec) of them, `Math.floor`ed so that *initial*
+selection is never rounded over the cap — and locks each one to marked,
+via a fresh, separately-hashed rng stream (`` `${puzzleIdKey(id)}::lock` ``,
+the same "don't depend on how many calls generation itself happened to
+make" reasoning `generateSolutionEdges` already relies on for Give Up) so
+the selection doesn't depend on collections/density having consumed a
+different number of rng calls. As covered above, locking any of them can
+strand others, which also get locked as part of the same step — so the
+final `lockedEdges` count can end up somewhat above the nominal 5%; see
+"Stranding" above for why that's necessary rather than a bug.
+`lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
 `puzzleIdKey`/`puzzleSeed` exactly like `collectionsKeySuffix` already does
 for edge collections — absent or `0` hashes byte-identically to a puzzle id
 from before this feature existed; only actually turning it on changes the
@@ -726,6 +788,19 @@ a `puzzleStart` event's own recorded `sizeKey`/`shapeMode` rather than
 storing the decision in the event at all — consistent with every other
 `puzzleStart` field being resolved data, not something replay re-derives via
 `createBlitzSequence` (see "Blitz mode" below).
+
+**Persistence**: `lockedEdgeFraction` has to round-trip through
+`persistence/gameStore.ts`'s `InProgressRecord`/`CompletedRecord` exactly
+like `collections` already does — `saveInProgress`/`recordCompletion` write
+it, `puzzleIdOf` reads it back into the reconstructed `PuzzleId`. This
+isn't just for re-showing the dimmed locked edges on resume/review: since
+`lockedEdgeFraction` is folded into `puzzleIdKey`/`puzzleSeed` (above), a
+reconstructed id *missing* it doesn't merely lose track of which edges
+were locked — it re-hashes to a different seed and regenerates a
+*different puzzle graph entirely*, making the saved `edges` meaningless
+against it. `gameStore.test.ts`'s round-trip test checks exactly this: that
+`generatePuzzle(puzzleIdOf(record))` reproduces the identical `adj` graph
+(not just a graph with the field present) as the original locked puzzle.
 
 ## Give Up
 

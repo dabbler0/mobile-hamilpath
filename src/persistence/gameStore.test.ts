@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { createHistory, recordMove, type HistoryState } from '../game/history';
 import { createInitialPath } from '../game/pathEdit';
 import type { EdgeCollectionParams } from '../game/puzzle';
-import type { PuzzleId } from '../game/puzzleGen';
+import { generatePuzzle, LOCKED_EDGE_FRACTION, type PuzzleId } from '../game/puzzleGen';
 import { clearAllStoresForTests, putRecord, STORES } from './db';
 import { clearInProgress, deleteCompleted, getCompleted, getInProgress, listCompleted, listInProgress, puzzleIdOf, recordCompletion, saveInProgress } from './gameStore';
 
@@ -201,12 +201,51 @@ describe('completed games', () => {
     await recordCompletion(id, ['0,0|1,0']);
     expect((await getCompleted(id))?.collections).toEqual(on);
   });
+
+  it('tracks a distinct locked-edge-fraction setting as a fully independent puzzle identity', async () => {
+    const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 0, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    await saveInProgress(id, ['0,0|1,0']);
+    expect(await getInProgress({ sizeKey: 'mini', shapeMode: RECT, seed: 0 })).toBeUndefined(); // the "off" bucket is unaffected
+    expect((await getInProgress(id))?.edges).toEqual(['0,0|1,0']);
+  });
+
+  it('round-trips lockedEdgeFraction on in-progress and completed records', async () => {
+    const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 0, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    await saveInProgress(id, ['0,0|1,0']);
+    expect((await getInProgress(id))?.lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
+    await recordCompletion(id, ['0,0|1,0']);
+    expect((await getCompleted(id))?.lockedEdgeFraction).toBe(LOCKED_EDGE_FRACTION);
+  });
+
+  it('a resumed/reviewed locked puzzle regenerates the *exact same* puzzle graph, not just a puzzle with the field present', async () => {
+    // The real severity of this bug: lockedEdgeFraction is folded into the
+    // puzzle's hash (`puzzleGen.ts`'s `puzzleIdKey`/`puzzleSeed`), so a
+    // reconstructed id missing it doesn't just lose the locked edges — it
+    // regenerates a *different puzzle graph entirely*, making the saved
+    // `edges` meaningless against it.
+    const id: PuzzleId = { sizeKey: 'small', shapeMode: RECT, seed: 42, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const original = generatePuzzle(id);
+    await recordCompletion(id, [...original.adj.keys()].slice(0, 1).map(() => '0,0|1,0')); // edges content doesn't matter for this check
+    const [record] = await listCompleted();
+    const regenerated = generatePuzzle(puzzleIdOf(record));
+
+    expect(regenerated.lockedEdges).toBeDefined();
+    expect([...regenerated.lockedEdges!].sort()).toEqual([...original.lockedEdges!].sort());
+    expect([...regenerated.adj.entries()].map(([k, v]) => [k, [...v].sort()])).toEqual([...original.adj.entries()].map(([k, v]) => [k, [...v].sort()]));
+  });
 });
 
 describe('puzzleIdOf', () => {
   it('reconstructs a full PuzzleId from any stored record shape', async () => {
     const on: EdgeCollectionParams = { maxCollections: 2, minSize: 2, maxSize: 4 };
     const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 7, collections: on };
+    await recordCompletion(id, ['0,0|1,0']);
+    const [record] = await listCompleted();
+    expect(puzzleIdOf(record)).toEqual(id);
+  });
+
+  it('reconstructs lockedEdgeFraction alongside every other field', async () => {
+    const id: PuzzleId = { sizeKey: 'mini', shapeMode: RECT, seed: 7, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
     await recordCompletion(id, ['0,0|1,0']);
     const [record] = await listCompleted();
     expect(puzzleIdOf(record)).toEqual(id);
