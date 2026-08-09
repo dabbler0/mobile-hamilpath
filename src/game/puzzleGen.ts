@@ -276,13 +276,26 @@ function shuffled<T>(items: readonly T[], rng: Rng): T[] {
  * `lockEdgeInRegionMap`'s doc comments: merging two regions that share more
  * than one real edge between them leaves every edge but the one just locked
  * permanently unreachable by any tap, without itself ever being locked —
- * but a stranded edge never needs a *separate* fix here: it was, by
- * construction, already on the boundary of whichever region just got
- * toggled to fix the edge actually being locked, so that same toggle
+ * but a stranded edge never needs a *separate* fix to its mark state here:
+ * it was, by construction, already on the boundary of whichever region just
+ * got toggled to fix the edge actually being locked, so that same toggle
  * already marks/unmarks it correctly too (see `edgeLock.ts`'s doc comment
  * for the full reasoning, and `puzzleGen.test.ts`'s "never strands a
  * required solution edge" test, which checks this holds for every edge in
  * the graph, not just the ones chosen as candidates).
+ *
+ * Every stranded edge collected along the way *is* still folded into the
+ * final `lockedEdges` set, though — not because it's required (it isn't;
+ * see above), but purely for rendering: without this, a stranded edge sits
+ * on screen looking like an ordinary, still-live candidate edge even though
+ * no tap can ever reach it again, which reads as a rendering glitch rather
+ * than the deliberate region merge it actually is. Since its mark state is
+ * already correct by the time it's stranded, adding it to `lockedEdges`
+ * here is a pure flag flip — no extra `lockEdge` call, no risk of an extra
+ * toggle. (An earlier version of this feature *did* re-run `lockEdge` on
+ * every stranded edge, via a worklist, in the mistaken belief that was
+ * necessary for solvability; it wasn't, and that recursive toggling was
+ * removed — this is only reinstating the harmless "flag it too" half.)
  *
  * A locked-and-marked edge can never be marked by the player themselves
  * (it's excluded from every region's boundary from the moment it locks —
@@ -304,11 +317,18 @@ function applyLockedEdges(id: PuzzleId, puzzle: Puzzle): Puzzle {
   let lockedPuzzle = puzzle;
   let regionMap = computeRegions(lockedPuzzle);
   let state = createInitialPath();
+  const allStrandedEdges = new Set<EdgeKey>();
   for (const edge of shuffledSolutionEdges.slice(0, count)) {
     const result = lockEdge(lockedPuzzle, regionMap, state, edge, true);
     lockedPuzzle = result.puzzle;
     regionMap = result.regionMap;
     state = result.state;
+    for (const stranded of result.strandedEdges) allStrandedEdges.add(stranded);
+  }
+  if (allStrandedEdges.size > 0) {
+    const lockedEdges = new Set(lockedPuzzle.lockedEdges ?? []);
+    for (const stranded of allStrandedEdges) lockedEdges.add(stranded);
+    lockedPuzzle = { ...lockedPuzzle, lockedEdges };
   }
   return { ...lockedPuzzle, initialEdges: [...state.edges] };
 }

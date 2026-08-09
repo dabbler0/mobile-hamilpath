@@ -724,31 +724,56 @@ this could leave a required edge no combination of taps could ever reach,
 and handled it with a worklist that explicitly re-locked every stranded
 edge too.
 
-That worklist turned out to be unnecessary. A stranded edge, by
-construction, was *already on the boundary of whichever region the current
-lock's own toggle just flipped* — that's exactly why it became stranded —
-so that same toggle already flips the stranded edge too, at the same
-moment. Checked broadly (a sweep across five sizes, three shapes, and
+That worklist turned out to be unnecessary *for correctness*. A stranded
+edge, by construction, was *already on the boundary of whichever region the
+current lock's own toggle just flipped* — that's exactly why it became
+stranded — so that same toggle already flips the stranded edge too, at the
+same moment. Checked broadly (a sweep across five sizes, three shapes, and
 twenty seeds each — 300 puzzles, 6,876 stranded edges total): every single
 one ended up in exactly the state it needed to be in, with zero
 exceptions, whether it was a solution edge that needed marking or a
-distractor edge that needed to stay unmarked. `applyLockedEdges` is back to
-a plain loop over just its randomly-chosen candidates, locking exactly
-`Math.floor(solutionEdges.size * fraction)` of them — never more.
-`puzzleGen.test.ts`'s "never strands a required solution edge" test pins
-this down for every edge in the graph, not just the chosen candidates, and
-its "actually *reachable*" test (an exhaustive search over every
-combination of a small locked puzzle's region toggles) confirms the
-intended solution stays a genuinely reachable state, not just
-`computeWin`-valid in principle.
+distractor edge that needed to stay unmarked. `puzzleGen.test.ts`'s "never
+strands a required solution edge" test pins this down for every edge in the
+graph, not just the chosen candidates, and its "actually *reachable*" test
+(an exhaustive search over every combination of a small locked puzzle's
+region toggles) confirms the intended solution stays a genuinely reachable
+state, not just `computeWin`-valid in principle. So `applyLockedEdges`
+never needs to re-run `lockEdge` on a stranded edge to fix its mark
+state — that half of the old worklist really is gone for good.
 
-This guarantee is specific to `applyLockedEdges`'s own usage pattern —
-locking a batch of solution edges to *marked*, sequentially, starting from
-a completely empty board — not a general property of `lockEdge` itself.
-`LockEdgeResult.strandedEdges`' doc comment is explicit about this: a
-different future caller (e.g. a live hint applied mid-game, to an
-already-partially-solved board with edges in arbitrary states) would need
-to re-derive whether the same reasoning holds for it, not assume it does.
+Its *mark state* isn't the only thing a stranded edge needs, though:
+`applyLockedEdges` also folds every `strandedEdges` entry it collects along
+the way into the final puzzle's `lockedEdges` set — purely for rendering.
+Without this, a stranded edge sits on screen looking exactly like an
+ordinary, still-live candidate edge (full opacity, no visual distinction)
+even though no tap can ever reach it again, which reads as a rendering
+glitch rather than the deliberate region merge it actually is; folding it
+in dims it consistently with the rest of its now-merged region and makes
+that merge visually legible. This is a pure flag flip, not a second
+`lockEdge` call — no risk of an extra toggle, since the mark-state
+guarantee above already means there's nothing left to fix. (This is, in
+effect, reinstating only the harmless half of the old worklist: the
+recursive re-*toggling* it did was unnecessary and is gone; the recursive
+*flagging* it did is back, just applied as a single batch union at the end
+instead of chased edge-by-edge.)
+
+The mark-state guarantee above is specific to `applyLockedEdges`'s own
+usage pattern — locking a batch of solution edges to *marked*,
+sequentially, starting from a completely empty board — not a general
+property of `lockEdge` itself. `LockEdgeResult.strandedEdges`' doc comment
+is explicit about this: a different future caller (e.g. a live hint applied
+mid-game, to an already-partially-solved board with edges in arbitrary
+states) would need to re-derive whether the same reasoning holds for it,
+not assume it does — which is exactly why `edgeLock.ts`'s `lockEdge` itself
+still leaves `strandedEdges` as pure information and does *not* auto-fold
+them into `lockedEdges`: `main.ts`'s live "Hint me" feature (`hintMe`) goes
+through this same `lockEdge`, on an arbitrary mid-game board, and a
+stranded-but-wrongly-marked edge there needs to stay eligible for a *later*
+hint call to directly correct (`lockEdge`'s own "already stranded" branch —
+see its doc comment) rather than being prematurely flagged locked and so
+excluded from `hintMe`'s own candidate filter forever with no way to fix
+it. The render-only auto-fold is deliberately scoped to `applyLockedEdges`
+alone, where the guarantee is actually proven to hold.
 
 ### First use: pre-marking a few solution edges
 
@@ -763,8 +788,11 @@ many calls generation itself happened to make" reasoning
 `generateSolutionEdges` already relies on for Give Up) so the selection
 doesn't depend on collections/density having consumed a different number of
 rng calls. As covered above ("Stranding"), locking any of them can strand
-others — but never needs to *separately* lock those too, so the final
-`lockedEdges` count always matches this initial selection exactly.
+others — their mark state never needs a separate fix, but every one
+collected along the way *is* folded into the final `lockedEdges` set (for
+rendering, not correctness), so the final `lockedEdges` count can end up
+somewhat above this initial selection's own count — an accepted, purely
+cosmetic side effect, not a bug.
 `lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
 `puzzleIdKey`/`puzzleSeed` exactly like `collectionsKeySuffix` already does
 for edge collections — absent or `0` hashes byte-identically to a puzzle id
