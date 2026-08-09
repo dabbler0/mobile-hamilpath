@@ -1,13 +1,14 @@
 import { playSfx, setSfxVolume } from './audio/sfx';
-import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, lockedEdgeFractionForBoard, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
+import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
+import { applyHintedEdges, lockEdge } from './game/edgeLock';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
-import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
+import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
 import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
-import { NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
-import { generatePuzzle, generateSolutionEdges, LOCKED_EDGE_FRACTION, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
+import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
+import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
@@ -71,7 +72,6 @@ const newGameMenuScreenEl = byId<HTMLDivElement>('newGameMenuScreen');
 const newGameBackBtn = byId<HTMLButtonElement>('newGameBackBtn');
 const newGameSizeSelect = byId<HTMLSelectElement>('newGameSizeSelect');
 const newGameShapeSelect = byId<HTMLSelectElement>('newGameShapeSelect');
-const newGameLockEdgesCheckbox = byId<HTMLInputElement>('newGameLockEdgesCheckbox');
 const newGameStartBtn = byId<HTMLButtonElement>('newGameStartBtn');
 
 const resumeMenuScreenEl = byId<HTMLDivElement>('resumeMenuScreen');
@@ -121,6 +121,7 @@ const playControlsEl = byId<HTMLDivElement>('playControls');
 const exitBtn = byId<HTMLButtonElement>('exitBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
+const hintBtn = byId<HTMLButtonElement>('hintBtn');
 const giveUpBtn = byId<HTMLButtonElement>('giveUpBtn');
 const activeControlsEl = byId<HTMLDivElement>('activeControls');
 const completeControlsEl = byId<HTMLDivElement>('completeControls');
@@ -178,6 +179,16 @@ let pathState: PathState;
 let gaveUp = false;
 /** Undo/redo stacks + replay move log for the live (playing-mode) game. Reset on every fresh/resumed/rematched puzzle. */
 let history: HistoryState = createHistory();
+/**
+ * Edges locked mid-game via the "Hint me" button (`hintMe`), in the order
+ * they were used — see `persistence/gameStore.ts`'s `InProgressRecord.
+ * hintedEdges`/`CompletedRecord.hintedEdges`. Reset on every fresh/resumed/
+ * rematched puzzle exactly like `history`; a resumed save's own hints are
+ * replayed back onto the freshly-generated `puzzle`/`regionMap` in
+ * `beginPuzzle` (`edgeLock.ts`'s `applyHintedEdges`) before this is restored
+ * to match.
+ */
+let hintedEdges: EdgeKey[] = [];
 let reviewPuzzle: Puzzle | null = null;
 let reviewRegionMap: RegionMap | null = null;
 let reviewEdges: PathState['edges'] = new Set();
@@ -649,6 +660,11 @@ function giveUpAllowed(): boolean {
   return !pathState.won && !gaveUp;
 }
 
+/** Hint me shares Give Up's exact eligibility — a live, not-yet-decided game only. */
+function hintAllowed(): boolean {
+  return !pathState.won && !gaveUp;
+}
+
 /** Undo/Redo only ever act on the live, not-yet-won game — once a puzzle is won, editing (and so undoing) is already blocked everywhere else (input.ts/keyboard.ts refuse edits when `won`), so there's no "undo the winning move" case to reconcile with `recordCompletion` having already fired. Giving up blocks editing the same way a win does (see `gaveUp`'s doc comment), so it's excluded here too — there's nothing to undo back into a revealed solution. */
 function undoRedoAllowed(): boolean {
   return !pathState.won && !gaveUp;
@@ -668,6 +684,7 @@ function refreshControlBar(): void {
   completeControlsEl.classList.toggle('hidden', !complete);
   undoBtn.disabled = !undoRedoAllowed() || !canUndo(history);
   redoBtn.disabled = !undoRedoAllowed() || !canRedo(history);
+  hintBtn.disabled = !hintAllowed();
   giveUpBtn.disabled = !giveUpAllowed();
   viewReplayBtn.classList.toggle('hidden', !pathState.won);
 }
@@ -675,9 +692,9 @@ function refreshControlBar(): void {
 function persistLiveState(): void {
   const edges = [...pathState.edges];
   if (pathState.won) {
-    pendingPersist = recordCompletion(currentPuzzleId, edges, history.moveLog).catch((err: unknown) => console.error('failed to record completion', err));
+    pendingPersist = recordCompletion(currentPuzzleId, edges, history.moveLog, hintedEdges).catch((err: unknown) => console.error('failed to record completion', err));
   } else {
-    pendingPersist = saveInProgress(currentPuzzleId, edges, history).catch((err: unknown) => console.error('failed to save progress', err));
+    pendingPersist = saveInProgress(currentPuzzleId, edges, history, hintedEdges).catch((err: unknown) => console.error('failed to save progress', err));
   }
 }
 
@@ -742,6 +759,65 @@ function performRedo(): void {
   updateProgress();
   refreshControlBar();
   render();
+  persistLiveState();
+}
+
+/**
+ * Locks a random currently-incorrect edge into its correct state — the
+ * "Hint me (beta)" button, an interactive, one-edge-at-a-time replacement
+ * for Free Play's old generation-time "lock some solution edges" checkbox,
+ * built on the same underlying capability (`edgeLock.ts`'s `lockEdge`,
+ * whose own doc comment already anticipated exactly this: "a future hint
+ * feature can lock a single edge mid-game"). "Incorrect" means the edge's
+ * current marked state doesn't match the intended solution
+ * (`generateSolutionEdges`) — covers both a still-unmarked solution edge
+ * and a wrongly-marked distractor edge; `lockEdge`'s `markedInSolution`
+ * handles either direction identically, since a hint always corrects
+ * *toward* the solution regardless of which way that means toggling.
+ * Already-locked edges are always correct by construction (see
+ * `lockEdge`'s doc comment), so they're filtered out defensively rather
+ * than ever actually needing to be excluded.
+ *
+ * Reuses the same underlying `toggleRegion` a tap would (see `lockEdge`'s
+ * doc comment), including its collateral edges — so a hint can trigger a
+ * genuine win outright, exactly like any other edit, complete with the
+ * usual win banner/ripple/persistence. Unlike an ordinary move, though, the
+ * region merge this performs is permanent — see `history.ts`'s
+ * `recordHint` for why this clears the undo/redo stacks instead of pushing
+ * onto them, rather than using the ordinary `recordMove` funnel
+ * (`setFreePlayPathState`) every tap/keypress goes through.
+ */
+function hintMe(): void {
+  if (!hintAllowed()) return;
+  const solutionEdges = generateSolutionEdges(currentPuzzleId);
+  const candidates = allEdgeKeys(puzzle).filter((ek) => pathState.edges.has(ek) !== solutionEdges.has(ek) && !puzzle.lockedEdges?.has(ek));
+  if (candidates.length === 0) {
+    showToast('Nothing to hint — every edge already matches the solution.');
+    return;
+  }
+  const edge = candidates[Math.floor(Math.random() * candidates.length)];
+
+  const prevEdges = pathState.edges;
+  const prevWon = pathState.won;
+  const result = lockEdge(puzzle, regionMap, pathState, edge, solutionEdges.has(edge));
+  puzzle = result.puzzle;
+  regionMap = result.regionMap;
+  // Always non-empty: `edge` started incorrect, so at least it itself flips.
+  const toggled = symmetricDifference(prevEdges, result.state.edges);
+  const justWon = result.state.won && !prevWon;
+  scheduleToggleAnimation(liveComponentColors, prevEdges, result.state.edges, toggled, justWon);
+  pathState = result.state;
+  hintedEdges = [...hintedEdges, edge];
+  // `region: -1` is a sentinel — this op didn't come from a single named
+  // region the way a tap's does (`lockEdge` may toggle either of an edge's
+  // two neighboring regions), and replay (`applyPathOp`) only ever reads
+  // `op.edges` anyway.
+  history = recordHint(history, [{ op: 'toggleRegion', region: -1, edges: [...toggled] }]);
+  focusedRegionId = null;
+  updateProgress();
+  refreshControlBar();
+  render();
+  if (justWon) winBannerEl.classList.add('show');
   persistLiveState();
 }
 
@@ -843,13 +919,13 @@ const REPLAY_SPEED_OPTIONS = [0.25, 0.5, 1, 2];
  * Puts a fresh (or resumed) puzzle on screen and switches to the `'game'`
  * screen — the one place `main.ts` actually starts playing something,
  * shared by New Game, Resume, and Rematch. `resume`, when given, is an
- * exact prior save (edges + its undo/redo history) to restore instead of
- * starting from an empty board; New Game and Rematch never pass it (a
- * random `seed` is a *fresh* puzzle even if it happens to be the same
- * size/shape as one already in progress — see `puzzleGen.ts`'s
- * `randomSeed`).
+ * exact prior save (edges + its undo/redo history + any "Hint me" locks it
+ * used) to restore instead of starting from an empty board; New Game and
+ * Rematch never pass it (a random `seed` is a *fresh* puzzle even if it
+ * happens to be the same size/shape as one already in progress — see
+ * `puzzleGen.ts`'s `randomSeed`).
  */
-function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: HistoryState }): void {
+function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: HistoryState; hintedEdges?: EdgeKey[] }): void {
   stopLiveAnimationLoop();
   stopBlitzTimer();
   pauseBlitzReplay();
@@ -874,6 +950,19 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   puzzle = generatePuzzle(id);
   regionMap = computeRegions(puzzle);
   pathState = resume ? { edges: new Set(resume.edges), won: false } : createInitialPath(puzzle);
+  hintedEdges = resume?.hintedEdges ?? [];
+
+  if (hintedEdges.length > 0) {
+    // Replay this save's own "Hint me" locks back onto the freshly-generated
+    // puzzle/regionMap, in the order they were originally used — see
+    // `edgeLock.ts`'s `applyHintedEdges` doc comment. `pathState` already
+    // holds every edge exactly as saved (including these), so this only
+    // needs to rebuild the structural `lockedEdges`/region-merge side
+    // effects, not touch `pathState` itself.
+    const result = applyHintedEdges(puzzle, regionMap, pathState, hintedEdges, generateSolutionEdges(id));
+    puzzle = result.puzzle;
+    regionMap = result.regionMap;
+  }
 
   if (resume?.history) {
     history = resume.history;
@@ -983,7 +1072,7 @@ function renderResumeItem(record: InProgressRecord): HTMLDivElement {
   return renderListItem(
     puzzleSummaryLabel(record),
     `${record.edges.length} edges marked · ${formatDate(record.updatedAt)}`,
-    () => beginPuzzle(puzzleIdOf(record), { edges: record.edges, history: record.history }),
+    () => beginPuzzle(puzzleIdOf(record), { edges: record.edges, history: record.history, hintedEdges: record.hintedEdges }),
     () => {
       void (async () => {
         if (!window.confirm('Delete this saved game? This cannot be undone.')) return;
@@ -1044,6 +1133,15 @@ function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
   reviewPuzzle = generatePuzzle(id);
   reviewRegionMap = computeRegions(reviewPuzzle);
   reviewEdges = new Set(item.edges);
+  if (item.hintedEdges && item.hintedEdges.length > 0) {
+    // Rebuild the same "Hint me" locks (and so the same dimmed rendering —
+    // `render.ts`) this completed game ended up with — see `beginPuzzle`'s
+    // matching comment for why this can't just come from regenerating the
+    // puzzle id alone.
+    const result = applyHintedEdges(reviewPuzzle, reviewRegionMap, { edges: reviewEdges, won: true }, item.hintedEdges, generateSolutionEdges(id));
+    reviewPuzzle = result.puzzle;
+    reviewRegionMap = result.regionMap;
+  }
   reviewWon = true;
   currentReviewItem = item;
   reviewOrigin = origin;
@@ -1271,7 +1369,7 @@ function advanceBlitzPuzzle(): void {
   keyboardCursor = null;
   const awardMs = Math.round(blitzParams.timeBackPerEdgeSec * 1000 * totalCells(blitzPuzzle));
   blitzDeadline += awardMs;
-  blitzEvents.push({ kind: 'puzzleStart', t: blitzEvents.length === 0 ? 0 : blitzElapsedMs(), sizeKey: id.sizeKey, shapeMode: id.shapeMode, seed: id.seed, timeAwardedMs: awardMs });
+  blitzEvents.push({ kind: 'puzzleStart', t: blitzEvents.length === 0 ? 0 : blitzElapsedMs(), sizeKey: id.sizeKey, shapeMode: id.shapeMode, seed: id.seed, lockedEdgeFraction: id.lockedEdgeFraction, timeAwardedMs: awardMs });
   showToast(`+${(awardMs / 1000).toFixed(1)}s for this puzzle`);
   updateBlitzHeader();
   layout();
@@ -1534,7 +1632,12 @@ function applyBlitzReplayEvent(ev: BlitzEvent): void {
         shapeMode: ev.shapeMode,
         seed: ev.seed,
         collections: NO_EDGE_COLLECTIONS,
-        lockedEdgeFraction: lockedEdgeFractionForBoard(ev.sizeKey, ev.shapeMode),
+        // `ev.lockedEdgeFraction` is resolved data recorded at live-play time
+        // (see `game/blitz.ts`'s `BlitzEvent` doc comment) — whether a board
+        // started locked is now a random per-puzzle choice, not something
+        // derivable from `sizeKey`/`shapeMode` alone, so replay just reads it
+        // straight off the event rather than recomputing it.
+        lockedEdgeFraction: ev.lockedEdgeFraction,
       };
       blitzReplayCurrentId = id;
       blitzReplayPuzzle = generatePuzzle(id);
@@ -1824,7 +1927,14 @@ replaysBackBtn.addEventListener('click', navClick(() => showScreen('freePlay')))
 newGameStartBtn.addEventListener(
   'click',
   navClick(() => {
-    startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode, newGameLockEdgesCheckbox.checked ? LOCKED_EDGE_FRACTION : undefined);
+    // Free Play no longer offers generation-time edge locking from the UI —
+    // replaced by the in-game "Hint me" button (`hintBtn`/`hintMe`), which
+    // locks one edge at a time, interactively, instead of a fraction chosen
+    // up front. `startNewGame`'s `lockedEdgeFraction` param is simply left
+    // unset here (still generically usable — `rematch()` below still reads
+    // `currentPuzzleId.lockedEdgeFraction` back for a puzzle that happened
+    // to have one from before this change).
+    startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode);
   }),
 );
 
@@ -1866,6 +1976,7 @@ blitzReplaySpeedSelect.addEventListener('change', () => {
 exitBtn.addEventListener('click', navClick(exitGame));
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
+hintBtn.addEventListener('click', hintMe);
 giveUpBtn.addEventListener('click', revealSolution);
 rematchBtn.addEventListener('click', navClick(rematch));
 viewReplayBtn.addEventListener(

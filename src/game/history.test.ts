@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo, undo, type HistoryState } from './history';
+import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo, undo, type HistoryState } from './history';
 import { applyPathOp, createInitialPath, type PathOp, type PathState } from './pathEdit';
 import type { Puzzle } from './puzzle';
 
@@ -139,6 +139,47 @@ describe('decodeMoveLog', () => {
     const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
     // The movie shows the first move, the undo back to the start, and then the different move actually taken.
     expect(frames).toEqual([START, afterMove, START, diverged]);
+  });
+});
+
+describe('recordHint', () => {
+  it('is a no-op for an empty ops list', () => {
+    const history = createHistory();
+    expect(recordHint(history, [])).toBe(history);
+  });
+
+  it('appends to the move log like recordMove, but clears the undo/redo stacks instead of pushing onto them', () => {
+    const op = toggle(['0,0|1,0']);
+    let history = recordMove(createHistory(), START, [op]);
+    expect(canUndo(history)).toBe(true);
+
+    const hintOp = toggle(['0,0|1,0']);
+    history = recordHint(history, [hintOp]);
+
+    expect(history.moveLog).toEqual([{ kind: 'ops', ops: [op] }, { kind: 'ops', ops: [hintOp] }]);
+    expect(canUndo(history)).toBe(false);
+    expect(canRedo(history)).toBe(false);
+  });
+
+  it('clears an existing redo branch too, exactly like a fresh recordMove would', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
+    const undone = undo(history, afterMove)!;
+    history = undone.history;
+    expect(canRedo(history)).toBe(true);
+
+    history = recordHint(history, [op]);
+    expect(canRedo(history)).toBe(false);
+  });
+
+  it('a hint\'s edges show up in decodeMoveLog exactly like an ordinary move\'s would', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterHint = afterToggle(START, op);
+    const history = recordHint(createHistory(), [op]);
+
+    const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
+    expect(frames).toEqual([START, afterHint]);
   });
 });
 

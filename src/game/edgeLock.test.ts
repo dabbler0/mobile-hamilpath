@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { lockEdge } from './edgeLock';
+import { applyHintedEdges, lockEdge } from './edgeLock';
 import { createInitialPath, toggleRegion } from './pathEdit';
 import { key, type Puzzle } from './puzzle';
 import { computeRegions, edgeKey, regionsForEdge } from './regions';
@@ -14,6 +14,21 @@ function twoRegionPuzzle(): Puzzle {
   }
   adj.get(key(1, 0))!.add(key(1, 1));
   adj.get(key(1, 1))!.add(key(1, 0));
+  return { adj, W, H, startCell: [0, 0] };
+}
+
+/** Three faces, (0,0)/(1,0)/(2,0), on a 4x2 vertex grid, with two independently-lockable real candidate edges — the verticals at x=1 and x=2 — giving three single-face regions in a row (face 1 shares a boundary edge with each of its neighbors). Used to test that `applyHintedEdges` replays more than one lock in order. */
+function threeRegionPuzzle(): Puzzle {
+  const W = 4;
+  const H = 2;
+  const adj = new Map<string, Set<string>>();
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+  }
+  for (const x of [1, 2]) {
+    adj.get(key(x, 0))!.add(key(x, 1));
+    adj.get(key(x, 1))!.add(key(x, 0));
+  }
   return { adj, W, H, startCell: [0, 0] };
 }
 
@@ -92,5 +107,58 @@ describe('lockEdge', () => {
     const ek = edgeKey([1, 0], [1, 1]);
     const first = lockEdge(puzzle, regionMap, createInitialPath(), ek, true);
     expect(() => lockEdge(first.puzzle, first.regionMap, first.state, ek, false)).toThrow();
+  });
+});
+
+describe('applyHintedEdges', () => {
+  it('is a no-op for an empty list', () => {
+    const puzzle = twoRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const state = createInitialPath();
+    const result = applyHintedEdges(puzzle, regionMap, state, [], new Set());
+    expect(result.puzzle).toBe(puzzle);
+    expect(result.regionMap).toBe(regionMap);
+    expect(result.state).toBe(state);
+  });
+
+  it('replays a single hint, matching a direct lockEdge call', () => {
+    const puzzle = twoRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const state = { edges: new Set([ek]), won: false }; // already correct, as a resumed save's edges would have it
+
+    const direct = lockEdge(puzzle, regionMap, createInitialPath(), ek, true);
+    const replayed = applyHintedEdges(puzzle, regionMap, state, [ek], new Set([ek]));
+
+    expect(replayed.puzzle.lockedEdges).toEqual(direct.puzzle.lockedEdges);
+    expect(replayed.regionMap).toEqual(direct.regionMap);
+    expect(replayed.state.edges).toEqual(state.edges); // already-correct state isn't disturbed
+  });
+
+  it('replays multiple hints in order, reproducing the same lockedEdges/regionMap a sequential lockEdge chain would', () => {
+    const puzzle = threeRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const ek1 = edgeKey([1, 0], [1, 1]);
+    const ek2 = edgeKey([2, 0], [2, 1]);
+    const solutionEdges = new Set([ek1]); // ek1 correct marked, ek2 correct unmarked
+
+    const step1 = lockEdge(puzzle, regionMap, createInitialPath(), ek1, true);
+    const step2 = lockEdge(step1.puzzle, step1.regionMap, step1.state, ek2, false);
+
+    const replayed = applyHintedEdges(puzzle, regionMap, step2.state, [ek1, ek2], solutionEdges);
+
+    expect(replayed.puzzle.lockedEdges).toEqual(step2.puzzle.lockedEdges);
+    expect(replayed.regionMap).toEqual(step2.regionMap);
+    expect(replayed.state.edges).toEqual(step2.state.edges);
+  });
+
+  it('skips an edge already locked, defensively, rather than throwing', () => {
+    const puzzle = twoRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const locked = lockEdge(puzzle, regionMap, createInitialPath(), ek, true);
+
+    const result = applyHintedEdges(locked.puzzle, locked.regionMap, locked.state, [ek], new Set([ek]));
+    expect(result.puzzle.lockedEdges).toEqual(locked.puzzle.lockedEdges);
   });
 });

@@ -21,6 +21,19 @@ export interface InProgressRecord {
   collections?: EdgeCollectionParams;
   /** The locked-edge fraction this puzzle was generated with (see `puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction`). Absent when the feature is off — needed to regenerate the *exact* same puzzle graph on resume: `lockedEdgeFraction` is folded into the puzzle's hash/seed exactly like `collections` is, so a resumed id missing it would regenerate a completely different board, not just one missing its locked edges. */
   lockedEdgeFraction?: number;
+  /**
+   * Edges locked mid-game via the "Hint me" button (`main.ts`'s `hintMe`,
+   * `edgeLock.ts`'s `lockEdge`), in the order they were used. Unlike
+   * `lockedEdgeFraction` above, this is a live, session-only action with
+   * nothing in `PuzzleId` recording it — so it can't be recovered by
+   * regenerating the puzzle from its id alone; resuming has to replay these
+   * through `edgeLock.ts`'s `applyHintedEdges` against the freshly-generated
+   * puzzle to rebuild its `lockedEdges`/region merges (which also drives the
+   * dimmed rendering those edges get — see `render.ts`). Absent/empty for a
+   * game that never used a hint, which is every game from before this
+   * feature existed.
+   */
+  hintedEdges?: EdgeKey[];
   /** When this save was last written — sorts the Resume menu's list, most-recently-played first. */
   updatedAt: number;
 }
@@ -61,7 +74,7 @@ export async function listInProgress(): Promise<InProgressRecord[]> {
   return all.filter(isUsable).sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: HistoryState): Promise<void> {
+export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: HistoryState, hintedEdges?: EdgeKey[]): Promise<void> {
   const record: InProgressRecord = {
     id: puzzleRecordId(id),
     sizeKey: id.sizeKey,
@@ -71,6 +84,7 @@ export async function saveInProgress(id: PuzzleId, edges: EdgeKey[], history?: H
     history,
     collections: id.collections,
     lockedEdgeFraction: id.lockedEdgeFraction,
+    hintedEdges,
     updatedAt: Date.now(),
   };
   await putRecord(STORES.inProgress, record);
@@ -93,6 +107,8 @@ export interface CompletedRecord {
   collections?: EdgeCollectionParams;
   /** The locked-edge fraction this puzzle was generated with — see `InProgressRecord`'s matching field for why this has to round-trip exactly, not just for rendering the locked edges but to regenerate the identical puzzle graph at all. */
   lockedEdgeFraction?: number;
+  /** Edges locked mid-game via "Hint me" — see `InProgressRecord`'s matching field. Needed so review/replay reconstructs the same `lockedEdges`/region merges (and so the same dimmed rendering) the live game ended up with. Absent/empty for a completion that never used a hint. */
+  hintedEdges?: EdgeKey[];
 }
 
 export async function listCompleted(): Promise<CompletedRecord[]> {
@@ -110,7 +126,7 @@ export async function deleteCompleted(id: PuzzleId): Promise<void> {
 }
 
 /** Records a win: stores the completed puzzle (plus its move log, for replay) for later review, and clears its in-progress record. There is no unlock gate any more (see `puzzleGen.ts`'s doc comment) — every puzzle is independently generated from its own seed, so there's nothing to advance. */
-export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?: MoveLogEntry[]): Promise<void> {
+export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?: MoveLogEntry[], hintedEdges?: EdgeKey[]): Promise<void> {
   const record: CompletedRecord = {
     id: puzzleRecordId(id),
     sizeKey: id.sizeKey,
@@ -121,6 +137,7 @@ export async function recordCompletion(id: PuzzleId, edges: EdgeKey[], moveLog?:
     moveLog,
     collections: id.collections,
     lockedEdgeFraction: id.lockedEdgeFraction,
+    hintedEdges,
   };
   await putRecord(STORES.completed, record);
   await clearInProgress(id);

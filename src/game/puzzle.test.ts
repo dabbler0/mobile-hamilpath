@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mulberry32 } from './rng';
 import { rectShape, randomShape, randomToroidalShape } from './shape';
 import {
+  allEdgeKeys,
   buildKleinBottlePuzzle,
   buildProjectivePlanePuzzle,
   buildPuzzle,
@@ -64,6 +65,33 @@ describe('key / parseKey', () => {
   it('round-trips coordinates', () => {
     expect(parseKey(key(3, 5))).toEqual([3, 5]);
     expect(parseKey(key(0, 0))).toEqual([0, 0]);
+  });
+});
+
+describe('allEdgeKeys', () => {
+  it('lists every edge exactly once, not doubled from both endpoints\' adjacency sets', () => {
+    const puzzle = buildPuzzle(rectShape(6, 9), 0.28, mulberry32(1));
+    const edges = allEdgeKeys(puzzle);
+    expect(new Set(edges).size).toBe(edges.length);
+
+    // Cross-check against a manual scan of adj (the naive, doubled count).
+    let doubled = 0;
+    for (const neighbors of puzzle.adj.values()) doubled += neighbors.size;
+    expect(edges.length).toBe(doubled / 2);
+  });
+
+  it('every listed edge is a real, symmetric adjacency', () => {
+    const puzzle = buildPuzzle(rectShape(4, 6), 0.28, mulberry32(2));
+    for (const ek of allEdgeKeys(puzzle)) {
+      const [a, b] = ek.split('|');
+      expect(puzzle.adj.get(a)?.has(b)).toBe(true);
+      expect(puzzle.adj.get(b)?.has(a)).toBe(true);
+    }
+  });
+
+  it('still includes the hidden solution cycle\'s own edges even at zero distractor density', () => {
+    const puzzle = buildPuzzle(rectShape(3, 4), 0, mulberry32(3));
+    expect(allEdgeKeys(puzzle).length).toBe(totalCells(puzzle)); // one cycle edge per cell, no distractors
   });
 });
 

@@ -160,28 +160,6 @@ body {
   margin-top: 8px;
   width: min(280px, 80vw);
 }
-/* New Game's "lock some solution edges" experimental toggle — a checkbox +
-   its own inline label text on one row, plus a small muted explanatory line
-   underneath (`.fieldHint`, reused by anything else that wants a short
-   description under a `.newGameForm` control). */
-.newGameForm .checkboxLabel {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: min(280px, 80vw);
-}
-.newGameForm .checkboxLabel input[type='checkbox'] {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  accent-color: #4f7cff;
-}
-.newGameForm .fieldHint {
-  width: min(280px, 80vw);
-  margin: -6px 0 0;
-  font-size: 0.75rem;
-  color: #9a9aa4;
-}
 /* Blitz setup's two number inputs (starting time / time back per edge) reuse `.newGameForm`'s layout — matching `select`'s own look so the form reads as one consistent style regardless of control type. */
 .newGameForm input[type='number'] {
   width: 100%;

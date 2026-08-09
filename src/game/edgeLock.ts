@@ -110,3 +110,41 @@ export function lockEdge(puzzle: Puzzle, regionMap: RegionMap, state: PathState,
   const { regionMap: nextRegionMap, strandedEdges } = lockEdgeInRegionMap(regionMap, edge);
   return { puzzle: nextPuzzle, regionMap: nextRegionMap, state: nextState, strandedEdges };
 }
+
+/**
+ * Replays an ordered sequence of previously-applied edge locks against a
+ * freshly-built `puzzle`/`regionMap`/`state` — used to reconstruct a live
+ * "Hint me" session (`main.ts`'s `hintMe`) on resume
+ * (`InProgressRecord.hintedEdges`) and in review/replay
+ * (`CompletedRecord.hintedEdges`). A hint is a live, session-only action —
+ * nothing about `PuzzleId` records that it happened (unlike
+ * `puzzleGen.ts`'s generation-time `lockedEdgeFraction`), so the puzzle's
+ * `lockedEdges`/region merges have to be rebuilt by replaying the same
+ * `lockEdge` calls in the same order, not regenerated from the id alone.
+ * Order matters: a later hint's own region toggle depends on the regions
+ * left behind by every earlier one — see `lockEdge`'s own doc comment.
+ *
+ * `solutionEdges` (`puzzleGen.ts`'s `generateSolutionEdges(id)`) is passed
+ * in rather than recomputed per edge: every hint's `markedInSolution` is
+ * simply "was this edge part of the intended solution", regardless of
+ * whether the original hint corrected a still-unmarked solution edge or a
+ * wrongly-marked distractor edge (see `main.ts`'s `hintMe` doc comment) —
+ * that direction doesn't need to be stored separately, since it's fully
+ * determined by `edge` and `solutionEdges` alone.
+ *
+ * `state` should already reflect every edge exactly as it ended up live
+ * (a resume's saved `edges`, or a completed record's final `edges`) — with
+ * that precondition, each replayed `lockEdge` call's own step 1 (see its
+ * doc comment) never actually needs to toggle anything, since the edge is
+ * already in its correct, locked-in state; only the structural
+ * `lockedEdges`/region-merge side effects need reconstructing here.
+ */
+export function applyHintedEdges(puzzle: Puzzle, regionMap: RegionMap, state: PathState, hintedEdges: readonly EdgeKey[], solutionEdges: ReadonlySet<EdgeKey>): LockEdgeResult {
+  let result: LockEdgeResult = { puzzle, regionMap, state, strandedEdges: [] };
+  for (const edge of hintedEdges) {
+    if (result.puzzle.lockedEdges?.has(edge)) continue; // defensive: shouldn't happen for a well-formed record
+    const { puzzle: p, regionMap: rm, state: s, strandedEdges } = lockEdge(result.puzzle, result.regionMap, result.state, edge, solutionEdges.has(edge));
+    result = { puzzle: p, regionMap: rm, state: s, strandedEdges: [...result.strandedEdges, ...strandedEdges] };
+  }
+  return result;
+}

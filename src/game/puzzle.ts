@@ -199,6 +199,23 @@ export function totalCells(puzzle: Puzzle): number {
   return puzzle.adj.size;
 }
 
+/**
+ * Every real edge in `puzzle.adj`, deduplicated — each edge is stored in
+ * both of its endpoints' adjacency sets, so a naive scan would report it
+ * twice. Used by `main.ts`'s "Hint me" feature, which needs to scan *every*
+ * candidate edge (marked or not) for whether it currently matches the
+ * intended solution, not just the ones the player has actually marked.
+ */
+export function allEdgeKeys(puzzle: Puzzle): EdgeKey[] {
+  const seen = new Set<EdgeKey>();
+  for (const [k, neighbors] of puzzle.adj) {
+    for (const nk of neighbors) {
+      seen.add(k < nk ? `${k}|${nk}` : `${nk}|${k}`);
+    }
+  }
+  return [...seen];
+}
+
 function makeAdjBuilder() {
   const adj = new Map<CellKey, Set<CellKey>>();
   const ensure = (k: CellKey) => {
