@@ -36,6 +36,35 @@ export interface Puzzle {
    * existed behaves exactly as if this were `[]`.
    */
   edgeCollections?: EdgeCollection[];
+  /**
+   * Edges locked into a fixed marked/unmarked state (see
+   * `game/edgeLock.ts`'s `lockEdge`). Once an edge is locked,
+   * `regions.ts`'s `computeRegions` treats it exactly like a permanent wall
+   * (a real board edge with no candidate edge at all): both of its
+   * neighboring faces merge into the same region, and the edge itself is
+   * excluded from every region's boundary, so nothing that goes through
+   * `toggleRegion` — a tap, a keyboard toggle, a future hint — can ever
+   * flip it again. The edge is otherwise a completely ordinary member of
+   * `adj`: still drawn, still counted toward win-detection's degree check,
+   * still part of any edge collection it happened to land in. Locking only
+   * removes it from future *toggles*, not from the graph. Absent for every
+   * puzzle without any locked edges — which is every puzzle from before
+   * this feature existed.
+   */
+  lockedEdges?: Set<EdgeKey>;
+  /**
+   * Edges that must already be marked the instant a fresh game on this
+   * puzzle begins — currently only ever the "marked" side of a generation-
+   * time locked edge (see `lockedEdges` above): since a locked edge is
+   * permanently excluded from every region's boundary, a player could never
+   * mark it themselves, so a locked edge that belongs to the intended
+   * solution has to start out already marked or the puzzle would be
+   * unwinnable. `pathEdit.ts`'s `createInitialPath(puzzle)` is what actually
+   * seeds a fresh `PathState` from this. Absent/empty for every puzzle
+   * without any locked-and-marked edges — which is every puzzle from before
+   * this feature existed.
+   */
+  initialEdges?: EdgeKey[];
 }
 
 export interface EdgeCollection {

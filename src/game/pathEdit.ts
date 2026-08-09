@@ -8,8 +8,20 @@ export interface PathState {
   won: boolean;
 }
 
-export function createInitialPath(): PathState {
-  return { edges: new Set(), won: false };
+/**
+ * A fresh, empty path — or, when `puzzle` is given and has any
+ * generation-time locked-and-marked edges (`puzzle.initialEdges`, see
+ * `puzzle.ts`'s doc comment and `game/edgeLock.ts`'s `lockEdge`), one that
+ * already starts with exactly those edges marked, since a locked edge can
+ * never be toggled by the player and so has to begin in its correct state.
+ * `puzzle` is optional (and `won` always `false` without it) purely so
+ * every call site that predates edge locking — most of them — keeps working
+ * unchanged; every fresh *game* start should pass its `puzzle` so a locked
+ * puzzle's initial state comes out right.
+ */
+export function createInitialPath(puzzle?: Puzzle): PathState {
+  const edges = new Set<EdgeKey>(puzzle?.initialEdges ?? []);
+  return { edges, won: puzzle ? computeWin(puzzle, edges) : false };
 }
 
 /**

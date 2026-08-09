@@ -616,6 +616,117 @@ described, `puzzleGen.ts`/`gameStore.ts` still handle a `PuzzleId` whose
 the balance question may get revisited later — it's just not something a
 player can currently opt into from the UI.
 
+## Locking edges
+
+`game/edgeLock.ts`'s `lockEdge` is a general-purpose capability, independent
+of any one feature: to *lock* an edge means to toggle one of its two
+neighboring regions (via the ordinary `toggleRegion`, if the edge isn't
+already in the right state — locking an edge that's already correctly
+marked/unmarked needs no toggle at all) so the edge ends up marked iff a
+caller-supplied `markedInSolution` says it should be, and then to exclude
+that edge from region computation forever after — both of its neighboring
+faces merge into one region (`regions.ts`'s `computeRegions`/`isLocked`
+treat a locked edge exactly like a permanent wall, i.e. a side with no
+candidate edge at all), so nothing — a tap, a keypress, another region
+toggle — can ever flip it again. `Puzzle.lockedEdges` (the locked-edge set)
+and `Puzzle.initialEdges` (which of them must start marked, for
+`pathEdit.ts`'s `createInitialPath(puzzle)` to seed a fresh `PathState`
+with) are the two structural fields this adds to `Puzzle`. `regions.ts`'s
+`regionsForEdge` finds which region(s) currently border a given edge (what
+`lockEdge` needs to decide what to toggle); when an edge borders two
+*different* regions, `lockEdge` toggles whichever one has the smaller
+boundary, to keep the collateral flipping (see below) as small as
+practical. None of this is wired into live gameplay yet — the capability
+exists so a future hint feature can lock a single edge mid-game the same
+way, but its first, and so far only, real use is the generation-time
+feature described below.
+
+**Locking is not the same as deleting**, but the two coincide in one
+specific case: at the very start of a fresh game (every edge unmarked),
+locking an edge *to unmarked* needs no toggle at all — the edge simply
+stays unmarked forever, indistinguishable in play from having never existed
+(this is what makes "locking an edge that's unmarked in the intended
+solution" a legitimate way to *effectively* delete a distractor edge,
+mentioned here because it's the property that makes the reverse — locking
+an edge *to marked* — obviously safe to reach for as a "pre-solve a few
+cells" hint). Locking an edge *to marked* from an empty start always needs
+a real region toggle, and — since region toggle is the only edit primitive
+this game has, see "The face grid, regions, and the tap-to-toggle
+interaction" above — that toggle necessarily flips every *other* edge on
+the chosen region's boundary too, not just the one edge being locked. This
+collateral flipping is a real, unavoidable consequence of the mechanism as
+specified, not a bug: a real generated board's regions vary hugely in size
+(a "huge" board can have some regions boundaried by dozens of edges), so
+locking even a handful of edges can end up pre-marking a noticeably larger
+slice of the board than the locked count alone suggests — the
+smaller-of-two-regions tie-break above softens this somewhat but doesn't
+eliminate it. This is exactly why the feature below is introduced as
+*experimental*.
+
+**Performance**: `computeRegions` recomputes an entire board from scratch —
+fine once per puzzle, but `lockEdge` needs a fresh region map after *every*
+single lock, and the generation feature below locks a whole batch at once.
+`regions.ts`'s `lockEdgeInRegionMap` is what actually backs this: an
+incremental update that touches only the one or two regions the
+just-locked edge itself bordered (concatenating their faces, unioning their
+boundaries minus the now-excluded edge) rather than re-walking the whole
+face grid — the same two cases `computeRegions`'s own boundary-construction
+doc comment describes (a real edge between two faces of the same region
+stays a live boundary edge even after a merge). Region ids are kept stable
+across this (the lower id survives a merge; the higher one becomes an
+empty, permanently unreachable tombstone at its old index) so nothing else
+referencing a region by id needs to know a merge happened. This dropped a
+"huge" board's full locked-generation cost from the better part of a second
+to a small fraction of one — `regions.test.ts`'s `lockEdgeInRegionMap`
+tests assert it produces the exact same partition a from-scratch
+`computeRegions` recompute would, on both hand-built and real generated
+puzzles.
+
+### First use: pre-marking a few solution edges
+
+`puzzleGen.ts`'s `PuzzleId.lockedEdgeFraction` (default `0`, off) is a
+generation-time application of the capability above: `generatePuzzle`'s
+`applyLockedEdges` step picks a random subset of the puzzle's own hidden
+solution edges — up to `LOCKED_EDGE_FRACTION` (0.05, "no more than 5%" per
+this feature's spec) of them, `Math.floor`ed so it's never rounded *over*
+that cap — and locks each one to marked, via a fresh, separately-hashed rng
+stream (`` `${puzzleIdKey(id)}::lock` ``, the same "don't depend on how
+many calls generation itself happened to make" reasoning
+`generateSolutionEdges` already relies on for Give Up) so the selection
+doesn't depend on collections/density having consumed a different number of
+rng calls. `lockedEdgeKeySuffix` folds `lockedEdgeFraction` into
+`puzzleIdKey`/`puzzleSeed` exactly like `collectionsKeySuffix` already does
+for edge collections — absent or `0` hashes byte-identically to a puzzle id
+from before this feature existed; only actually turning it on changes the
+hash. The resulting `Puzzle.initialEdges` (which `beginPuzzle`,
+`advanceBlitzPuzzle`, `startReplay`, and Blitz's own replay
+`applyBlitzReplayEvent` all now pass to `createInitialPath(puzzle)` instead
+of the old no-argument call) is what makes a locked puzzle start with those
+edges — and whatever collateral edges their region toggles pulled in —
+already marked.
+
+**Free Play**: the New Game screen's "Lock some solution edges
+(experimental)" checkbox (`index.html`'s `#newGameLockEdgesCheckbox`) is
+off by default; when checked, `startNewGame` passes `LOCKED_EDGE_FRACTION`
+as the new puzzle's `lockedEdgeFraction`. Rematch carries the setting
+forward from `currentPuzzleId.lockedEdgeFraction`, same as it already does
+for `collections`.
+
+**Blitz**: `blitz.ts`'s `LOCK_EDGES_DIFFICULTY_THRESHOLD` is the difficulty
+rating of a plain rectangular 5x5-block board — CLAUDE.md's "boards that
+are about 10x10 after doubling" (2×5=10 cells per side), matching
+`boardDifficultyRating`'s rect multiplier of 1x. `lockedEdgeFractionForBoard(sizeKey,
+shapeMode)` is the shared pure decision — `LOCKED_EDGE_FRACTION` once a
+board's own rating passes the threshold, `undefined` otherwise —
+`createBlitzSequence` calls it for every puzzle it hands out (so locking
+phases in automatically as a run's difficulty budget climbs past the
+threshold, same as any other difficulty-gated behavior), and `main.ts`'s
+Blitz replay (`applyBlitzReplayEvent`) calls the exact same function against
+a `puzzleStart` event's own recorded `sizeKey`/`shapeMode` rather than
+storing the decision in the event at all — consistent with every other
+`puzzleStart` field being resolved data, not something replay re-derives via
+`createBlitzSequence` (see "Blitz mode" below).
+
 ## Give Up
 
 The "Give Up" button (`main.ts`'s `revealSolution`) reveals the puzzle's
@@ -685,8 +796,11 @@ should not erase it from the movie.
     this back into the full frame-by-frame sequence of states for replay —
     one frame per atomic op (plus one per jump), which is what makes the
     replay animate region-by-region rather than jumping in big chunks.
-    `initial` is always `createInitialPath()` (no longer puzzle-dependent —
-    an empty edge set is the same for every puzzle), never itself stored.
+    `initial` is always `createInitialPath(puzzle)`, never itself stored —
+    cheaply reconstructible, and the same for every game of a given puzzle
+    (an empty edge set, unless the puzzle has generation-time locked-and-
+    marked edges — see "Locking edges" above — in which case exactly those
+    start marked).
 - **`main.ts` wiring**: `setPathState` (the single funnel every pointer/
   keyboard edit already goes through) is the one place that calls
   `recordMove`; `input.ts`/`keyboard.ts` just need to thread the `ops` their
@@ -752,23 +866,25 @@ should not erase it from the movie.
 ## Puzzle identity and generation
 
 `src/game/puzzleGen.ts`: a puzzle is identified by `PuzzleId { sizeKey,
-shapeMode, seed, collections? }` — `sizeKey` is one of the fixed
-`SIZE_OPTIONS` (tiny/mini/small/medium/large/huge — the `key` field is a
-storage identifier, never rename it once puzzles have been played),
-`shapeMode` is one of `SHAPE_MODE_OPTIONS` (see "Board shapes and
+shapeMode, seed, collections?, lockedEdgeFraction? }` — `sizeKey` is one of
+the fixed `SIZE_OPTIONS` (tiny/mini/small/medium/large/huge — the `key`
+field is a storage identifier, never rename it once puzzles have been
+played), `shapeMode` is one of `SHAPE_MODE_OPTIONS` (see "Board shapes and
 topologies" above — `klein`/`projective` are disabled from selection but
 still valid `PuzzleId` values for old data), `seed` is an arbitrary 32-bit
 integer that, together with the rest of the id, fully determines the
-puzzle, and `collections` is the optional `EdgeCollectionParams` (see "Edge
-collections" above). `puzzleSeed()` hashes `puzzleIdKey(id)` (FNV-1a) into
-the actual mulberry32 seed the generator runs on — deliberately *not*
-`id.seed` directly, so two puzzles that happen to share a raw `seed` but
-differ in size/shape/collections can't accidentally share so much as a PRNG
+puzzle, `collections` is the optional `EdgeCollectionParams` (see "Edge
+collections" above), and `lockedEdgeFraction` is the optional fraction of
+solution edges to lock at generation time (see "Locking edges" above).
+`puzzleSeed()` hashes `puzzleIdKey(id)` (FNV-1a) into the actual mulberry32
+seed the generator runs on — deliberately *not* `id.seed` directly, so two
+puzzles that happen to share a raw `seed` but differ in
+size/shape/collections/locking can't accidentally share so much as a PRNG
 stream prefix. `PUZZLE_DENSITY` (0.28, formerly `DAILY_PUZZLE_DENSITY`) is
 fixed — density is not a player-facing setting. `generatePuzzle(id)` builds
 the `Puzzle`; `generateSolutionCells`/`generateSolutionEdges(id)` recompute
-the hidden cycle on demand (Give Up, the main menu background — see their
-own sections).
+the hidden cycle on demand (Give Up, the main menu background, and locking's
+own edge selection — see their own sections).
 
 `sizeKey` doesn't strictly have to be a `SIZE_OPTIONS` entry: `sizeOption()`
 also accepts a synthetic key produced by `customSizeKey(m, n)`

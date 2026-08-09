@@ -1,5 +1,5 @@
 import { playSfx, setSfxVolume } from './audio/sfx';
-import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
+import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, lockedEdgeFractionForBoard, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
@@ -7,7 +7,7 @@ import { canRedo, canUndo, createHistory, decodeMoveLog, recordMove, redo as red
 import { orderLoopCells } from './game/loopOrder';
 import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
-import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
+import { generatePuzzle, generateSolutionEdges, LOCKED_EDGE_FRACTION, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
@@ -71,6 +71,7 @@ const newGameMenuScreenEl = byId<HTMLDivElement>('newGameMenuScreen');
 const newGameBackBtn = byId<HTMLButtonElement>('newGameBackBtn');
 const newGameSizeSelect = byId<HTMLSelectElement>('newGameSizeSelect');
 const newGameShapeSelect = byId<HTMLSelectElement>('newGameShapeSelect');
+const newGameLockEdgesCheckbox = byId<HTMLInputElement>('newGameLockEdgesCheckbox');
 const newGameStartBtn = byId<HTMLButtonElement>('newGameStartBtn');
 
 const resumeMenuScreenEl = byId<HTMLDivElement>('resumeMenuScreen');
@@ -872,7 +873,7 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   currentPuzzleId = id;
   puzzle = generatePuzzle(id);
   regionMap = computeRegions(puzzle);
-  pathState = resume ? { edges: new Set(resume.edges), won: false } : createInitialPath();
+  pathState = resume ? { edges: new Set(resume.edges), won: false } : createInitialPath(puzzle);
 
   if (resume?.history) {
     history = resume.history;
@@ -897,14 +898,20 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   layout();
 }
 
-function startNewGame(sizeKey: string, shapeMode: ShapeMode): void {
-  beginPuzzle({ sizeKey, shapeMode, seed: randomSeed(), collections: NO_EDGE_COLLECTIONS });
+function startNewGame(sizeKey: string, shapeMode: ShapeMode, lockedEdgeFraction?: number): void {
+  beginPuzzle({ sizeKey, shapeMode, seed: randomSeed(), collections: NO_EDGE_COLLECTIONS, lockedEdgeFraction });
 }
 
-/** Immediately starts a fresh puzzle with the exact same size/shape/collections as the one just finished, but a brand-new random seed — only available once the current puzzle is complete (see `refreshControlBar`). */
+/** Immediately starts a fresh puzzle with the exact same size/shape/collections/locked-edge setting as the one just finished, but a brand-new random seed — only available once the current puzzle is complete (see `refreshControlBar`). */
 function rematch(): void {
   if (!(pathState.won || gaveUp)) return;
-  beginPuzzle({ sizeKey: currentPuzzleId.sizeKey, shapeMode: currentPuzzleId.shapeMode, seed: randomSeed(), collections: currentPuzzleId.collections });
+  beginPuzzle({
+    sizeKey: currentPuzzleId.sizeKey,
+    shapeMode: currentPuzzleId.shapeMode,
+    seed: randomSeed(),
+    collections: currentPuzzleId.collections,
+    lockedEdgeFraction: currentPuzzleId.lockedEdgeFraction,
+  });
 }
 
 /** Jumps directly from the just-completed live game into replaying it — waits for the winning move's `recordCompletion` write to actually land (see `pendingPersist`) so the move log it reads back is never stale. */
@@ -1140,7 +1147,7 @@ function playReplay(): void {
 
 function startReplay(): void {
   if (!reviewPuzzle || !currentReviewItem?.moveLog?.length) return;
-  replayFrames = decodeMoveLog(reviewPuzzle, createInitialPath(), currentReviewItem.moveLog);
+  replayFrames = decodeMoveLog(reviewPuzzle, createInitialPath(reviewPuzzle), currentReviewItem.moveLog);
   reviewIdleControlsEl.classList.add('hidden');
   reviewPlaybackControlsEl.classList.remove('hidden');
   replayScrubberEl.min = '0';
@@ -1259,7 +1266,7 @@ function advanceBlitzPuzzle(): void {
   blitzCurrentId = id;
   blitzPuzzle = generatePuzzle(id);
   blitzRegionMap = computeRegions(blitzPuzzle);
-  blitzPathState = createInitialPath();
+  blitzPathState = createInitialPath(blitzPuzzle);
   focusedRegionId = null;
   keyboardCursor = null;
   const awardMs = Math.round(blitzParams.timeBackPerEdgeSec * 1000 * totalCells(blitzPuzzle));
@@ -1522,11 +1529,17 @@ function blitzReplayDurationMs(): number {
 function applyBlitzReplayEvent(ev: BlitzEvent): void {
   switch (ev.kind) {
     case 'puzzleStart': {
-      const id: PuzzleId = { sizeKey: ev.sizeKey, shapeMode: ev.shapeMode, seed: ev.seed, collections: NO_EDGE_COLLECTIONS };
+      const id: PuzzleId = {
+        sizeKey: ev.sizeKey,
+        shapeMode: ev.shapeMode,
+        seed: ev.seed,
+        collections: NO_EDGE_COLLECTIONS,
+        lockedEdgeFraction: lockedEdgeFractionForBoard(ev.sizeKey, ev.shapeMode),
+      };
       blitzReplayCurrentId = id;
       blitzReplayPuzzle = generatePuzzle(id);
       blitzReplayRegionMap = computeRegions(blitzReplayPuzzle);
-      blitzReplayPathState = createInitialPath();
+      blitzReplayPathState = createInitialPath(blitzReplayPuzzle);
       resetComponentColorState(reviewComponentColors);
       blitzReplayAwardedMs += ev.timeAwardedMs;
       layout();
@@ -1811,7 +1824,7 @@ replaysBackBtn.addEventListener('click', navClick(() => showScreen('freePlay')))
 newGameStartBtn.addEventListener(
   'click',
   navClick(() => {
-    startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode);
+    startNewGame(newGameSizeSelect.value, newGameShapeSelect.value as ShapeMode, newGameLockEdgesCheckbox.checked ? LOCKED_EDGE_FRACTION : undefined);
   }),
 );
 

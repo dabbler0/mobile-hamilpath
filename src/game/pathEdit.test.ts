@@ -34,6 +34,28 @@ describe('createInitialPath', () => {
     expect(state.edges.size).toBe(0);
     expect(state.won).toBe(false);
   });
+
+  it('with no puzzle argument, is unaffected by a puzzle-shaped object having no initialEdges (backward compatible)', () => {
+    expect(createInitialPath().edges.size).toBe(0);
+  });
+
+  it('seeds from puzzle.initialEdges when given a puzzle (locked-and-marked edges — see edgeLock.ts)', () => {
+    const puzzle = { ...twoByTwoCyclePuzzle(), initialEdges: ['0,0|1,0'] };
+    const state = createInitialPath(puzzle);
+    expect([...state.edges]).toEqual(['0,0|1,0']);
+    expect(state.won).toBe(false);
+  });
+
+  it('is already won if initialEdges alone happens to satisfy computeWin', () => {
+    const puzzle = { ...twoByTwoCyclePuzzle(), initialEdges: ['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1'] };
+    const state = createInitialPath(puzzle);
+    expect(state.won).toBe(true);
+  });
+
+  it('treats a puzzle with no initialEdges field the same as no puzzle at all', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    expect(createInitialPath(puzzle).edges.size).toBe(0);
+  });
 });
 
 describe('toggleRegion', () => {
