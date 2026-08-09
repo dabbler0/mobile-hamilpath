@@ -30,7 +30,26 @@
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
             <button class="menuBtn menuBtnSecondary" id="blitzEntryBtn">Blitz</button>
+            <button class="menuBtn menuBtnSecondary" id="settingsEntryBtn">Settings</button>
           </div>
+        </div>
+      </div>
+
+      <!-- Settings: adjust sfx volume (persisted locally, see src/settings.ts). -->
+      <div id="settingsScreen" class="screen menuBgScreen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="settingsBackBtn">‹ Menu</button>
+          <h2>Settings</h2>
+        </div>
+        <div class="menuContent newGameForm">
+          <label class="volumeLabel"
+            >Sound effects volume
+            <span class="volumeRow">
+              <input type="range" id="sfxVolumeSlider" min="0" max="100" value="60" step="1" />
+              <span id="sfxVolumeReadout">60%</span>
+            </span>
+          </label>
+          <button class="secondary" id="sfxVolumePreviewBtn">🔊 Preview</button>
         </div>
       </div>
 
