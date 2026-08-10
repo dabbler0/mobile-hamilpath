@@ -1,6 +1,6 @@
 import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
 import { edgeKey, parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
-import { countCollectionEdges, parseKey, type EdgeCollection, type Puzzle } from './game/puzzle';
+import { countCollectionEdges, key, parseKey, type CellKey, type EdgeCollection, type Puzzle } from './game/puzzle';
 import { topologyFor, wrappedNeighbor, type Topology } from './game/topology';
 import type { Viewport } from './view/viewport';
 
@@ -132,6 +132,8 @@ const COLORS = {
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
+  /** Ring drawn around a cell whose marked-degree exceeds 2 — see `computeMarkedDegrees`/`drawDegreeWarnings`. A plain, highly-saturated red, distinct from (though in the same "something's wrong here" family as) `collectionError`. */
+  degreeError: '#ff3b30',
 };
 
 export interface CometStyle {
@@ -297,8 +299,30 @@ function hueToArcFrac(hue: number): number {
   return t / WALKABLE_ARC;
 }
 
-/** A plain, unmixed red — what the walk's *direction* (below) is chosen to land its second color (`component === 1`) closest to. */
+/** A plain, unmixed red — what the walk's *direction* (below) is chosen to land the walk's near-red color (walk position 1 — see `colorWalkIndex` just below for why that's not necessarily `component === 1`) closest to. */
 const RED_HUE = 0;
+
+/**
+ * Swaps which two walk *positions* components 1 and 9 land on, so that
+ * `segmentColor(1)` (the second connected-component color, in this game's
+ * 1-based player-facing counting) comes out the same as the *old*
+ * `segmentColor(9)` (the tenth) used to be, per this feature's request —
+ * rather than the near-red hue the golden-angle walk naturally puts at
+ * position 1 (see `WALK_DIRECTION`'s doc comment). A plain swap of two
+ * finite walk positions, applied before the walk formula runs, is enough:
+ * the walk itself never changes, so every position it can ever produce
+ * (including 1 and 9 themselves, just relabeled) is still hit by exactly
+ * one component index, and two distinct indices still never land on the
+ * same walk position — the uniqueness `segmentColor`'s doc comment
+ * describes is a property of the walk, not of which index we ask it to
+ * evaluate at. Every index other than 1 and 9 is unaffected. Component 0
+ * is untouched, so it still always lands on `BASE_HUE` as before.
+ */
+function colorWalkIndex(component: number): number {
+  if (component === 1) return 9;
+  if (component === 9) return 1;
+  return component;
+}
 
 function circularHueDistance(a: number, b: number): number {
   const d = Math.abs(a - b) % 360;
@@ -354,14 +378,21 @@ const WALK_DIRECTION: 1 | -1 = (() => {
  * color from the old hand-picked palette this game's design had already
  * settled on survives into the procedural walk exactly as it looked
  * before, rather than the walk picking some arbitrary blue of its own.
- * `WALK_DIRECTION` is then chosen so component 1 lands as close to a plain
- * red as a single fixed step size can manage from that anchor, without
- * disturbing where component 0 landed. Every later component still just
- * keeps walking the same golden-angle step from there, so
+ * `WALK_DIRECTION` is then chosen so walk position 1 lands as close to a
+ * plain red as a single fixed step size can manage from that anchor,
+ * without disturbing where position 0 landed. Every later position still
+ * just keeps walking the same golden-angle step from there, so
  * uniqueness/coverage past those first two is completely unaffected.
+ *
+ * The `component` index passed in is remapped through `colorWalkIndex`
+ * before evaluating the walk — see its own doc comment — so that the
+ * near-red hue the walk naturally puts at position 1 shows up as this
+ * game's *tenth* component color instead of its second, without disturbing
+ * uniqueness or where any other component's color lands.
  */
 export function segmentColor(component: number): string {
-  const frac = (((BASE_FRAC + WALK_DIRECTION * component * GOLDEN_RATIO_CONJUGATE) % 1) + 1) % 1;
+  const walkIndex = colorWalkIndex(component);
+  const frac = (((BASE_FRAC + WALK_DIRECTION * walkIndex * GOLDEN_RATIO_CONJUGATE) % 1) + 1) % 1;
   return hslToHex(arcFracToHue(frac), SEGMENT_SATURATION, SEGMENT_LIGHTNESS);
 }
 
@@ -393,6 +424,7 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawNodes(ctx, puzzle, layout);
   drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
+  if (!won) drawDegreeWarnings(ctx, edges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
@@ -426,6 +458,50 @@ function drawNodes(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout
     ctx.beginPath();
     ctx.arc(sx, sy, r, 0, Math.PI * 2);
     ctx.fill();
+  }
+}
+
+/**
+ * Every cell's current marked-degree (how many currently-marked edges touch
+ * it), keyed by `CellKey` — a cell with no marked edges at all simply has no
+ * entry, same "absence means zero" convention `isBoundaryEnclosed`'s own
+ * degree map uses. A finished win always has every cell at exactly 2
+ * (`computeWin`'s own check), but a region toggle mid-game is free to create
+ * a cell with *more* than 2 (two unrelated toggles both routing a marked
+ * edge through the same corner, say) — `drawDegreeWarnings`/its tiled-board
+ * counterpart below flag any such cell on screen, rather than leaving the
+ * player to notice the problem unaided.
+ */
+function computeMarkedDegrees(edges: ReadonlySet<EdgeKey>): Map<CellKey, number> {
+  const degree = new Map<CellKey, number>();
+  for (const ek of edges) {
+    const [a, b] = parseEdgeKey(ek);
+    const ka = key(a[0], a[1]);
+    const kb = key(b[0], b[1]);
+    degree.set(ka, (degree.get(ka) ?? 0) + 1);
+    degree.set(kb, (degree.get(kb) ?? 0) + 1);
+  }
+  return degree;
+}
+
+/**
+ * Draws a small red ring around every cell whose marked-degree currently
+ * exceeds 2 (see `computeMarkedDegrees`) — a state a win can never be in, so
+ * skipped outright whenever `won`. Drawn after every other overlay
+ * (marked edges, collection badges) so the warning ring is never obscured
+ * by an edge converging on the same point.
+ */
+function drawDegreeWarnings(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+  const degrees = computeMarkedDegrees(edges);
+  const r = Math.max(4, layout.cellSize * 0.22);
+  ctx.strokeStyle = COLORS.degreeError;
+  ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.07);
+  for (const [ck, degree] of degrees) {
+    if (degree <= 2) continue;
+    const [sx, sy] = toScreen(parseKey(ck), layout);
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
   }
 }
 
@@ -921,6 +997,30 @@ function drawWrapped(
         drawBadge(ctx, (sx1 + sx2) / 2, (sy1 + sy2) / 2, r, text, fill);
       }
     });
+  }
+
+  // Same warning ring as `drawDegreeWarnings`'s single-tile version — see
+  // its own doc comment — just projected through `toScreenTiled` once per
+  // repeated tile copy, same as every other overlay in this function.
+  if (!won) {
+    const overfullCells: Array<readonly [number, number]> = [];
+    for (const [ck, degree] of computeMarkedDegrees(edges)) {
+      if (degree > 2) overfullCells.push(parseKey(ck));
+    }
+    if (overfullCells.length > 0) {
+      const dr = Math.max(4, layout.cellSize * 0.22);
+      ctx.strokeStyle = COLORS.degreeError;
+      ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.07);
+      forEachTile((tileX, tileY) => {
+        const orientation = topology.tileOrientation(tileX, tileY);
+        for (const cell of overfullCells) {
+          const [sx, sy] = toScreenTiled(cell, layout, tileX, tileY, W, H, orientation);
+          ctx.beginPath();
+          ctx.arc(sx, sy, dr, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      });
+    }
   }
 
   if (keyboardCursor) {

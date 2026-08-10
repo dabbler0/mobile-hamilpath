@@ -10,6 +10,7 @@ import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathSta
 import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
+import { GAME_NAME } from './gameName';
 import { attachPointerHandling, type GameInputHost } from './input';
 import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { startMenuBackground } from './menuBackground';
@@ -2086,5 +2087,15 @@ sfxVolumeSlider.addEventListener('change', () => {
   saveSfxVolume(Number(sfxVolumeSlider.value) / 100);
 });
 sfxVolumePreviewBtn.addEventListener('click', () => playSfx('menuNav'));
+
+// ---- Game name ----
+// See `gameName.ts`'s doc comment: `GAME_NAME` is the one place a rename
+// needs to happen, and this is what propagates it to every on-screen
+// occurrence (`index.html`'s `.gameName` elements, plus `document.title`,
+// which isn't itself an element `.gameName` could mark).
+document.title = GAME_NAME;
+for (const el of document.querySelectorAll<HTMLElement>('.gameName')) {
+  el.textContent = GAME_NAME;
+}
 
 showScreen('mainMenu');
