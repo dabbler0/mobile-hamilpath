@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-    <title>Einkreis</title>
+    <!-- Static fallback text below (title + both h1.gameName) is overwritten
+         at startup from src/gameName.ts's GAME_NAME (see its doc comment) —
+         kept in sync by hand purely so the brief pre-JS paint isn't stale,
+         not itself load-bearing. -->
+    <title>Eincycle</title>
   </head>
   <body>
     <div id="app">
@@ -25,7 +29,7 @@
       <!-- Main menu: animated postgame-loop background behind Blitz/Free Play. -->
       <div id="mainMenuScreen" class="screen menuBgScreen">
         <div class="menuContent mainMenuContent">
-          <h1 class="menuTitle">Einkreis</h1>
+          <h1 class="menuTitle gameName">Eincycle</h1>
           <p class="menuTagline">Trace one loop through every cell.</p>
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
@@ -203,7 +207,7 @@
         <header>
           <button class="secondary backBtn" id="exitBtn">‹ Exit</button>
           <button class="secondary backBtn hidden" id="blitzExitBtn">‹ Forfeit</button>
-          <h1>Einkreis</h1>
+          <h1 class="gameName">Eincycle</h1>
           <div id="headerInfo">
             <div id="puzzleLabel"></div>
             <div id="progress">0 / 0</div>

@@ -1,12 +1,19 @@
-# Einkreis
+# Eincycle
 
 A mobile-first Hamiltonian-cycle ("loop") puzzle game. Formerly called "Loop
-It" — the current name is, like its predecessor, a placeholder and may
-change again; don't read anything permanent into it. The board is
-partitioned into regions; tapping a region toggles all of its boundary
-edges between marked/unmarked, and the goal is to end up with exactly one
-marked edge at every cell — a single loop visiting every cell on the board.
-TypeScript + Vite, deployed to GitHub Pages.
+It", then "Einkreis" — the current name is, like its predecessors, a
+placeholder and may change again; don't read anything permanent into it.
+Renaming it is now a one-constant edit: `src/gameName.ts`'s `GAME_NAME` is
+the single source of truth for the display name, propagated at startup
+(`main.ts`) to every on-screen occurrence — `index.html`'s `.gameName`
+elements and `document.title` — see `gameName.ts`'s own doc comment for
+what a rename deliberately does *not* touch (storage/identity keys like the
+`loopit:`-prefixed `localStorage` keys and `persistence/db.ts`'s IndexedDB
+database name, which stay put regardless of what the game is called this
+week). The board is partitioned into regions; tapping a region toggles all
+of its boundary edges between marked/unmarked, and the goal is to end up
+with exactly one marked edge at every cell — a single loop visiting every
+cell on the board. TypeScript + Vite, deployed to GitHub Pages.
 
 Original proof of concept was a single HTML file; it was rewritten into
 this project structure with unit tests, then went through several major
