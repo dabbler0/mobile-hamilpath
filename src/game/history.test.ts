@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo, undo, type HistoryState } from './history';
+import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo, resetPath, undo, type HistoryState } from './history';
 import { applyPathOp, createInitialPath, type PathOp, type PathState } from './pathEdit';
 import type { Puzzle } from './puzzle';
 
@@ -180,6 +180,56 @@ describe('recordHint', () => {
 
     const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
     expect(frames).toEqual([START, afterHint]);
+  });
+});
+
+describe('resetPath', () => {
+  it('returns initial as the new state and pushes current onto the undo stack', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    const history = recordMove(createHistory(), START, [op]);
+
+    const result = resetPath(history, afterMove, START);
+    expect(result.state).toEqual(START);
+    expect(canUndo(result.history)).toBe(true);
+  });
+
+  it('clears the redo stack, exactly like a fresh recordMove would', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
+    const undone = undo(history, afterMove)!;
+    history = undone.history;
+    expect(canRedo(history)).toBe(true);
+
+    const result = resetPath(history, undone.state, START);
+    expect(canRedo(result.history)).toBe(false);
+  });
+
+  it('a reset can itself be undone back to the pre-reset state', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    const history = recordMove(createHistory(), START, [op]);
+
+    const reset = resetPath(history, afterMove, START);
+    const undone = undo(reset.history, reset.state);
+    expect(undone).not.toBeNull();
+    expect(undone!.state).toEqual(afterMove);
+  });
+
+  it('shows up in decodeMoveLog as a jump -- the moves before it, the clear itself, and the moves after all appear in order', () => {
+    const op = toggle(['0,0|1,0']);
+    const afterMove = afterToggle(START, op);
+    let history = recordMove(createHistory(), START, [op]);
+
+    const reset = resetPath(history, afterMove, START);
+    history = reset.history;
+    // A move made after the reset (re-toggling the same, only edge here).
+    const afterSecondMove = afterToggle(reset.state, op);
+    history = recordMove(history, reset.state, [op]);
+
+    const frames = decodeMoveLog(PUZZLE, START, history.moveLog);
+    expect(frames).toEqual([START, afterMove, START, afterSecondMove]);
   });
 });
 

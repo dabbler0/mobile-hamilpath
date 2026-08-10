@@ -270,12 +270,21 @@
             <button class="secondary" id="undoBtn" disabled>Undo</button>
             <button class="secondary" id="redoBtn" disabled>Redo</button>
             <button class="secondary" id="hintBtn" disabled title="Locks a random incorrect edge into its correct state">Hint me (beta)</button>
+            <button class="secondary" id="resetBtn" disabled title="Clears the board back to its starting state">Reset</button>
             <button class="secondary" id="giveUpBtn" disabled>Give Up</button>
           </div>
           <div id="completeControls" class="controlGroup hidden">
             <button id="rematchBtn">Rematch</button>
             <button class="secondary" id="viewReplayBtn">Replay</button>
           </div>
+        </div>
+        <!-- Blitz live play's own bottom bar: just Reset (no Undo/Redo/Give
+             Up in Blitz, see CLAUDE.md's "Live play" section) -- clears the
+             current puzzle's board back to its starting (possibly-locked)
+             state and logs the action into the run's replay (GitHub issue
+             #48). -->
+        <div class="controls hidden" id="blitzControls">
+          <button class="secondary" id="blitzResetBtn" title="Clears the board back to its starting state">Reset</button>
         </div>
       </div>
     </div>

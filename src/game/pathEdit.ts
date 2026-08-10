@@ -25,6 +25,33 @@ export function createInitialPath(puzzle?: Puzzle): PathState {
 }
 
 /**
+ * The path state a "reset" (`main.ts`'s `performReset`/Blitz's
+ * `resetBlitzBoard`) restores: every currently-locked edge
+ * (`puzzle.lockedEdges` — a strict superset of `puzzle.initialEdges` once a
+ * live "Hint me" session has locked additional edges mid-game, see
+ * `game/edgeLock.ts`'s `lockEdge`) set to whichever mark state
+ * `solutionEdges` says it should be, and every other edge unmarked — "the
+ * board state after a clear should be as if the game had just started, with
+ * the present set of locked edges as the starting set of them" (GitHub
+ * issue #48). Unlike `createInitialPath`, which only ever needs to look at
+ * the puzzle's own generation-time `initialEdges` (nothing else has locked
+ * anything yet for a brand-new game), this has to stay correct regardless of
+ * how many edges got locked after generation — `puzzle.initialEdges` itself
+ * is never updated by a live hint, only `puzzle.lockedEdges` is. Equivalent
+ * to `createInitialPath(puzzle)` exactly when nothing's been locked since
+ * generation, since `puzzle.initialEdges` is defined to be
+ * `puzzle.lockedEdges` intersected with `solutionEdges` at that point too
+ * (see `puzzleGen.ts`'s `applyLockedEdges`).
+ */
+export function resetToLockedState(puzzle: Puzzle, solutionEdges: ReadonlySet<EdgeKey>): PathState {
+  const edges = new Set<EdgeKey>();
+  for (const ek of puzzle.lockedEdges ?? []) {
+    if (solutionEdges.has(ek)) edges.add(ek);
+  }
+  return { edges, won: computeWin(puzzle, edges) };
+}
+
+/**
  * A win is auto-detected the instant the marked-edge set is exactly one
  * Hamiltonian cycle: every cell has marked-degree 2, and (since toggling
  * regions can freely create branch points or leave the board fragmented)
