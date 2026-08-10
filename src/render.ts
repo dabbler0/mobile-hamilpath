@@ -119,6 +119,12 @@ function lerpColor(from: string, to: string, t: number): string {
   return `rgb(${Math.round(r1 + (r2 - r1) * c)}, ${Math.round(g1 + (g2 - g1) * c)}, ${Math.round(b1 + (b2 - b1) * c)})`;
 }
 
+/** `#rrggbb` plus an explicit alpha — used by `drawDegreeWarningHalo` for the transparent end of its fade gradient (a canvas gradient color stop needs a real alpha channel, not just a color). */
+function hexToRgba(hex: string, alpha: number): string {
+  const [r, g, b] = hexToRgb(hex);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 const COLORS = {
   background: '#14151a',
   edge: '#33353e',
@@ -132,8 +138,6 @@ const COLORS = {
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
-  /** Ring drawn around a cell whose marked-degree exceeds 2 — see `computeMarkedDegrees`/`drawDegreeWarnings`. A plain, highly-saturated red, distinct from (though in the same "something's wrong here" family as) `collectionError`. */
-  degreeError: '#ff3b30',
 };
 
 export interface CometStyle {
@@ -485,23 +489,62 @@ function computeMarkedDegrees(edges: ReadonlySet<EdgeKey>): Map<CellKey, number>
 }
 
 /**
- * Draws a small red ring around every cell whose marked-degree currently
- * exceeds 2 (see `computeMarkedDegrees`) — a state a win can never be in, so
- * skipped outright whenever `won`. Drawn after every other overlay
- * (marked edges, collection badges) so the warning ring is never obscured
- * by an edge converging on the same point.
+ * Width a marked edge is drawn at before any grow/shrink/pulse/comet
+ * scaling — factored out of `drawMarkedEdges`/`drawWrapped` so
+ * `degreeWarningRadius` below can size the degree-warning halo relative to
+ * the *real* path width instead of a second, independently-guessed magic
+ * number.
+ */
+function markedEdgeBaseWidth(layout: Layout): number {
+  return Math.max(3, layout.cellSize * 0.32);
+}
+
+/**
+ * Radius of the degree-warning "fade" halo (see `drawDegreeWarningHalo`) —
+ * comfortably wider than the marked-edge stroke itself
+ * (`markedEdgeBaseWidth`) so an incoming path visibly fades away well
+ * before reaching the vertex, rather than just meeting a dot barely wider
+ * than the line itself.
+ */
+function degreeWarningRadius(layout: Layout): number {
+  return Math.max(10, markedEdgeBaseWidth(layout) * 1.7);
+}
+
+/**
+ * Draws the "fades into the background" halo standing in for this feature's
+ * old plain red ring: a radial gradient centered on the over-marked vertex,
+ * opaque `COLORS.background` at the center thinning out to fully
+ * transparent at `degreeWarningRadius`. Drawn *after* the marked edges
+ * converging on that point (see call sites), so it paints over them — every
+ * incoming path reads as fading out of existence as it approaches the
+ * intersection, rather than a ring that has to compete for attention with
+ * (and can all but disappear against) whatever hue the converging edges
+ * happen to be — the old red ring's real failure mode, since a marked
+ * edge's procedural color (`segmentColor`) can itself land near-red.
+ */
+function drawDegreeWarningHalo(ctx: CanvasRenderingContext2D, sx: number, sy: number, layout: Layout): void {
+  const r = degreeWarningRadius(layout);
+  const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+  gradient.addColorStop(0, COLORS.background);
+  gradient.addColorStop(1, hexToRgba(COLORS.background, 0));
+  ctx.fillStyle = gradient;
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/**
+ * Draws the degree-warning halo (`drawDegreeWarningHalo`) at every cell
+ * whose marked-degree currently exceeds 2 (see `computeMarkedDegrees`) — a
+ * state a win can never be in, so skipped outright whenever `won`. Drawn
+ * after every other overlay (marked edges, collection badges) so the
+ * warning is never obscured by an edge converging on the same point.
  */
 function drawDegreeWarnings(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
-  const degrees = computeMarkedDegrees(edges);
-  const r = Math.max(4, layout.cellSize * 0.22);
-  ctx.strokeStyle = COLORS.degreeError;
-  ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.07);
-  for (const [ck, degree] of degrees) {
+  for (const [ck, degree] of computeMarkedDegrees(edges)) {
     if (degree <= 2) continue;
     const [sx, sy] = toScreen(parseKey(ck), layout);
-    ctx.beginPath();
-    ctx.arc(sx, sy, r, 0, Math.PI * 2);
-    ctx.stroke();
+    drawDegreeWarningHalo(ctx, sx, sy, layout);
   }
 }
 
@@ -578,7 +621,7 @@ function drawMarkedEdges(
   componentColors?: ReadonlyMap<EdgeKey, number> | null,
   lockedEdges?: ReadonlySet<EdgeKey>,
 ): void {
-  const baseWidth = Math.max(3, layout.cellSize * 0.32);
+  const baseWidth = markedEdgeBaseWidth(layout);
   ctx.lineCap = 'round';
 
   // A win is exactly one component covering every cell, so there's nothing to
@@ -828,7 +871,7 @@ function drawWrapped(
   // animation's progress doesn't depend on which repeated tile it's drawn in.
   const components = won ? null : componentColors;
   const cometStyles = anim?.winComet ? computeCometStyles(anim.winComet.cells, anim.winComet.startIndex, anim.winComet.startTime, now) : null;
-  const baseMarkedWidth = Math.max(3, layout.cellSize * 0.32);
+  const baseMarkedWidth = markedEdgeBaseWidth(layout);
   // `alpha` mirrors `drawMarkedEdges`'s own locked-edge dimming — see
   // `LOCKED_EDGE_OPACITY`'s doc comment.
   const tiledMarkedEdges: Array<TiledEdge & { color: string; lineWidth: number; alpha: number }> = [];
@@ -999,25 +1042,21 @@ function drawWrapped(
     });
   }
 
-  // Same warning ring as `drawDegreeWarnings`'s single-tile version — see
-  // its own doc comment — just projected through `toScreenTiled` once per
-  // repeated tile copy, same as every other overlay in this function.
+  // Same degree-warning halo as `drawDegreeWarningHalo`'s single-tile
+  // version — see its own doc comment — just projected through
+  // `toScreenTiled` once per repeated tile copy, same as every other
+  // overlay in this function.
   if (!won) {
     const overfullCells: Array<readonly [number, number]> = [];
     for (const [ck, degree] of computeMarkedDegrees(edges)) {
       if (degree > 2) overfullCells.push(parseKey(ck));
     }
     if (overfullCells.length > 0) {
-      const dr = Math.max(4, layout.cellSize * 0.22);
-      ctx.strokeStyle = COLORS.degreeError;
-      ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.07);
       forEachTile((tileX, tileY) => {
         const orientation = topology.tileOrientation(tileX, tileY);
         for (const cell of overfullCells) {
           const [sx, sy] = toScreenTiled(cell, layout, tileX, tileY, W, H, orientation);
-          ctx.beginPath();
-          ctx.arc(sx, sy, dr, 0, Math.PI * 2);
-          ctx.stroke();
+          drawDegreeWarningHalo(ctx, sx, sy, layout);
         }
       });
     }
