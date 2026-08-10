@@ -4,9 +4,9 @@ import { createComponentColorState, previewComponentColors, resetComponentColorS
 import { applyHintedEdges, lockEdge } from './game/edgeLock';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
-import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, undo as undoHistory, type HistoryState } from './game/history';
+import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, resetPath as resetHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
-import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
+import { applyPathOp, createInitialPath, resetToLockedState, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
@@ -123,6 +123,7 @@ const exitBtn = byId<HTMLButtonElement>('exitBtn');
 const undoBtn = byId<HTMLButtonElement>('undoBtn');
 const redoBtn = byId<HTMLButtonElement>('redoBtn');
 const hintBtn = byId<HTMLButtonElement>('hintBtn');
+const resetBtn = byId<HTMLButtonElement>('resetBtn');
 const giveUpBtn = byId<HTMLButtonElement>('giveUpBtn');
 const activeControlsEl = byId<HTMLDivElement>('activeControls');
 const completeControlsEl = byId<HTMLDivElement>('completeControls');
@@ -141,6 +142,8 @@ const replayCloseBtn = byId<HTMLButtonElement>('replayCloseBtn');
 const toastEl = byId<HTMLDivElement>('toast');
 
 const blitzExitBtn = byId<HTMLButtonElement>('blitzExitBtn');
+const blitzControlsEl = byId<HTMLDivElement>('blitzControls');
+const blitzResetBtn = byId<HTMLButtonElement>('blitzResetBtn');
 const blitzHeaderInfoEl = byId<HTMLDivElement>('blitzHeaderInfo');
 const blitzTimerEl = byId<HTMLDivElement>('blitzTimer');
 const blitzStatsEl = byId<HTMLDivElement>('blitzStats');
@@ -686,6 +689,7 @@ function refreshControlBar(): void {
   undoBtn.disabled = !undoRedoAllowed() || !canUndo(history);
   redoBtn.disabled = !undoRedoAllowed() || !canRedo(history);
   hintBtn.disabled = !hintAllowed();
+  resetBtn.disabled = !undoRedoAllowed();
   giveUpBtn.disabled = !giveUpAllowed();
   viewReplayBtn.classList.toggle('hidden', !pathState.won);
 }
@@ -756,6 +760,41 @@ function performRedo(): void {
   clearEdgeAnimations();
   history = result.history;
   pathState = result.state;
+  focusedRegionId = null;
+  updateProgress();
+  refreshControlBar();
+  render();
+  persistLiveState();
+}
+
+/**
+ * Clears the board back to its starting state — the reintroduced "Reset"
+ * button (GitHub issue #48; an earlier version of Free Play had one too,
+ * removed when Undo/Redo/replay took over, see CLAUDE.md's "In-game
+ * controls"). Shares Undo/Redo's own eligibility (`undoRedoAllowed`) and is
+ * itself undoable, exactly like them: `history.ts`'s `resetPath` pushes the
+ * pre-reset state onto the undo stack and appends a `jump` entry to the
+ * move log, so replay shows exactly what happened — whatever moves came
+ * before, every unlocked edge disappearing at once, then whatever moves
+ * came after. "Starting state" means `pathEdit.ts`'s `resetToLockedState`,
+ * not the puzzle's own generation-time `initialEdges` directly — a live
+ * "Hint me" session can have locked additional edges since the game began
+ * (see that function's own doc comment), and the issue's spec is explicit
+ * that a reset should respect *all* of those, not just the ones the puzzle
+ * started with.
+ */
+function performReset(): void {
+  if (!undoRedoAllowed() || !currentPuzzleId || !puzzle) return;
+  const solutionEdges = generateSolutionEdges(currentPuzzleId);
+  const initial = resetToLockedState(puzzle, solutionEdges);
+  const prev = pathState;
+  const toggled = symmetricDifference(prev.edges, initial.edges);
+  if (toggled.size === 0) return; // nothing to clear
+  clearEdgeAnimations();
+  const result = resetHistory(history, prev, initial);
+  history = result.history;
+  pathState = result.state;
+  scheduleToggleAnimation(liveComponentColors, prev.edges, initial.edges, toggled, false);
   focusedRegionId = null;
   updateProgress();
   refreshControlBar();
@@ -944,6 +983,7 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   exitBtn.classList.remove('hidden');
   blitzExitBtn.classList.add('hidden');
   playControlsEl.classList.remove('hidden');
+  blitzControlsEl.classList.add('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
 
@@ -1128,6 +1168,7 @@ function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
   // Blitz run/replay — see `beginPuzzle`'s matching comment.
   blitzHeaderInfoEl.classList.add('hidden');
   blitzExitBtn.classList.add('hidden');
+  blitzControlsEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
   headerInfoEl.classList.remove('hidden');
   const id = puzzleIdOf(item);
@@ -1409,6 +1450,32 @@ function setBlitzPathState(next: PathState, ops: PathOp[]): void {
   if (next.won && !prevWon) handleBlitzPuzzleSolved();
 }
 
+/**
+ * Clears the current puzzle's board back to its starting (possibly-locked)
+ * state — Blitz's own "Reset" button (`#blitzResetBtn`, GitHub issue #48).
+ * Only meaningful while a puzzle is still live and unsolved: once
+ * `handleBlitzPuzzleSolved` has fired, the next puzzle is already queued up
+ * behind `BLITZ_ADVANCE_DELAY_MS`, and resetting the just-solved board out
+ * from under that transition wouldn't make sense. Blitz has no live "Hint
+ * me" feature to ever lock an edge beyond generation time, so — unlike Free
+ * Play's `performReset`, which has to account for that via
+ * `resetToLockedState` — the plain `createInitialPath(blitzPuzzle)` is
+ * exactly equivalent here and cheaper (no solution recompute needed).
+ * Logged as its own `reset` event (`game/blitz.ts`'s `BlitzEvent`) so replay
+ * shows exactly what happened: whatever moves came before, the board
+ * clearing itself, then whatever moves came after.
+ */
+function resetBlitzBoard(): void {
+  if (mode !== 'blitz' || blitzPathState.won) return;
+  const initial = createInitialPath(blitzPuzzle);
+  const toggled = symmetricDifference(blitzPathState.edges, initial.edges);
+  if (toggled.size === 0) return; // nothing to clear
+  scheduleToggleAnimation(liveComponentColors, blitzPathState.edges, initial.edges, toggled, false);
+  blitzPathState = initial;
+  blitzEvents.push({ kind: 'reset', t: blitzElapsedMs() });
+  render();
+}
+
 function stopBlitzTimer(): void {
   if (blitzTimerRafId !== null) {
     cancelAnimationFrame(blitzTimerRafId);
@@ -1471,6 +1538,7 @@ function startBlitzRun(params: BlitzParams): void {
   exitBtn.classList.add('hidden');
   blitzExitBtn.classList.remove('hidden');
   playControlsEl.classList.add('hidden');
+  blitzControlsEl.classList.remove('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
 
@@ -1654,6 +1722,12 @@ function applyBlitzReplayEvent(ev: BlitzEvent): void {
         for (const op of ev.ops) blitzReplayPathState = applyPathOp(blitzReplayPathState, blitzReplayPuzzle, op);
       }
       break;
+    case 'reset':
+      // Same "no live hints in Blitz" reasoning as live play's own
+      // `resetBlitzBoard` — `createInitialPath` alone is exactly the state
+      // a reset restores here, no `resetToLockedState` needed.
+      if (blitzReplayPuzzle) blitzReplayPathState = createInitialPath(blitzReplayPuzzle);
+      break;
     case 'puzzleSolved':
       blitzReplaySolved += 1;
       break;
@@ -1720,10 +1794,16 @@ function advanceBlitzReplayTo(target: number, animate: boolean): void {
       const toggled = new Set<EdgeKey>();
       for (const op of ev.ops) for (const ek of op.edges) toggled.add(ek);
       scheduleToggleAnimation(reviewComponentColors, before.edges, blitzReplayPathState.edges, toggled, false);
+    } else if (animate && ev.kind === 'reset' && blitzReplayPuzzle) {
+      const before = blitzReplayPathState;
+      applyBlitzReplayEvent(ev);
+      const toggled = symmetricDifference(before.edges, blitzReplayPathState.edges);
+      scheduleToggleAnimation(reviewComponentColors, before.edges, blitzReplayPathState.edges, toggled, false);
     } else {
       applyBlitzReplayEvent(ev);
     }
     if (ev.kind === 'puzzleStart') showToast(`+${(ev.timeAwardedMs / 1000).toFixed(1)}s for this puzzle`);
+    if (ev.kind === 'reset') showToast('Board reset');
     if (ev.kind === 'puzzleSolved') {
       showToast('Solved!');
       // The per-move `scheduleToggleAnimation` call above always passes
@@ -1794,6 +1874,7 @@ function openBlitzReplay(record: BlitzRunRecord, returnScreen: Screen): void {
   exitBtn.classList.add('hidden');
   blitzExitBtn.classList.add('hidden');
   playControlsEl.classList.add('hidden');
+  blitzControlsEl.classList.add('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.remove('hidden');
 
@@ -1953,6 +2034,7 @@ blitzStartBtn.addEventListener(
   }),
 );
 blitzExitBtn.addEventListener('click', navClick(forfeitBlitzRun));
+blitzResetBtn.addEventListener('click', resetBlitzBoard);
 blitzPlayAgainBtn.addEventListener('click', navClick(() => startBlitzRun(blitzParams)));
 blitzGameOverReplayBtn.addEventListener(
   'click',
@@ -1978,6 +2060,7 @@ exitBtn.addEventListener('click', navClick(exitGame));
 undoBtn.addEventListener('click', performUndo);
 redoBtn.addEventListener('click', performRedo);
 hintBtn.addEventListener('click', hintMe);
+resetBtn.addEventListener('click', performReset);
 giveUpBtn.addEventListener('click', revealSolution);
 rematchBtn.addEventListener('click', navClick(rematch));
 viewReplayBtn.addEventListener(

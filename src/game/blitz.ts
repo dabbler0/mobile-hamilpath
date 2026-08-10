@@ -376,14 +376,23 @@ export function createBlitzSequence(runSeed: number): { next(): PuzzleId } {
  * where the award lives now, and applying it (live or in replay) means
  * crediting the clock right away, before a single move has been made on
  * that puzzle. `move` reuses `PathOp` verbatim, same compact shape
- * `history.ts` already uses. There is no `jump`/undo entry: Blitz play has
- * no Undo/Redo (see CLAUDE.md), so every state transition within a puzzle
+ * `history.ts` already uses. There is no `jump`/undo entry the way
+ * `history.ts`'s own `MoveLogEntry` has: Blitz play has no Undo/Redo (see
+ * CLAUDE.md), so every state transition within a puzzle other than a reset
  * is a real forward move. `puzzleSolved` no longer carries an award —
  * solving a puzzle doesn't move the clock at all any more, it only ever
- * unblocks the next `puzzleStart`.
+ * unblocks the next `puzzleStart`. `reset` (GitHub issue #48) is the one
+ * exception to "every transition is a real forward move" — the live
+ * "Reset" button clears the current puzzle's board back to its
+ * (possibly-locked) starting state; it carries no payload beyond `t` since
+ * replay already has everything it needs to reproduce the target state
+ * itself (`main.ts`'s `applyBlitzReplayEvent` just re-derives it from
+ * whichever `puzzleStart` is currently in effect, exactly like live play's
+ * own `resetBlitzBoard` does).
  */
 export type BlitzEvent =
   | { kind: 'puzzleStart'; t: number; sizeKey: string; shapeMode: ShapeMode; seed: number; lockedEdgeFraction?: number; timeAwardedMs: number }
   | { kind: 'move'; t: number; ops: PathOp[] }
+  | { kind: 'reset'; t: number }
   | { kind: 'puzzleSolved'; t: number }
   | { kind: 'runEnd'; t: number; scoreMs: number };

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
     <!-- Static fallback text below (title + both h1.gameName) is overwritten
          at startup from src/gameName.ts's GAME_NAME (see its doc comment) —
@@ -30,10 +30,9 @@
       <div id="mainMenuScreen" class="screen menuBgScreen">
         <div class="menuContent mainMenuContent">
           <h1 class="menuTitle gameName">Eincycle</h1>
-          <p class="menuTagline">Trace one loop through every cell.</p>
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="freePlayEntryBtn">Free Play</button>
-            <button class="menuBtn menuBtnSecondary" id="blitzEntryBtn">Blitz</button>
+            <button class="menuBtn menuBtnBlitz" id="blitzEntryBtn">Blitz</button>
             <button class="menuBtn menuBtnSecondary" id="settingsEntryBtn">Settings</button>
           </div>
         </div>
@@ -53,7 +52,7 @@
               <span id="sfxVolumeReadout">60%</span>
             </span>
           </label>
-          <button class="secondary" id="sfxVolumePreviewBtn">🔊 Preview</button>
+          <button class="secondary" id="sfxVolumePreviewBtn">Preview</button>
         </div>
       </div>
 
@@ -108,15 +107,22 @@
         <div id="blitzLeaderboardRunsListEl" class="listScroll"></div>
       </div>
 
-      <!-- Blitz game over: final score + Play Again / back to Blitz menu. -->
+      <!-- Blitz game over: final score + Play Again / back to Blitz menu. The
+           back button lives in its own top-left `.menuHeader`, matching
+           every other screen's convention (see CLAUDE.md's "Back/exit/done
+           buttons are always top-left") -- it used to be a third button at
+           the bottom of `.menuButtonStack`, which put it in the wrong
+           corner entirely (see GitHub issue #47). -->
       <div id="blitzGameOverScreen" class="screen menuBgScreen hidden">
+        <div class="menuHeader">
+          <button class="secondary backBtn" id="blitzGameOverMenuBtn">‹ Blitz</button>
+        </div>
         <div class="menuContent">
           <h1 class="menuTitle">Time's up!</h1>
           <p class="menuTagline" id="blitzGameOverScore"></p>
           <div class="menuButtonStack">
             <button class="menuBtn menuBtnPrimary" id="blitzPlayAgainBtn">Play Again</button>
             <button class="menuBtn menuBtnSecondary" id="blitzGameOverReplayBtn">Watch Replay</button>
-            <button class="menuBtn menuBtnSecondary" id="blitzGameOverMenuBtn">‹ Blitz Menu</button>
           </div>
         </div>
       </div>
@@ -264,12 +270,21 @@
             <button class="secondary" id="undoBtn" disabled>Undo</button>
             <button class="secondary" id="redoBtn" disabled>Redo</button>
             <button class="secondary" id="hintBtn" disabled title="Locks a random incorrect edge into its correct state">Hint me (beta)</button>
+            <button class="secondary" id="resetBtn" disabled title="Clears the board back to its starting state">Reset</button>
             <button class="secondary" id="giveUpBtn" disabled>Give Up</button>
           </div>
           <div id="completeControls" class="controlGroup hidden">
             <button id="rematchBtn">Rematch</button>
             <button class="secondary" id="viewReplayBtn">Replay</button>
           </div>
+        </div>
+        <!-- Blitz live play's own bottom bar: just Reset (no Undo/Redo/Give
+             Up in Blitz, see CLAUDE.md's "Live play" section) -- clears the
+             current puzzle's board back to its starting (possibly-locked)
+             state and logs the action into the run's replay (GitHub issue
+             #48). -->
+        <div class="controls hidden" id="blitzControls">
+          <button class="secondary" id="blitzResetBtn" title="Clears the board back to its starting state">Reset</button>
         </div>
       </div>
     </div>

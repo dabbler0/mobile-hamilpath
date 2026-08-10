@@ -1013,10 +1013,11 @@ should not erase it from the movie.
   own saved `history` instead, but a *fresh* start never inherits a
   previous attempt's, since an eventual win's replay would otherwise
   confusingly interleave an earlier abandoned attempt with the one that
-  actually finished. (There's no "Reset" button any more — see "Menus and
-  screen navigation" below; abandoning an attempt now means Exit, and
-  either Resume it again later or start a genuinely fresh one via New
-  Game/Rematch.)
+  actually finished. (A "Reset" button — see "In-game controls" below —
+  clears the current attempt's board without abandoning it the way Exit
+  does; it's built on the same undo-stack/move-log mechanism as Undo/Redo,
+  so it doesn't reintroduce the confusing-interleaving problem a naive
+  "wipe and start over" would.)
 - **Backward compatibility**: `history` on `InProgressRecord` and
   `moveLog` on `CompletedRecord` (`gameStore.ts`) are both optional.
   Resuming an old in-progress save with no `history` field falls back to a
@@ -1206,9 +1207,16 @@ screen (and its single canvas) rather than getting screens of their own —
 see "Blitz mode" below for why.
 
 - **Main menu** (`#mainMenuScreen`): the animated postgame-loop background
-  (see "Main menu background" below) behind two buttons — **Free Play** and
-  **Blitz** (opens the Blitz hub, `#blitzMenuScreen` — see "Blitz mode"
-  below).
+  (see "Main menu background" below) behind the title and a vertically
+  centered button stack — **Free Play**, **Blitz** (opens the Blitz hub,
+  `#blitzMenuScreen` — see "Blitz mode" below), and **Settings**. No
+  instructional tagline any more (removed in favor of a future in-app
+  tutorial, GitHub issue #47); Blitz gets its own highlighted button color
+  (`.menuBtnBlitz`, orange), distinct from Free Play's blue `.menuBtnPrimary`,
+  instead of sharing Settings' plain `.menuBtnSecondary` look. (The button
+  group being genuinely centered, rather than pushed toward the bottom, was
+  itself a bugfix — see `style.css`'s `header h1` rule and its own doc
+  comment.)
 - **Free Play hub** (`#freePlayMenuScreen`): three buttons — **New Game**,
   **Resume**, **Replays** — each opening its own screen. "‹ Menu" goes back
   to the main menu.
@@ -1285,11 +1293,26 @@ reviewing — see below) swaps between two button groups depending on whether
 the current live attempt is decided (`refreshControlBar`, called from every
 place that can change `pathState.won`/`gaveUp`):
 
-- **Not yet decided** (`#activeControls`): **Undo**, **Redo**, **Give Up** —
-  same as before, just without the old Reset/History/Next-Puzzle buttons
-  and the size/shape `<select>`s, all of which moved to the menus above (or
-  were removed outright — see "Undo/redo and replay" above for why there's
-  no Reset any more).
+- **Not yet decided** (`#activeControls`): **Undo**, **Redo**, **Hint me
+  (beta)** (`hintMe`, see "Locking edges" above), **Reset**, **Give Up** —
+  the old History/Next-Puzzle buttons and the size/shape `<select>`s are
+  still gone for good (moved to the menus above), but **Reset** (GitHub
+  issue #48) was reintroduced once undo/redo/replay existed to make it
+  safe again: `main.ts`'s `performReset` shares Undo/Redo's own eligibility
+  (`undoRedoAllowed`) and is itself undoable, since it's built on the exact
+  same mechanism they are — `history.ts`'s `resetPath` pushes the pre-reset
+  state onto the undo stack and appends a `jump` entry to the move log,
+  so a reset shows up in replay exactly like it happened: whatever moves
+  came before, every unlocked edge disappearing at once, then whatever
+  moves came after. "Reset" clears the board back to `pathEdit.ts`'s
+  `resetToLockedState(puzzle, solutionEdges)`, not literally
+  `createInitialPath(puzzle)` — a live "Hint me" session can have locked
+  additional edges since the game began (`puzzle.lockedEdges` grows, but
+  the puzzle's own generation-time `initialEdges` never does — see
+  `edgeLock.ts`'s `lockEdge`), and the issue's spec is explicit that a
+  reset should respect *all* currently-locked edges, not just the ones the
+  puzzle started with. The two are exactly equivalent whenever nothing's
+  been locked since generation, which is the common case.
 - **Complete, won or given up** (`#completeControls`): **Rematch** —
   `main.ts`'s `rematch()`, which immediately starts a fresh puzzle with the
   exact same `sizeKey`/`shapeMode`/`collections` as the one just finished
@@ -1625,7 +1648,22 @@ was active before can never bleed into the next.
 There is **no Undo/Redo/Give Up in Blitz** — a live run's only edit funnel
 is `setBlitzPathState` (dispatched from the shared `setPathState` by
 `mode`), which just records the move and checks for a solve; a puzzle is
-either fresh or solved, nothing in between to undo back into. Solving one
+either fresh or solved, nothing in between to undo back into. The one
+exception is **Reset** (`#blitzResetBtn`, GitHub issue #48): a dedicated
+button, shown in its own small `#blitzControls` bar (Blitz's own bottom
+bar, analogous to Free Play's `#playControls` but with just this one
+button — there's no Undo/Redo/Give Up to put next to it), that clears the
+current puzzle's board back to its starting state via `resetBlitzBoard`.
+Unlike Free Play's `performReset`, Blitz has no live "Hint me" feature to
+ever lock an edge beyond generation time, so the plain
+`createInitialPath(blitzPuzzle)` is exactly equivalent to
+`resetToLockedState` here and cheaper (no solution recompute needed) —
+see "In-game controls" above for why the two functions differ at all.
+`resetBlitzBoard` only acts while the current puzzle is still live and
+unsolved (`blitzPathState.won` is `false`); it appends a `{ kind: 'reset',
+t }` event to `blitzEvents` (see "Recording and replaying a run" below) so
+the run's replay shows the clear exactly where it happened, sandwiched
+between whatever moves came before and after. Solving one
 (`next.won && !prevWon`, exactly the same check Free Play's
 `setFreePlayPathState` uses) triggers `handleBlitzPuzzleSolved`, which no
 longer moves the clock at all — it just tallies the solve (`blitzPuzzlesSolved
@@ -1688,9 +1726,13 @@ run" below), and shows the Blitz game-over screen (`#blitzGameOverScreen`,
 one of `BACKGROUND_SCREENS` — see "Main menu background" above — showing
 the shared animated background same as the other fixed-layout Blitz
 screens) with **Play Again** (same `BlitzParams`, a brand-new
-`randomSeed()` — mirrors Free Play's Rematch), **Watch Replay** (opens the
-just-finished run in the real-time replay viewer, disabled if the save
-itself failed), and **‹ Blitz Menu**.
+`randomSeed()` — mirrors Free Play's Rematch) and **Watch Replay** (opens
+the just-finished run in the real-time replay viewer, disabled if the save
+itself failed) as its button stack, plus its own top-left `.menuHeader`
+back button ("‹ Blitz") — moved there from a third button at the bottom of
+the stack so it follows this project's usual "back is always top-left"
+convention (see "Back/exit/done buttons are always top-left" above, and
+GitHub issue #47).
 
 ### Recording and replaying a run
 
@@ -1719,8 +1761,20 @@ states:
   `layout()`'s `fitView()` always has a real `wrapEl` size to compute
   against.
 - `{ kind: 'move', t, ops }` — reuses `PathOp` verbatim, same compact shape
-  `history.ts`'s `moveLog` already uses. There's no `jump`/undo entry (no
-  Undo/Redo in Blitz — every transition is a real forward move).
+  `history.ts`'s `moveLog` already uses. There's no `jump`/undo entry the
+  way `history.ts`'s own `MoveLogEntry` has (no Undo/Redo in Blitz — every
+  transition other than a reset is a real forward move).
+- `{ kind: 'reset', t }` — the live "Reset" button (`#blitzResetBtn`, see
+  "Live play" above, GitHub issue #48). Carries no payload beyond `t`:
+  applying it (`applyBlitzReplayEvent`) just re-derives
+  `createInitialPath(blitzReplayPuzzle)` from whichever `puzzleStart` is
+  currently in effect, exactly like live play's own `resetBlitzBoard`
+  does, so there's nothing else to record. `advanceBlitzReplayTo`'s
+  animated forward-step path treats it like a `move` — computing the
+  symmetric difference between the before/after edge sets and running it
+  through the same `scheduleToggleAnimation` grow/shrink juice — and shows
+  a "Board reset" toast, so scrubbing forward through one during playback
+  reads the same as watching it happen live.
 - `{ kind: 'puzzleSolved', t }` — no longer carries a time award (moved to
   `puzzleStart`, see above); only marks that the puzzle in progress at `t`
   was solved, for the puzzles-solved tally.

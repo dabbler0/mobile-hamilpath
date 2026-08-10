@@ -77,6 +77,24 @@ export interface HistoryStepResult {
   state: PathState;
 }
 
+/**
+ * Resets the path back to `initial` (`pathEdit.ts`'s `resetToLockedState`)
+ * — modeled exactly like undo/redo: `current` goes on the undo stack (so a
+ * reset can itself be undone) and a `jump` entry lands in the move log, so
+ * replay shows exactly what happened — whatever moves came before, then
+ * every unlocked edge disappearing at once, then whatever moves came after
+ * (see GitHub issue #48).
+ */
+export function resetPath(history: HistoryState, current: PathState, initial: PathState): HistoryStepResult {
+  const undoStack = [...history.undoStack, encodePathState(current)].slice(-MAX_UNDO_DEPTH);
+  const nextHistory: HistoryState = {
+    undoStack,
+    redoStack: [],
+    moveLog: [...history.moveLog, { kind: 'jump', state: encodePathState(initial) }],
+  };
+  return { history: nextHistory, state: initial };
+}
+
 /** Steps back to the previous state, if any is available. */
 export function undo(history: HistoryState, current: PathState): HistoryStepResult | null {
   if (history.undoStack.length === 0) return null;
