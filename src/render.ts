@@ -500,9 +500,9 @@ function markedEdgeBaseWidth(layout: Layout): number {
 }
 
 /**
- * Radius of the degree-warning "fade" halo (see `drawDegreeWarningHalo`) —
- * comfortably wider than the marked-edge stroke itself
- * (`markedEdgeBaseWidth`) so an incoming path visibly fades away well
+ * Outer radius of the degree-warning "fade" halo (see
+ * `drawDegreeWarningHalo`) — comfortably wider than the marked-edge stroke
+ * itself (`markedEdgeBaseWidth`) so an incoming path visibly fades away well
  * before reaching the vertex, rather than just meeting a dot barely wider
  * than the line itself.
  */
@@ -511,21 +511,39 @@ function degreeWarningRadius(layout: Layout): number {
 }
 
 /**
+ * Radius of the halo's fully-opaque "core" — the flat plateau at the center
+ * of `drawDegreeWarningHalo`'s gradient, before the fade to transparent
+ * even begins. Deliberately wider than the marked-edge stroke's own radius
+ * (half of `markedEdgeBaseWidth`), so the solid core alone is already
+ * bigger than the path passing through it: every converging edge is fully
+ * erased right at the vertex, reading as an unambiguous break/gap in the
+ * path, with the fade only kicking in *after* that — rather than the path
+ * merely thinning out through a halo that never quite finishes erasing it.
+ */
+function degreeWarningCoreRadius(layout: Layout): number {
+  return markedEdgeBaseWidth(layout) * 0.7;
+}
+
+/**
  * Draws the "fades into the background" halo standing in for this feature's
- * old plain red ring: a radial gradient centered on the over-marked vertex,
- * opaque `COLORS.background` at the center thinning out to fully
- * transparent at `degreeWarningRadius`. Drawn *after* the marked edges
- * converging on that point (see call sites), so it paints over them — every
- * incoming path reads as fading out of existence as it approaches the
- * intersection, rather than a ring that has to compete for attention with
- * (and can all but disappear against) whatever hue the converging edges
- * happen to be — the old red ring's real failure mode, since a marked
- * edge's procedural color (`segmentColor`) can itself land near-red.
+ * old plain red ring: a radial gradient centered on the over-marked vertex —
+ * flat, fully opaque `COLORS.background` out to `degreeWarningCoreRadius`
+ * (already wider than the path itself, so the core alone reads as a clean
+ * break), then thinning out to fully transparent at `degreeWarningRadius`.
+ * Drawn *after* the marked edges converging on that point (see call sites),
+ * so it paints over them — every incoming path reads as being cut, then
+ * fading out of existence as it approaches the intersection, rather than a
+ * ring that has to compete for attention with (and can all but disappear
+ * against) whatever hue the converging edges happen to be — the old red
+ * ring's real failure mode, since a marked edge's procedural color
+ * (`segmentColor`) can itself land near-red.
  */
 function drawDegreeWarningHalo(ctx: CanvasRenderingContext2D, sx: number, sy: number, layout: Layout): void {
   const r = degreeWarningRadius(layout);
+  const coreR = degreeWarningCoreRadius(layout);
   const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
   gradient.addColorStop(0, COLORS.background);
+  gradient.addColorStop(coreR / r, COLORS.background);
   gradient.addColorStop(1, hexToRgba(COLORS.background, 0));
   ctx.fillStyle = gradient;
   ctx.beginPath();
