@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeRegions, edgeKey, lockEdgeInRegionMap, regionAt, regionsForEdge, type EdgeKey, type RegionMap } from './regions';
+import { computeRegions, edgeKey, isBoundaryEnclosed, lockEdgeInRegionMap, regionAt, regionsForEdge, type EdgeKey, type RegionMap } from './regions';
 import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, parseKey, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
 import { rectShape } from './shape';
@@ -249,6 +249,89 @@ describe('computeRegions', () => {
     expect(region.boundary).toEqual([]);
   });
 });
+
+describe('isBoundaryEnclosed / Region.enclosed (see CLAUDE.md\'s "non-enclosed region" bug)', () => {
+  it('a closed rectangle of edges is enclosed', () => {
+    const boundary = [edgeKey([0, 0], [1, 0]), edgeKey([1, 0], [1, 1]), edgeKey([1, 1], [0, 1]), edgeKey([0, 1], [0, 0])];
+    expect(isBoundaryEnclosed(boundary)).toBe(true);
+  });
+
+  it('an open chain (one edge short of closing) is not enclosed', () => {
+    const boundary = [edgeKey([0, 0], [1, 0]), edgeKey([1, 0], [1, 1]), edgeKey([1, 1], [0, 1])]; // missing the (0,1)-(0,0) edge that would close it
+    expect(isBoundaryEnclosed(boundary)).toBe(false);
+  });
+
+  it('an empty boundary is vacuously enclosed', () => {
+    expect(isBoundaryEnclosed([])).toBe(true);
+  });
+
+  it('two disjoint closed loops are still enclosed together', () => {
+    const loop1 = [edgeKey([0, 0], [1, 0]), edgeKey([1, 0], [1, 1]), edgeKey([1, 1], [0, 1]), edgeKey([0, 1], [0, 0])];
+    const loop2 = [edgeKey([5, 5], [6, 5]), edgeKey([6, 5], [6, 6]), edgeKey([6, 6], [5, 6]), edgeKey([5, 6], [5, 5])];
+    expect(isBoundaryEnclosed([...loop1, ...loop2])).toBe(true);
+  });
+
+  it('computeRegions marks a region non-enclosed when a lone, unpaired candidate edge reaches the true board edge with nothing to close the loop', () => {
+    // 3x2 vertex grid: faces (0,0) and (1,0), fused into one region since
+    // their shared wall (1,0)-(1,1) is non-candidate (a permanent wall).
+    // Every *other* wall around the resulting 2-face domino is a candidate
+    // edge except (0,0)-(0,1) (face(0,0)'s own left wall, on the board's
+    // true outer edge) — one missing "spoke" of the hexagon that would
+    // otherwise close around the domino. This is the minimal case of the
+    // bug CLAUDE.md describes: a real puzzle reaches it via a lone,
+    // unpaired distractor edge landing on the true perimeter (see
+    // `puzzleGen.test.ts`'s "non-enclosed regions on real generated
+    // puzzles" for the same thing occurring from actual generation).
+    const puzzle = puzzleFromEdges(3, 2, [
+      [[0, 0], [1, 0]], // above face(0,0)
+      [[0, 1], [1, 1]], // below face(0,0)
+      [[1, 0], [2, 0]], // above face(1,0)
+      [[2, 0], [2, 1]], // right face(1,0)
+      [[1, 1], [2, 1]], // below face(1,0)
+      // (1,0)-(1,1) [interior, shared by both faces] and (0,0)-(0,1)
+      // [face(0,0)'s left wall, true perimeter] are both deliberately
+      // omitted — the first fuses the two faces, the second is the gap.
+    ]);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    const regionId = faceToRegion.get('0,0')!;
+    expect(faceToRegion.get('1,0')).toBe(regionId); // confirms the fixture actually fused the two faces as intended
+    const region = regions[regionId];
+    expect(region.boundary).toHaveLength(5);
+    expect(region.enclosed).toBe(false);
+  });
+
+  it('the same domino is enclosed once the gap edge is filled in too', () => {
+    const puzzle = puzzleFromEdges(3, 2, [
+      [[0, 0], [1, 0]],
+      [[0, 1], [1, 1]],
+      [[1, 0], [2, 0]],
+      [[2, 0], [2, 1]],
+      [[1, 1], [2, 1]],
+      [[0, 0], [0, 1]], // the gap from the test above, now filled in
+    ]);
+    const { faceToRegion, regions } = computeRegions(puzzle);
+    const region = regions[faceToRegion.get('0,0')!];
+    expect(region.boundary).toHaveLength(6);
+    expect(region.enclosed).toBe(true);
+  });
+
+  it('a wraparound board never produces a non-enclosed region, even in the fully-walled-except-one-edge fixture used elsewhere in this file', () => {
+    for (const topologyKind of ['torus', 'klein', 'projective'] as const) {
+      const puzzle = fullyWalledWrappedPuzzle(4, 4, topologyKind, rightEdgeFor(topologyKind));
+      const { regions } = computeRegions(puzzle);
+      for (const region of regions) expect(region.enclosed).toBe(true);
+    }
+  });
+});
+
+function rightEdgeFor(topologyKind: TopologyKind): EdgeKey {
+  const table: Record<TopologyKind, EdgeKey> = {
+    torus: edgeKey([0, 3], [0, 0]),
+    klein: edgeKey([0, 3], [3, 0]),
+    projective: edgeKey([0, 0], [3, 3]),
+  };
+  return table[topologyKind];
+}
 
 describe('computeRegions with locked edges', () => {
   it('treats a locked edge exactly like a permanent wall: fuses its two faces and excludes it from every boundary', () => {

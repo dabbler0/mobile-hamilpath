@@ -145,8 +145,12 @@ export function attachPointerHandling(wrapEl: HTMLElement, host: GameInputHost):
     const puzzle = host.getPuzzle();
     const layout = host.getLayout();
     const face = faceAt(px, py, layout, puzzle.W, puzzle.H, puzzle.topology ? topologyFor(puzzle.topology) : undefined);
-    const regionId = regionAt(host.getRegionMap(), face);
-    if (regionId !== null) {
+    const regionMap = host.getRegionMap();
+    const regionId = regionAt(regionMap, face);
+    // A region whose boundary isn't actually a closed loop (`Region.enclosed`
+    // — see its doc comment) can't be safely toggled at all, so it's treated
+    // exactly like tapping outside any region: no highlight, no candidate.
+    if (regionId !== null && regionMap.regions[regionId].enclosed) {
       tapCandidate = { regionId, downClientX: evt.clientX, downClientY: evt.clientY };
       host.setFocusedRegion(regionId);
     }

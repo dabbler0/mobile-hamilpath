@@ -1,5 +1,5 @@
 import type { Cell } from './hamiltonianCycle';
-import { key, parseKey, type Puzzle } from './puzzle';
+import { key, parseKey, type CellKey, type Puzzle } from './puzzle';
 import { topologyFor, type Topology } from './topology';
 
 export type EdgeKey = string;
@@ -37,11 +37,98 @@ export interface Region {
   faces: Face[];
   /** Every puzzle-graph edge that separates this region's faces from a neighboring face in a different region (or from the outside the board, where there's no neighboring face at all). Toggling the region flips all of these. */
   boundary: EdgeKey[];
+  /**
+   * Whether `boundary` is actually safe to toggle — see `isBoundaryEnclosed`'s
+   * doc comment for what "safe" means and why it can fail. `false` is rare
+   * but real: on an unwrapped (non-toroidal) board, a region that reaches the
+   * board's true outer edge (or a non-rectangular shape's own gap) through a
+   * lone, unpaired distractor edge can end up with a `boundary` that isn't a
+   * closed loop at all — see CLAUDE.md's "non-enclosed region" bug. `input.ts`
+   * and `keyboard.ts` both check this before calling `toggleRegion`, refusing
+   * to toggle a region where it's `false`; `game/edgeLock.ts`'s `lockEdge`
+   * (generation-time locking and the live "Hint me" feature) checks it too,
+   * when choosing which of an edge's bordering regions to toggle — unlike
+   * the player-facing input layer, it can't just refuse outright (the edge
+   * still has to end up in the right mark state), so it prefers an enclosed
+   * candidate and only falls back to setting the edge's mark state directly,
+   * with no toggle at all, when every bordering region is non-enclosed (see
+   * `lockEdge`'s own doc comment). `toggleRegion`/`applyPathOp` themselves
+   * stay completely unconditional either way — this field is checked by
+   * every *caller* that picks which region to toggle, never inside
+   * `toggleRegion` itself. Always `true` on a wraparound board, which never
+   * has a true outer edge for this to arise from in the first place (see
+   * `isBoundaryEnclosed`).
+   */
+  enclosed: boolean;
 }
 
 export interface RegionMap {
   faceToRegion: Map<FaceKey, number>;
   regions: Region[];
+}
+
+/**
+ * Whether `boundary` (a region's own boundary edge set) is a genuine union
+ * of closed loops — every cell it touches has an *even* number of `boundary`
+ * edges incident to it. This is the property `toggleRegion` structurally
+ * relies on: flipping a closed-loop edge set changes every touched cell's
+ * marked-degree by an even amount, which is what keeps "every cell's
+ * marked-degree is even" an invariant across *any* sequence of taps,
+ * starting from the all-unmarked board (degree 0 everywhere, trivially
+ * even) — `computeWin` only has to check for degree-exactly-2, never
+ * "even", because it's supposed to already be guaranteed. A region whose
+ * boundary *isn't* closed breaks that guarantee the instant it's toggled:
+ * some cell ends up with a dangling single marked edge (odd degree), a
+ * state `computeWin` can never call a win and the player can never undo by
+ * tapping the same broken region again (toggling it a second time just
+ * restores the *other* odd state, not evenness).
+ *
+ * This can only happen on an unwrapped board, and only because of how
+ * `computeRegions` models a face's boundary that reaches clean off the edge
+ * of the board (a true outer edge, or a non-rectangular shape's own gap —
+ * `wall.neighbor === null`): unlike an *interior* non-candidate wall (which
+ * fuses its two faces into one region, so the wall drops out of the
+ * boundary *and* out of the geometric picture together), a non-candidate
+ * wall with no neighbor at all has nothing to fuse with — it simply
+ * vanishes, taking its contribution to the loop with it, while a real
+ * candidate edge on that same true edge is still unconditionally added.
+ * When the shape's actual candidate-edge structure "expects" that vanished
+ * wall to be there to complete the loop (typically a lone, unpaired
+ * distractor edge dropped right on the true perimeter — see CLAUDE.md's
+ * "non-enclosed region" bug for the concrete case this was found from), the
+ * boundary comes out open instead of closed. A wraparound board never hits
+ * this: every wall always has a real neighbor there (`wall.neighbor` is
+ * never `null`), so nothing ever "vanishes" — see `computeRegions`'s own
+ * doc comment on `wrapped`.
+ *
+ * Deliberately *not* attempted to be fixed by changing which faces group
+ * into a region, or which edges land in `boundary` — the region a fix like
+ * that would actually need to produce is not always expressible as a union
+ * of whole grid faces at all (the "correct" closed loop can cut back
+ * through the interior via a *different* candidate edge at the same
+ * vertex), which is a fundamentally different, far riskier computation than
+ * this codebase's grid-square-flood-fill regions. Simply refusing to toggle
+ * such a region is exactly equivalent to the puzzle never having offered
+ * that lone unpaired distractor edge in the first place: every *other*
+ * edge on the broken region's boundary is still an ordinary interior wall
+ * bordering some other, different (and reliably enclosed) region too, so
+ * nothing becomes permanently unreachable by disabling just this one region
+ * — verified for real generated puzzles in `regions.test.ts` and
+ * `puzzleGen.test.ts` ("every solution edge stays reachable...").
+ */
+export function isBoundaryEnclosed(boundary: readonly EdgeKey[]): boolean {
+  const degree = new Map<CellKey, number>();
+  for (const ek of boundary) {
+    const [a, b] = parseEdgeKey(ek);
+    const ka = key(a[0], a[1]);
+    const kb = key(b[0], b[1]);
+    degree.set(ka, (degree.get(ka) ?? 0) + 1);
+    degree.set(kb, (degree.get(kb) ?? 0) + 1);
+  }
+  for (const d of degree.values()) {
+    if (d % 2 !== 0) return false;
+  }
+  return true;
 }
 
 /**
@@ -270,7 +357,7 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
       if (regionId === undefined) {
         regionId = regions.length;
         rootToRegionId.set(root, regionId);
-        regions.push({ id: regionId, faces: [], boundary: [] });
+        regions.push({ id: regionId, faces: [], boundary: [], enclosed: true }); // `enclosed` is a placeholder here — set for real once `boundary` is filled in below
       }
       regions[regionId].faces.push([fx, fy]);
       faceToRegion.set(key(fx, fy), regionId);
@@ -321,7 +408,10 @@ export function computeRegions(puzzle: Puzzle): RegionMap {
     }
   }
 
-  for (let i = 0; i < regions.length; i++) regions[i].boundary = [...boundarySets[i]];
+  for (let i = 0; i < regions.length; i++) {
+    regions[i].boundary = [...boundarySets[i]];
+    regions[i].enclosed = isBoundaryEnclosed(regions[i].boundary);
+  }
 
   return { faceToRegion, regions };
 }
@@ -419,7 +509,8 @@ export function lockEdgeInRegionMap(regionMap: RegionMap, edge: EdgeKey): LockEd
 
   if (ids.length === 1) {
     const id = ids[0];
-    regions[id] = { ...regions[id], boundary: regions[id].boundary.filter((ek) => ek !== edge) };
+    const boundary = regions[id].boundary.filter((ek) => ek !== edge);
+    regions[id] = { ...regions[id], boundary, enclosed: isBoundaryEnclosed(boundary) };
     return { regionMap: { faceToRegion, regions }, strandedEdges: [] };
   }
 
@@ -440,8 +531,8 @@ export function lockEdgeInRegionMap(regionMap: RegionMap, edge: EdgeKey): LockEd
   for (const ek of boundaryB) {
     if (!boundaryA.has(ek)) mergedBoundary.add(ek);
   }
-  regions[idA] = { id: idA, faces: [...regionA.faces, ...regionB.faces], boundary: [...mergedBoundary] };
-  regions[idB] = { id: idB, faces: [], boundary: [] }; // tombstone: unreachable, since every face that pointed here now points to idA below
+  regions[idA] = { id: idA, faces: [...regionA.faces, ...regionB.faces], boundary: [...mergedBoundary], enclosed: isBoundaryEnclosed([...mergedBoundary]) };
+  regions[idB] = { id: idB, faces: [], boundary: [], enclosed: true }; // tombstone: unreachable, since every face that pointed here now points to idA below
   for (const face of regionB.faces) {
     faceToRegion.set(key(face[0], face[1]), idA);
   }

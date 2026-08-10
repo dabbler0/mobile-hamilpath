@@ -4,6 +4,17 @@ import { createInitialPath, toggleRegion } from './pathEdit';
 import { key, type Puzzle } from './puzzle';
 import { computeRegions, edgeKey, regionsForEdge } from './regions';
 
+/** A puzzle with exactly `edges` as its candidate graph — same helper `regions.test.ts` uses. */
+function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
+  const adj = new Map<string, Set<string>>();
+  for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+  for (const [a, b] of edges) {
+    adj.get(key(a[0], a[1]))!.add(key(b[0], b[1]));
+    adj.get(key(b[0], b[1]))!.add(key(a[0], a[1]));
+  }
+  return { adj, W, H, startCell: [0, 0] };
+}
+
 /** Two faces, (0,0) and (1,0), on a 3x2 vertex grid, sharing exactly one real candidate edge — the vertical edge (1,0)-(1,1) — so without locking they're two separate single-face regions each boundaried by just that edge. Mirrors `regions.test.ts`'s own helper/setup. */
 function twoRegionPuzzle(): Puzzle {
   const W = 3;
@@ -107,6 +118,73 @@ describe('lockEdge', () => {
     const ek = edgeKey([1, 0], [1, 1]);
     const first = lockEdge(puzzle, regionMap, createInitialPath(), ek, true);
     expect(() => lockEdge(first.puzzle, first.regionMap, first.state, ek, false)).toThrow();
+  });
+
+  it('prefers an enclosed region over a smaller non-enclosed one — never bakes a dangling odd-marked-degree cell into the result (see CLAUDE.md\'s "non-enclosed region" bug)', () => {
+    // 3x3 vertex grid, 4 faces. Region A = {(1,0)} alone (3-edge boundary,
+    // *not* enclosed — its own true-perimeter "above" wall is missing, an
+    // open chain, same shape as `regions.test.ts`'s minimal repro). Region B
+    // = {(0,1),(1,1)} (a proper 6-edge closed hexagon, enclosed). Both
+    // border the shared candidate edge (1,1)-(2,1) — region A's own
+    // "below" wall, region B's own face-(1,1) "above" wall. A naive
+    // "always toggle the smaller boundary" tie-break (3 < 6) would pick
+    // the *non-enclosed* region A, which is exactly the bug this test
+    // guards against.
+    const puzzle = puzzleFromEdges(3, 3, [
+      [[1, 0], [1, 1]],
+      [[1, 1], [2, 1]], // the shared target edge
+      [[2, 0], [2, 1]],
+      [[0, 1], [1, 1]],
+      [[0, 1], [0, 2]],
+      [[0, 2], [1, 2]],
+      [[2, 1], [2, 2]],
+      [[1, 2], [2, 2]],
+      // (1,0)-(2,0) [region A's own true-perimeter "above" wall] and
+      // (1,1)-(1,2) [the wall that fuses region B's two faces] are both
+      // deliberately omitted.
+    ]);
+    const regionMap = computeRegions(puzzle);
+    const target = edgeKey([1, 1], [2, 1]);
+    const candidates = regionsForEdge(regionMap, target);
+    expect(candidates).toHaveLength(2);
+    const regionA = regionMap.regions.find((r) => r.boundary.length === 3)!;
+    const regionB = regionMap.regions.find((r) => r.boundary.length === 6)!;
+    expect(regionA.enclosed).toBe(false);
+    expect(regionB.enclosed).toBe(true);
+
+    const result = lockEdge(puzzle, regionMap, createInitialPath(), target, true);
+    // Region B's whole 6-edge boundary got marked, not region A's 3 — confirms
+    // the enclosed (but larger) region was chosen over the non-enclosed one.
+    expect(result.state.edges.size).toBe(6);
+    for (const ek of regionB.boundary) expect(result.state.edges.has(ek)).toBe(true);
+  });
+
+  it('falls back to setting the mark state directly when every bordering region is non-enclosed, without introducing a dangling odd-marked-degree cell', () => {
+    // Same shape as the test above, but region B's own "gap" (the missing
+    // interior fuse) is instead a missing *true-perimeter* wall too, making
+    // region B non-enclosed as well — so *neither* region bordering the
+    // shared edge is safe to toggle.
+    const puzzle = puzzleFromEdges(3, 3, [
+      [[1, 0], [1, 1]],
+      [[1, 1], [2, 1]], // the shared target edge
+      [[2, 0], [2, 1]],
+      [[0, 1], [1, 1]],
+      [[0, 2], [1, 2]],
+      [[2, 1], [2, 2]],
+      [[1, 2], [2, 2]],
+      // (1,0)-(2,0) [region A's gap] and (0,1)-(0,2) [region B's gap] are
+      // both omitted this time, alongside (1,1)-(1,2) [still fusing region
+      // B's two faces together] — leaving both bordering regions open chains.
+    ]);
+    const regionMap = computeRegions(puzzle);
+    const target = edgeKey([1, 1], [2, 1]);
+    const candidates = regionsForEdge(regionMap, target);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const id of candidates) expect(regionMap.regions[id].enclosed).toBe(false);
+
+    const result = lockEdge(puzzle, regionMap, createInitialPath(), target, true);
+    expect(result.state.edges).toEqual(new Set([target])); // set directly, nothing else disturbed
+    expect(result.state.edges.has(target)).toBe(true);
   });
 });
 

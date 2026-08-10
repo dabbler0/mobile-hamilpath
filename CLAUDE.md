@@ -222,6 +222,50 @@ marked — with no distractor edges, it usually comes out as just a couple of
 regions (the thickened spanning-tree corridor, and whatever's outside it),
 each of whose boundary is exactly the hidden Hamiltonian cycle.
 
+**Not every computed region is actually safe to toggle.** Toggling a region
+only preserves the game's core invariant (every cell's marked-degree stays
+*even* after any sequence of taps, starting from 0 at an empty board) if
+that region's own `boundary` is itself a closed loop — every cell it
+touches has an even number of `boundary` edges. On an unwrapped
+(non-toroidal) board, a lone, unpaired distractor edge can land exactly on
+the board's true outer edge (or a non-rectangular shape's own gap) with no
+matching edge to close the loop around it there — `computeRegions` still
+has to include that one real candidate edge in whichever region borders it
+(nothing else can ever toggle it), but the resulting `boundary` ends up an
+*open* chain instead of a closed one. Toggling a region like that would
+create a cell with a dangling single marked edge — a state `computeWin` can
+never call a win, and neither the same tap nor any other single tap can
+undo, since nothing else touches that same open chain. `regions.ts`'s
+`isBoundaryEnclosed`/`Region.enclosed` detects this per region (every
+region on a wraparound board is always enclosed — there's no true outer
+edge for the problem to arise from); `input.ts` and `keyboard.ts` refuse to
+highlight or toggle a non-enclosed region at all — a tap or keyboard cursor
+on one behaves exactly as if there were no region there. `pathEdit.ts`'s
+`toggleRegion` itself stays completely unchanged and unconditional — the
+check lives in every *caller* that picks which region to toggle, not inside
+`toggleRegion` itself, which is what lets `game/edgeLock.ts`'s `lockEdge`
+(both generation-time locking and the live "Hint me" feature — see
+"Locking edges" below) apply the *same* check with different fallback
+behavior: it can't just refuse outright the way the input layer does, since
+the edge it's locking still has to end up in the right mark state, so it
+prefers an enclosed candidate among an edge's bordering regions and only
+falls back to setting the edge's mark state directly (no toggle at all)
+once every candidate is non-enclosed — `lockEdge`'s own doc comment has the
+details, including why this was a real bug found (and fixed) here, not a
+hypothetical one: an earlier version of `lockEdge` picked purely by
+boundary size with no enclosure check, and did measurably pick a
+non-enclosed region in practice, which could bake a dangling
+odd-marked-degree cell into a locked puzzle's starting state — see
+`puzzleGen.test.ts`'s "never bakes a dangling odd-marked-degree cell into
+initialEdges" test. Refusing to toggle a non-enclosed region never strands
+anything real: every other edge on its boundary is an ordinary interior
+wall that also borders some other, different (and reliably enclosed)
+region, so it stays reachable through that one instead — verified for real
+generated puzzles, across every shape mode, in `regions.test.ts` and
+`puzzleGen.test.ts` (including a GF(2) linear-algebra check that the
+intended solution stays fully reachable using only enclosed regions, not
+just that each individual solution edge does).
+
 - **Tap** a face (mouse/touch, `src/input.ts`) or move the keyboard cursor
   onto it and press the action key (Enter/Space, `src/keyboard.ts`) →
   `pathEdit.ts`'s `toggleRegion` flips every one of that region's boundary
@@ -633,13 +677,18 @@ and `Puzzle.initialEdges` (which of them must start marked, for
 `pathEdit.ts`'s `createInitialPath(puzzle)` to seed a fresh `PathState`
 with) are the two structural fields this adds to `Puzzle`. `regions.ts`'s
 `regionsForEdge` finds which region(s) currently border a given edge (what
-`lockEdge` needs to decide what to toggle); when an edge borders two
-*different* regions, `lockEdge` toggles whichever one has the smaller
-boundary, to keep the collateral flipping (see below) as small as
-practical. None of this is wired into live gameplay yet — the capability
-exists so a future hint feature can lock a single edge mid-game the same
-way, but its first, and so far only, real use is the generation-time
-feature described below.
+`lockEdge` needs to decide what to toggle); only an *enclosed* candidate
+(`Region.enclosed` — see "The face grid, regions, and the tap-to-toggle
+interaction" above) is ever eligible to toggle at all, and among those,
+`lockEdge` toggles whichever has the smaller boundary, to keep the
+collateral flipping (see below) as small as practical — if an edge borders
+no enclosed region at all (every bordering region happens to be
+non-enclosed, or none border it any more), its mark state is set directly
+instead, with no toggle. See `lockEdge`'s own doc comment for why the
+enclosure check matters here specifically: toggling a non-enclosed region
+mid-lock would bake a dangling odd-marked-degree cell into the result with
+no way for the player to ever correct it, since the edge is about to become
+permanently locked regardless.
 
 **Locking is not the same as deleting**, but the two coincide in one
 specific case: at the very start of a fresh game (every edge unmarked),

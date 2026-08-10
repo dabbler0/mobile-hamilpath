@@ -74,16 +74,27 @@ export function attachKeyboardHandling(target: Window, host: KeyboardInputHost):
     return cursor;
   }
 
+  // A region whose boundary isn't actually a closed loop (`Region.enclosed`
+  // — see its doc comment) can't be safely toggled — the cursor can still
+  // sit on one (unlike a pointer tap, the cursor is always somewhere on the
+  // face grid, never "outside" a region), but it's never reported as
+  // focused/toggleable, exactly as if there were no region there at all.
+  function enclosedRegionAt(face: Face): number | null {
+    const regionMap = host.getRegionMap();
+    const id = regionAt(regionMap, face);
+    return id !== null && regionMap.regions[id].enclosed ? id : null;
+  }
+
   function publishCursor(): void {
     host.setKeyboardCursor(cursor);
-    host.setFocusedRegion(cursor ? regionAt(host.getRegionMap(), cursor) : null);
+    host.setFocusedRegion(cursor ? enclosedRegionAt(cursor) : null);
   }
 
   function handleAction(): void {
     const state = host.getPathState();
     if (state.won) return;
     const c = ensureCursor();
-    const regionId = regionAt(host.getRegionMap(), c);
+    const regionId = enclosedRegionAt(c);
     if (regionId === null) return;
     const { state: next, ops } = toggleRegion(host.getPuzzle(), host.getRegionMap(), state, regionId);
     host.setPathState(next, ops);

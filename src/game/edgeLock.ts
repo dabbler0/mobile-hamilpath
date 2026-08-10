@@ -39,25 +39,44 @@ export interface LockEdgeResult {
  * live in-game hint. Per its own definition:
  *
  * 1. If `edge`'s current marked state in `state` doesn't already match
- *    `markedInSolution`, toggle one of its two neighboring regions (see
+ *    `markedInSolution`, toggle one of its neighboring regions (see
  *    `regionsForEdge`) — the same `toggleRegion` a tap or keypress would
  *    perform, since a single edge can't be flipped any other way in this
  *    game. This necessarily flips `edge` itself into the right state,
- *    along with whatever else that region's boundary happens to include —
- *    when `edge` borders two different regions, the *smaller* of the two
- *    (fewer boundary edges) is toggled, to keep that collateral flipping as
- *    small as possible; a real puzzle's regions vary hugely in size (a
- *    large board can have some regions boundaried by dozens of edges), so
- *    this matters for keeping a "lock a few edges" hint from incidentally
+ *    along with whatever else that region's boundary happens to include.
+ *    Only an *enclosed* candidate (`regions.ts`'s `Region.enclosed` — see
+ *    its doc comment) is eligible at all: toggling a non-enclosed one would
+ *    bake a dangling odd-marked-degree cell into the result, with no tap
+ *    left for the player to ever fix it with afterward, since `edge` is
+ *    about to become permanently locked regardless (see CLAUDE.md's
+ *    "non-enclosed region" bug — an earlier version of this function
+ *    picked purely by boundary size, with no enclosure check at all, and
+ *    really did hit this in practice: `puzzleGen.test.ts`'s "never bakes a
+ *    dangling odd-marked-degree cell into initialEdges" is the regression
+ *    test). Among the enclosed candidates, the *smaller* one (fewer
+ *    boundary edges) is toggled, to keep the collateral flipping as small
+ *    as possible — a real puzzle's regions vary hugely in size (a large
+ *    board can have some regions boundaried by dozens of edges), so this
+ *    matters for keeping a "lock a few edges" hint from incidentally
  *    pre-marking a much bigger chunk of the board than intended.
  *    `regionsForEdge`'s doc comment covers the one-region case (the true
- *    board edge). If `edge` isn't on *any* region's boundary at all — it's
- *    a `strandedEdges` entry from an earlier lock, already excluded from
- *    every boundary without ever having been locked itself (see
- *    `lockEdgeInRegionMap`'s doc comment) — there's no region left to
- *    toggle through, so its marked state is set directly instead; safe
- *    precisely because nothing else can ever touch it either, before or
- *    after this call.
+ *    board edge). If no enclosed candidate exists at all — either `edge`
+ *    isn't on any region's boundary any more (a `strandedEdges` entry from
+ *    an earlier lock, already excluded from every boundary without ever
+ *    having been locked itself, see `lockEdgeInRegionMap`'s doc comment),
+ *    or every region that does border it happens to be non-enclosed —
+ *    there's no region left that's safe to toggle through, so `edge`'s
+ *    marked state is set directly instead, with nothing else disturbed.
+ *    For the true-stranding case this is safe precisely because nothing
+ *    else can ever touch that edge either, before or after this call; for
+ *    the "only non-enclosed candidates" case it's been verified empirically
+ *    rather than proven by construction (`puzzleGen.test.ts`'s "never bakes
+ *    a dangling odd-marked-degree cell" test, and a simulated repeated
+ *    live-hint check during development — see this function's git history)
+ *    — every case checked left every cell at even marked-degree, but a
+ *    future caller with a very different usage pattern should verify this
+ *    still holds rather than assume it, same as `strandedEdges`' own doc
+ *    comment already cautions for the true-stranding case.
  * 2. Add `edge` to `puzzle.lockedEdges` and update `regionMap` to match
  *    (`lockEdgeInRegionMap` — an incremental update, not a full
  *    `computeRegions` recompute, since this runs once per locked edge and a
@@ -86,17 +105,29 @@ export function lockEdge(puzzle: Puzzle, regionMap: RegionMap, state: PathState,
 
   let nextState = state;
   if (state.edges.has(edge) !== markedInSolution) {
-    const candidates = regionsForEdge(regionMap, edge);
+    // Only a candidate whose region is itself enclosed (`Region.enclosed` —
+    // see its doc comment) is safe to toggle: toggling a non-enclosed one
+    // would bake a dangling odd-marked-degree cell into the result, exactly
+    // like a live tap on one would (which `input.ts`/`keyboard.ts` already
+    // refuse) — except here there'd be no tap left for the player to even
+    // attempt, since the edge would already be locked. See CLAUDE.md's
+    // "non-enclosed region" bug.
+    const candidates = regionsForEdge(regionMap, edge).filter((id) => regionMap.regions[id].enclosed);
     if (candidates.length > 0) {
       // Smallest boundary first, so a two-sided edge toggles whichever
       // neighboring region disturbs fewer other edges (see the doc comment).
       const regionId = candidates.reduce((smallest, id) => (regionMap.regions[id].boundary.length < regionMap.regions[smallest].boundary.length ? id : smallest));
       nextState = toggleRegion(puzzle, regionMap, state, regionId).state;
     } else {
-      // Already stranded (interior to some other merged region) without
-      // ever having been locked itself — no tap can reach it, so set its
-      // marked state directly rather than trying to toggle a region that
-      // doesn't include it.
+      // No safely-toggleable region borders this edge — either it's already
+      // stranded (interior to some other merged region, so no region at all
+      // includes it any more), or every region that *does* border it happens
+      // to be non-enclosed. Either way there's no region left to toggle
+      // through, so its marked state is set directly instead; safe
+      // precisely because nothing else can ever touch it either, before or
+      // after this call (see `puzzleGen.test.ts`'s "never leaves an
+      // odd-marked-degree cell behind" for the empirical check backing this
+      // for the actual generation-time locking usage pattern).
       const edges = new Set(state.edges);
       if (markedInSolution) edges.add(edge);
       else edges.delete(edge);
