@@ -17,7 +17,7 @@ import {
   type ShapeMode,
 } from './puzzleGen';
 import { computeWin, createInitialPath, toggleRegion } from './pathEdit';
-import { key, NO_EDGE_COLLECTIONS, totalCells, type EdgeCollectionParams } from './puzzle';
+import { key, NO_EDGE_COLLECTIONS, totalCells, type CellKey, type EdgeCollectionParams } from './puzzle';
 import { computeRegions, type EdgeKey } from './regions';
 import { mulberry32 } from './rng';
 
@@ -383,6 +383,55 @@ describe('locked edges in the puzzle id', () => {
       }
     }
   });
+
+  it('never bakes a dangling odd-marked-degree cell into initialEdges — lockEdge only ever toggles an enclosed region (see CLAUDE.md\'s "non-enclosed region" bug)', () => {
+    // Before `lockEdge` was made enclosed-aware, its "toggle whichever
+    // bordering region has the smaller boundary" tie-break could pick a
+    // non-enclosed region — same underlying issue as a live tap on one
+    // (`input.ts`/`keyboard.ts` refuse those), except here there'd be no
+    // tap left for the player to ever correct it with, since the edge is
+    // already locked by the time this runs. A cell with odd marked-degree
+    // in `initialEdges` is unreachable-from-empty via enclosed-region taps
+    // alone (every enclosed region only ever changes a cell's degree by an
+    // *even* amount), so this is a real, game-breaking bug when it happens,
+    // not just a cosmetic one.
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+    const sizeKeys = ['tiny', 'mini', 'small', 'medium'];
+    let checked = 0;
+    for (const shapeMode of shapeModes) {
+      for (const sizeKey of sizeKeys) {
+        for (let seed = 0; seed < 8; seed++) {
+          const id: PuzzleId = { sizeKey, shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+          const puzzle = generatePuzzle(id);
+          expect(oddDegreeCells(puzzle.initialEdges ?? [])).toEqual([]);
+          checked++;
+        }
+      }
+    }
+    expect(checked).toBe(shapeModes.length * sizeKeys.length * 8);
+  });
+
+  it('the intended solution stays reachable from the locked initial state using only enclosed regions, for every shape mode and several sizes', () => {
+    const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];
+    const sizeKeys = ['tiny', 'mini', 'small', 'medium'];
+    for (const shapeMode of shapeModes) {
+      for (const sizeKey of sizeKeys) {
+        for (let seed = 0; seed < 6; seed++) {
+          const id: PuzzleId = { sizeKey, shapeMode, seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+          const puzzle = generatePuzzle(id);
+          const regionMap = computeRegions(puzzle);
+          const solutionEdges = generateSolutionEdges(id);
+          const initialEdges = new Set(puzzle.initialEdges ?? []);
+          // What remains to flip, from the already-locked initial state, to reach the solution.
+          const target = new Set<EdgeKey>();
+          for (const ek of solutionEdges) if (!initialEdges.has(ek)) target.add(ek);
+          for (const ek of initialEdges) if (!solutionEdges.has(ek)) target.add(ek);
+          const enclosedBoundaries = regionMap.regions.filter((r) => r.enclosed).map((r) => r.boundary);
+          expect(inSpan(enclosedBoundaries, target)).toBe(true);
+        }
+      }
+    }
+  });
 });
 
 describe('generateSolutionCells / generateSolutionEdges', () => {
@@ -425,6 +474,48 @@ describe('generateSolutionCells / generateSolutionEdges', () => {
   });
 });
 
+/** Is `target` reachable as an XOR-combination of `generators` (GF(2) linear-span membership, via Gaussian elimination) — i.e. "can some sequence of taps on these regions reach exactly this marked-edge set". */
+function inSpan(generators: readonly (readonly EdgeKey[])[], target: ReadonlySet<EdgeKey>): boolean {
+  const xor = (a: ReadonlySet<EdgeKey>, b: readonly EdgeKey[]): Set<EdgeKey> => {
+    const result = new Set(a);
+    for (const ek of b) (result.has(ek) ? result.delete(ek) : result.add(ek));
+    return result;
+  };
+  const minEdge = (s: ReadonlySet<EdgeKey>): EdgeKey => [...s].reduce((m, ek) => (ek < m ? ek : m));
+
+  const basis = new Map<EdgeKey, Set<EdgeKey>>();
+  for (const gen of generators) {
+    let v = new Set(gen);
+    while (v.size > 0) {
+      const pivot = minEdge(v);
+      const existing = basis.get(pivot);
+      if (!existing) {
+        basis.set(pivot, v);
+        break;
+      }
+      v = xor(v, [...existing]);
+    }
+  }
+  let t = new Set(target);
+  while (t.size > 0) {
+    const existing = basis.get(minEdge(t));
+    if (!existing) return false;
+    t = xor(t, [...existing]);
+  }
+  return true;
+}
+
+/** Every cell touched by an odd number of `edges` — a marked-edge set that isn't reachable from the empty board via enclosed-region taps alone must have at least one. */
+function oddDegreeCells(edges: Iterable<EdgeKey>): CellKey[] {
+  const degree = new Map<CellKey, number>();
+  for (const ek of edges) {
+    const [a, b] = ek.split('|');
+    degree.set(a, (degree.get(a) ?? 0) + 1);
+    degree.set(b, (degree.get(b) ?? 0) + 1);
+  }
+  return [...degree.entries()].filter(([, d]) => d % 2 !== 0).map(([k]) => k);
+}
+
 describe('non-enclosed regions on real generated puzzles (see CLAUDE.md\'s "non-enclosed region" bug)', () => {
   // A lone, unpaired distractor edge dropped right on a plain (non-toroidal)
   // board's true outer edge is what produces a `Region` whose own boundary
@@ -451,37 +542,6 @@ describe('non-enclosed regions on real generated puzzles (see CLAUDE.md\'s "non-
       expect(regionMap.regions.every((r) => r.enclosed)).toBe(true);
     }
   });
-
-  /** Is `target` reachable as an XOR-combination of `generators` (GF(2) linear-span membership, via Gaussian elimination) — i.e. "can some sequence of taps on these regions reach exactly this marked-edge set". */
-  function inSpan(generators: readonly (readonly EdgeKey[])[], target: ReadonlySet<EdgeKey>): boolean {
-    const xor = (a: ReadonlySet<EdgeKey>, b: readonly EdgeKey[]): Set<EdgeKey> => {
-      const result = new Set(a);
-      for (const ek of b) (result.has(ek) ? result.delete(ek) : result.add(ek));
-      return result;
-    };
-    const minEdge = (s: ReadonlySet<EdgeKey>): EdgeKey => [...s].reduce((m, ek) => (ek < m ? ek : m));
-
-    const basis = new Map<EdgeKey, Set<EdgeKey>>();
-    for (const gen of generators) {
-      let v = new Set(gen);
-      while (v.size > 0) {
-        const pivot = minEdge(v);
-        const existing = basis.get(pivot);
-        if (!existing) {
-          basis.set(pivot, v);
-          break;
-        }
-        v = xor(v, [...existing]);
-      }
-    }
-    let t = new Set(target);
-    while (t.size > 0) {
-      const existing = basis.get(minEdge(t));
-      if (!existing) return false;
-      t = xor(t, [...existing]);
-    }
-    return true;
-  }
 
   it('the intended solution stays fully reachable using only enclosed regions, for every shape mode and several sizes — nothing is stranded by refusing to toggle a non-enclosed region', () => {
     const shapeModes: ShapeMode[] = ['rect', 'random', 'toroidal'];

@@ -44,15 +44,20 @@ export interface Region {
    * board's true outer edge (or a non-rectangular shape's own gap) through a
    * lone, unpaired distractor edge can end up with a `boundary` that isn't a
    * closed loop at all — see CLAUDE.md's "non-enclosed region" bug. `input.ts`
-   * and `keyboard.ts` both check this before calling `toggleRegion`, and
-   * refuse to toggle a region where it's `false` — this is the *only* place
-   * that check happens; `toggleRegion`/`applyPathOp` themselves stay exactly
-   * as mechanical as before, since `game/edgeLock.ts`'s generation-time
-   * locking also drives `toggleRegion` directly and must keep working
-   * unconditionally (its own edge selection never picks a non-enclosed
-   * region in practice — see `puzzleGen.test.ts`). Always `true` on a
-   * wraparound board, which never has a true outer edge for this to arise
-   * from in the first place (see `isBoundaryEnclosed`).
+   * and `keyboard.ts` both check this before calling `toggleRegion`, refusing
+   * to toggle a region where it's `false`; `game/edgeLock.ts`'s `lockEdge`
+   * (generation-time locking and the live "Hint me" feature) checks it too,
+   * when choosing which of an edge's bordering regions to toggle — unlike
+   * the player-facing input layer, it can't just refuse outright (the edge
+   * still has to end up in the right mark state), so it prefers an enclosed
+   * candidate and only falls back to setting the edge's mark state directly,
+   * with no toggle at all, when every bordering region is non-enclosed (see
+   * `lockEdge`'s own doc comment). `toggleRegion`/`applyPathOp` themselves
+   * stay completely unconditional either way — this field is checked by
+   * every *caller* that picks which region to toggle, never inside
+   * `toggleRegion` itself. Always `true` on a wraparound board, which never
+   * has a true outer edge for this to arise from in the first place (see
+   * `isBoundaryEnclosed`).
    */
   enclosed: boolean;
 }
