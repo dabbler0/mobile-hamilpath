@@ -500,28 +500,36 @@ function markedEdgeBaseWidth(layout: Layout): number {
 }
 
 /**
- * Outer radius of the degree-warning "fade" halo (see
- * `drawDegreeWarningHalo`) — comfortably wider than the marked-edge stroke
- * itself (`markedEdgeBaseWidth`) so an incoming path visibly fades away well
- * before reaching the vertex, rather than just meeting a dot barely wider
- * than the line itself.
+ * Radius of the halo's fully-opaque "core" — the flat plateau at the center
+ * of `drawDegreeWarningHalo`'s gradient, before the fade to transparent even
+ * begins. Sizing this to just barely exceed the stroke width itself isn't
+ * enough: at an actual self-intersection, two *perpendicular* marked-edge
+ * strokes (each `markedEdgeBaseWidth` wide) overlap in a `w x w` square, and
+ * that square's corners — the crossing's true worst-case extent — sit `w *
+ * Math.SQRT2` apart on the diagonal, not just `w` apart straight across.
+ * Sized here to `markedEdgeBaseWidth` itself (i.e. a core *diameter* of `2 *
+ * w`), comfortably past that `sqrt(2) * w` minimum, so the core alone is
+ * guaranteed to fully cover the crossing corner-to-corner, not merely
+ * stroke-width-to-stroke-width: every converging edge reads as unambiguously
+ * *cut*, not just dimmed, with the fade only starting past that.
  */
-function degreeWarningRadius(layout: Layout): number {
-  return Math.max(10, markedEdgeBaseWidth(layout) * 1.7);
+function degreeWarningCoreRadius(layout: Layout): number {
+  return markedEdgeBaseWidth(layout);
 }
 
 /**
- * Radius of the halo's fully-opaque "core" — the flat plateau at the center
- * of `drawDegreeWarningHalo`'s gradient, before the fade to transparent
- * even begins. Deliberately wider than the marked-edge stroke's own radius
- * (half of `markedEdgeBaseWidth`), so the solid core alone is already
- * bigger than the path passing through it: every converging edge is fully
- * erased right at the vertex, reading as an unambiguous break/gap in the
- * path, with the fade only kicking in *after* that — rather than the path
- * merely thinning out through a halo that never quite finishes erasing it.
+ * Outer radius of the degree-warning "fade" halo (see
+ * `drawDegreeWarningHalo`) — reaches about halfway along each edge
+ * converging on the vertex (`cellSize / 2`: half the distance to that
+ * edge's *other* endpoint) before fully fading to transparent. The 2x2
+ * block of faces surrounding an over-marked vertex is free space for this
+ * halo to use — nothing else is ever drawn there except the converging
+ * edges themselves — so the fade can safely reach much farther than the old
+ * ring's tight radius (or `degreeWarningCoreRadius` alone) without risking
+ * painting over an unrelated edge or vertex on the far side.
  */
-function degreeWarningCoreRadius(layout: Layout): number {
-  return markedEdgeBaseWidth(layout) * 0.7;
+function degreeWarningRadius(layout: Layout): number {
+  return Math.max(degreeWarningCoreRadius(layout) * 1.2, layout.cellSize * 0.5);
 }
 
 /**
