@@ -1,7 +1,7 @@
 import { faceToScreen, faceToScreenTiled, toScreen, toScreenTiled, wrapToTile, type Layout } from './game/geometry';
 import { edgeKey, parseEdgeKey, type EdgeKey, type Face, type Region } from './game/regions';
 import { countCollectionEdges, key, parseKey, type CellKey, type EdgeCollection, type Puzzle } from './game/puzzle';
-import { topologyFor, wrappedNeighbor, type Topology } from './game/topology';
+import { topologyFor, wrappedNeighbor, type Orientation, type Topology } from './game/topology';
 import type { Viewport } from './view/viewport';
 
 export interface RenderState {
@@ -117,12 +117,6 @@ function lerpColor(from: string, to: string, t: number): string {
   const [r1, g1, b1] = hexToRgb(from);
   const [r2, g2, b2] = hexToRgb(to);
   return `rgb(${Math.round(r1 + (r2 - r1) * c)}, ${Math.round(g1 + (g2 - g1) * c)}, ${Math.round(b1 + (b2 - b1) * c)})`;
-}
-
-/** `#rrggbb` plus an explicit alpha — used by `drawDegreeWarningHalo` for the transparent end of its fade gradient (a canvas gradient color stop needs a real alpha channel, not just a color). */
-function hexToRgba(hex: string, alpha: number): string {
-  const [r, g, b] = hexToRgb(hex);
-  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 const COLORS = {
@@ -428,7 +422,7 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawNodes(ctx, puzzle, layout);
   drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
-  if (!won) drawDegreeWarnings(ctx, edges, layout);
+  if (!won) drawDegreeWarnings(ctx, puzzle, edges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
@@ -533,44 +527,172 @@ function degreeWarningRadius(layout: Layout): number {
 }
 
 /**
- * Draws the "fades into the background" halo standing in for this feature's
- * old plain red ring: a radial gradient centered on the over-marked vertex —
- * flat, fully opaque `COLORS.background` out to `degreeWarningCoreRadius`
- * (already wider than the path itself, so the core alone reads as a clean
- * break), then thinning out to fully transparent at `degreeWarningRadius`.
- * Drawn *after* the marked edges converging on that point (see call sites),
- * so it paints over them — every incoming path reads as being cut, then
- * fading out of existence as it approaches the intersection, rather than a
- * ring that has to compete for attention with (and can all but disappear
- * against) whatever hue the converging edges happen to be — the old red
- * ring's real failure mode, since a marked edge's procedural color
- * (`segmentColor`) can itself land near-red.
+ * Renders, into a small offscreen canvas, exactly the candidate-edge/vertex-
+ * dot picture that would sit at `(sx, sy)` if the marked edges converging on
+ * it weren't drawn at all, then composites that picture onto `ctx` faded
+ * from fully opaque at `degreeWarningCoreRadius` out to fully transparent at
+ * `degreeWarningRadius` — this feature's old plain red ring, then a flat
+ * background-color halo, is now a genuine *reveal*: the converging marked
+ * edges read as fading out of existence right where they cross, uncovering
+ * the ordinary candidate edges/node dot underneath, rather than being
+ * covered by an opaque patch of background color.
+ *
+ * This needs a real offscreen canvas (not just a clipped region of `ctx`
+ * itself) because the fade has to mask an entire *picture* — a background
+ * fill plus however many edge strokes and a node dot land within it — not a
+ * single flat color: `ctx.globalAlpha` only ever applies one scalar, with no
+ * way to vary a normal drawing operation's opacity smoothly across its own
+ * pixels. `destination-in` against a radial-gradient mask is the standard
+ * way to get that softness, but it has to run against a canvas that started
+ * out holding *only* this reveal's own content, or it would just as happily
+ * erase whatever else was already on `ctx` outside the small circle this is
+ * meant to stay inside.
+ *
+ * `drawUnderlay` draws that content, already translated so its own `(sx,
+ * sy)` lines up with the offscreen canvas's center — the single-tile and
+ * wraparound-tile callers each supply their own version of it
+ * (`drawDegreeWarningUnderlay`/`drawDegreeWarningUnderlayTiled`), since a
+ * wraparound board's repeated tiles need `toScreenTiled` projections instead
+ * of plain `toScreen`. `pixelScale` lets a wraparound caller — whose `ctx`
+ * is already redrawn crisp at the board's current zoom every frame, see
+ * `drawWrapped`'s own doc comment — rasterize the offscreen canvas at a
+ * matching resolution, instead of this one small patch of the board going
+ * soft at any zoom past 1:1 while everything drawn straight onto `ctx`
+ * around it stays sharp. The ordinary single-tile board doesn't need this
+ * (its canvas is a fixed-resolution bitmap panned/zoomed via a CSS
+ * transform on the whole element, so this reveal blurring along with
+ * everything else at extreme zoom is nothing new), so it always passes `1`.
  */
-function drawDegreeWarningHalo(ctx: CanvasRenderingContext2D, sx: number, sy: number, layout: Layout): void {
+function drawDegreeWarningReveal(
+  ctx: CanvasRenderingContext2D,
+  sx: number,
+  sy: number,
+  layout: Layout,
+  pixelScale: number,
+  drawUnderlay: (octx: CanvasRenderingContext2D) => void,
+): void {
   const r = degreeWarningRadius(layout);
   const coreR = degreeWarningCoreRadius(layout);
-  const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
-  gradient.addColorStop(0, COLORS.background);
-  gradient.addColorStop(coreR / r, COLORS.background);
-  gradient.addColorStop(1, hexToRgba(COLORS.background, 0));
-  ctx.fillStyle = gradient;
+  const size = Math.max(1, Math.ceil(r * 2));
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.ceil(size * pixelScale));
+  off.height = off.width;
+  const octx = off.getContext('2d');
+  if (!octx) return;
+
+  octx.scale(pixelScale, pixelScale);
+  octx.fillStyle = COLORS.background;
+  octx.beginPath();
+  octx.arc(r, r, r, 0, Math.PI * 2);
+  octx.fill();
+
+  octx.translate(r - sx, r - sy);
+  drawUnderlay(octx);
+  // Undo the translate above (keeping `pixelScale`) before the mask fill
+  // below, which needs to cover the offscreen canvas's own `size x size`
+  // extent, not wherever the translate left the origin.
+  octx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+
+  // Only this gradient's *alpha* is ever used — `destination-in` reads
+  // nothing else from its source — so the color itself is never painted.
+  const mask = octx.createRadialGradient(r, r, 0, r, r, r);
+  mask.addColorStop(0, 'rgba(0, 0, 0, 1)');
+  mask.addColorStop(coreR / r, 'rgba(0, 0, 0, 1)');
+  mask.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  octx.globalCompositeOperation = 'destination-in';
+  octx.fillStyle = mask;
+  octx.fillRect(0, 0, size, size);
+
+  ctx.drawImage(off, sx - r, sy - r, size, size);
+}
+
+/**
+ * `drawDegreeWarningReveal`'s content for a single-tile (non-wraparound)
+ * board: `cell`'s own vertex dot, plus every candidate edge incident to
+ * it — the only edges that can possibly reach inside `degreeWarningRadius`
+ * at all (an edge that *doesn't* touch `cell` has both endpoints a full
+ * `cellSize` or more away, well outside the half-a-cell reveal radius), so
+ * this never needs to touch the rest of the board's edges/nodes the way
+ * reusing `drawEdges`/`drawNodes` wholesale would — a real saving on a huge
+ * board, where this can run every animation frame for as long as the
+ * over-marked state persists.
+ */
+function drawDegreeWarningUnderlay(ctx: CanvasRenderingContext2D, cell: readonly [number, number], puzzle: Puzzle, layout: Layout): void {
+  const ck = key(cell[0], cell[1]);
+  const [sx, sy] = toScreen(cell, layout);
+  ctx.strokeStyle = COLORS.edge;
+  ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.09);
+  ctx.lineCap = 'round';
+  for (const nk of puzzle.adj.get(ck) ?? []) {
+    const [nsx, nsy] = toScreen(parseKey(nk), layout);
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(nsx, nsy);
+    ctx.stroke();
+  }
+  const r = Math.max(1.5, layout.cellSize * 0.11);
+  ctx.fillStyle = COLORS.node;
   ctx.beginPath();
   ctx.arc(sx, sy, r, 0, Math.PI * 2);
   ctx.fill();
 }
 
 /**
- * Draws the degree-warning halo (`drawDegreeWarningHalo`) at every cell
+ * `drawDegreeWarningReveal`'s content for one repeated tile copy of a
+ * wraparound board — the tiled equivalent of `drawDegreeWarningUnderlay`:
+ * `cell`'s own vertex dot plus its incident candidate edges, each projected
+ * through `toScreenTiled`/`wrapToTile` exactly like `drawWrapped`'s own
+ * edges pass does. `incidentEdges` is precomputed once per overfull cell by
+ * the caller (`classifyEdge`'s result doesn't depend on which tile copy is
+ * being drawn, only `toScreenTiled`'s projection of it does), not re-derived
+ * per tile here.
+ */
+function drawDegreeWarningUnderlayTiled(
+  ctx: CanvasRenderingContext2D,
+  incidentEdges: readonly TiledEdge[],
+  cell: readonly [number, number],
+  layout: Layout,
+  topology: Topology,
+  tileX: number,
+  tileY: number,
+  W: number,
+  H: number,
+  orientation: Orientation,
+): void {
+  ctx.strokeStyle = COLORS.edge;
+  ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.09);
+  ctx.lineCap = 'round';
+  for (const { from, to, tileDX, tileDY } of incidentEdges) {
+    const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, orientation);
+    const [toTileX, toTileY] = wrapToTile(orientation, tileX, tileY, tileDX, tileDY);
+    const oTo = tileDX === 0 && tileDY === 0 ? orientation : topology.tileOrientation(toTileX, toTileY);
+    const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+    ctx.beginPath();
+    ctx.moveTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+  }
+  const [sx, sy] = toScreenTiled(cell, layout, tileX, tileY, W, H, orientation);
+  const r = Math.max(1.5, layout.cellSize * 0.11);
+  ctx.fillStyle = COLORS.node;
+  ctx.beginPath();
+  ctx.arc(sx, sy, r, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+/**
+ * Draws the degree-warning reveal (`drawDegreeWarningReveal`) at every cell
  * whose marked-degree currently exceeds 2 (see `computeMarkedDegrees`) — a
  * state a win can never be in, so skipped outright whenever `won`. Drawn
  * after every other overlay (marked edges, collection badges) so the
  * warning is never obscured by an edge converging on the same point.
  */
-function drawDegreeWarnings(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+function drawDegreeWarnings(ctx: CanvasRenderingContext2D, puzzle: Puzzle, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
   for (const [ck, degree] of computeMarkedDegrees(edges)) {
     if (degree <= 2) continue;
-    const [sx, sy] = toScreen(parseKey(ck), layout);
-    drawDegreeWarningHalo(ctx, sx, sy, layout);
+    const cell = parseKey(ck);
+    const [sx, sy] = toScreen(cell, layout);
+    drawDegreeWarningReveal(ctx, sx, sy, layout, 1, (octx) => drawDegreeWarningUnderlay(octx, cell, puzzle, layout));
   }
 }
 
@@ -1068,22 +1190,38 @@ function drawWrapped(
     });
   }
 
-  // Same degree-warning halo as `drawDegreeWarningHalo`'s single-tile
-  // version — see its own doc comment — just projected through
-  // `toScreenTiled` once per repeated tile copy, same as every other
-  // overlay in this function.
+  // Same degree-warning reveal as `drawDegreeWarningReveal`'s single-tile
+  // version (`drawDegreeWarningUnderlay`) — see its own doc comment — just
+  // projected through `toScreenTiled` once per repeated tile copy, same as
+  // every other overlay in this function. Each overfull cell's incident
+  // edges are classified once, up front, rather than inside `forEachTile` —
+  // `classifyEdge`'s result doesn't depend on which tile copy is being
+  // drawn, only `toScreenTiled`'s projection of it does — and `view.scale`
+  // is threaded through so the reveal's own offscreen canvas stays exactly
+  // as crisp as everything else this function draws at the current zoom
+  // (see `drawDegreeWarningReveal`'s `pixelScale` doc comment).
   if (!won) {
     const overfullCells: Array<readonly [number, number]> = [];
     for (const [ck, degree] of computeMarkedDegrees(edges)) {
       if (degree > 2) overfullCells.push(parseKey(ck));
     }
     if (overfullCells.length > 0) {
+      const incidentEdgesByCell = overfullCells.map((cell) => {
+        const ck = key(cell[0], cell[1]);
+        const incident: TiledEdge[] = [];
+        for (const nk of puzzle.adj.get(ck) ?? []) {
+          incident.push(classifyEdge(cell, parseKey(nk), topology, W, H));
+        }
+        return incident;
+      });
       forEachTile((tileX, tileY) => {
         const orientation = topology.tileOrientation(tileX, tileY);
-        for (const cell of overfullCells) {
+        overfullCells.forEach((cell, i) => {
           const [sx, sy] = toScreenTiled(cell, layout, tileX, tileY, W, H, orientation);
-          drawDegreeWarningHalo(ctx, sx, sy, layout);
-        }
+          drawDegreeWarningReveal(ctx, sx, sy, layout, view.scale, (octx) =>
+            drawDegreeWarningUnderlayTiled(octx, incidentEdgesByCell[i], cell, layout, topology, tileX, tileY, W, H, orientation),
+          );
+        });
       });
     }
   }
