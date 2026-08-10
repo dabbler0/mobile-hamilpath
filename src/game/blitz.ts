@@ -246,21 +246,6 @@ const MIN_ASPECT_RATIO = 1;
 const MAX_ASPECT_RATIO = Math.max(...SIZE_OPTIONS.map((s) => Math.max(s.m, s.n) / Math.min(s.m, s.n)));
 
 /**
- * Largest board area (in blocks, `m * n`) Blitz will ever generate — matches
- * the old fixed `huge` size (14x20 = 280 blocks). Without a ceiling, the
- * difficulty budget still grows without bound over a long enough run (it now
- * climbs by a flat `BLITZ_BUDGET_INCREMENT` per puzzle rather than
- * compounding off each puzzle's own size — see `createBlitzSequence` — but
- * "without bound" either way), eventually reaching boards too large to be
- * playable or even to generate in reasonable time. Capping the area a board
- * can ever reach is exactly what the old fixed-size table did implicitly
- * (`huge` was simply the largest entry) — this reproduces that same ceiling
- * now that size is chosen continuously rather than looked up, while
- * everything below it still varies freely with the budget as before.
- */
-const MAX_BLITZ_BOARD_AREA = 14 * 20;
-
-/**
  * Picks a board's shape, block dimensions, and locked-edges setting for the
  * current difficulty budget — the continuous-size replacement for the old
  * fixed-size-table lookup (see CLAUDE.md's "Blitz mode"). The (shape,
@@ -272,9 +257,8 @@ const MAX_BLITZ_BOARD_AREA = 14 * 20;
  * `LOCKED_EDGE_DIFFICULTY_MULTIPLIER`'s doc comment). A random target
  * difficulty *for that combination* is then rolled somewhere between its own
  * cheapest possible board and the full budget ("choose a random difficulty
- * up to the present budget"), capped at `MAX_BLITZ_BOARD_AREA` so an
- * extremely large budget still tops out at a sane board size — which sets
- * the board's area. A random aspect ratio (`MIN_ASPECT_RATIO`..
+ * up to the present budget") — which sets the board's area, with no upper
+ * ceiling on it. A random aspect ratio (`MIN_ASPECT_RATIO`..
  * `MAX_ASPECT_RATIO`) splits that area into concrete `m`/`n` block
  * dimensions: `short` is rounded (never floored, which would silently widen
  * the realized ratio — see `MAX_ASPECT_RATIO`'s doc comment) to the nearest
@@ -286,6 +270,15 @@ const MAX_BLITZ_BOARD_AREA = 14 * 20;
  * same direction. The returned `lockedEdgeFraction` is exactly
  * `puzzleGen.ts`'s `LOCKED_EDGE_FRACTION` when `hasLockedEdges` was chosen,
  * `undefined` otherwise — ready to drop straight into a `PuzzleId`.
+ *
+ * There is deliberately no ceiling on the rolled area any more (an earlier
+ * version capped it at `MAX_BLITZ_BOARD_AREA`, matching the old fixed
+ * `huge` size, out of concern that an ever-growing budget would eventually
+ * pick absurdly large boards). Budget growth is a flat `BLITZ_BUDGET_INCREMENT`
+ * per puzzle now (see `createBlitzSequence`), not proportional to each
+ * puzzle's own size, so it no longer compounds — a run's board sizes climb
+ * at a steady, predictable pace instead of racing upward, which is what
+ * made the artificial ceiling unnecessary.
  */
 export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMode; m: number; n: number; lockedEdgeFraction?: number } {
   const eligible = eligibleBlitzOptions(budget);
@@ -293,7 +286,7 @@ export function chooseBlitzBoard(rng: Rng, budget: number): { shapeMode: ShapeMo
   const multiplier = SHAPE_DIFFICULTY_MULTIPLIER[shapeMode] * (hasLockedEdges ? LOCKED_EDGE_DIFFICULTY_MULTIPLIER : 1);
   const minRating = minBlitzRating(shapeMode, hasLockedEdges);
   const targetRating = minRating + rng() * Math.max(0, budget - minRating);
-  const targetArea = Math.min(MAX_BLITZ_BOARD_AREA, targetRating / (4 * multiplier));
+  const targetArea = targetRating / (4 * multiplier);
   const ratio = MIN_ASPECT_RATIO + rng() * (MAX_ASPECT_RATIO - MIN_ASPECT_RATIO);
   const short = Math.max(MIN_BLITZ_BLOCK_DIM, Math.round(Math.sqrt(targetArea / ratio)));
   let long = Math.max(MIN_BLITZ_BLOCK_DIM, Math.floor(targetArea / short));
