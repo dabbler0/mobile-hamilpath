@@ -109,6 +109,14 @@ body {
   color: #e8e8ea;
   border: 1px solid #3a3c46;
 }
+/* Blitz gets its own highlighted button, same solid-fill treatment as
+   `.menuBtnPrimary` (Free Play's blue) but a distinct color so the two
+   top-level modes read as visually separate choices rather than one
+   looking like an afterthought next to the other (see GitHub issue #47). */
+.menuBtnBlitz {
+  background: #ff6a3d;
+  color: white;
+}
 .menuBtnBadge {
   display: block;
   margin-top: 3px;
@@ -216,7 +224,13 @@ header {
 header .backBtn {
   flex: 0 0 auto;
 }
-h1 {
+/* Scoped to the game screen's own header h1 specifically -- an unscoped
+   `h1` selector here also matched every menu screen's `.menuTitle` (also an
+   h1), whose `flex: 1` inside `.menuContent`'s flex column made the title
+   grow to fill the available space and shoved the button group down toward
+   the bottom instead of leaving the whole group vertically centered
+   together (see GitHub issue #47). */
+header h1 {
   flex: 1;
   min-width: 0;
   font-size: 1.05rem;
