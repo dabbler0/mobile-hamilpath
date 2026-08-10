@@ -1489,13 +1489,16 @@ at all (`eligibleBlitzShapes`, gating on that shape's cheapest-possible
 board — `MIN_BLITZ_BLOCK_DIM` (2) per dimension — rather than on any one
 fixed size); rolls a random target difficulty for that shape somewhere
 between its own cheapest board and the full budget (CLAUDE.md's "choose a
-random difficulty up to the present budget"), capped at
-`MAX_BLITZ_BOARD_AREA` (280 blocks, matching the old `huge` size's area) so
-a very long run's ever-growing budget still tops out at a sane board size
-instead of compounding toward absurdity — without a ceiling, each puzzle's
-own size grows the budget, which grows the *next* puzzle's likely size, and
-so on, racing exponentially past anything playable or even generatable in
-reasonable time; and splits the resulting area into concrete `m`/`n` block
+random difficulty up to the present budget") — with no ceiling on the
+resulting area any more (an earlier version capped this at
+`MAX_BLITZ_BOARD_AREA`, 280 blocks matching the old `huge` size, to stop a
+very long run's ever-growing budget from compounding toward absurdity; that
+concern applied when budget growth was proportional to each puzzle's own
+size — a bigger puzzle grew the budget more, which made the next puzzle
+likely bigger still, racing exponentially upward. Budget growth is a flat
+`BLITZ_BUDGET_INCREMENT` per puzzle now, independent of that puzzle's own
+size (see below), so it no longer compounds, and the ceiling was removed as
+unnecessary); and splits the resulting area into concrete `m`/`n` block
 dimensions using a random aspect ratio between `MIN_ASPECT_RATIO` (a
 perfect square, 1×) and `MAX_ASPECT_RATIO` (1.6× — the least-square ratio
 any of the old fixed `SIZE_OPTIONS` ever used, `large`'s 10x16, computed
@@ -1548,9 +1551,8 @@ and grows the budget. Because every shape mode's cheapest possible board
 already fits comfortably under `BLITZ_INITIAL_BUDGET`, a fresh run can, in
 principle, roll any shape — including toroidal — from its very first
 puzzle; what actually varies with the budget is the *size* range each shape
-can be generated at, which starts small and widens (up to the
-`MAX_BLITZ_BOARD_AREA` ceiling) as the budget grows from puzzles handed
-out.
+can be generated at, which starts small and widens, uncapped, as the budget
+grows from puzzles handed out.
 
 Critically, **puzzle generation is entirely independent of the run's
 difficulty parameters** (see below): `createBlitzSequence` takes only
