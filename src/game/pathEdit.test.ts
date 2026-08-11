@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPathOp, computeWin, createInitialPath, toggleRegion, type PathState } from './pathEdit';
+import { applyPathOp, computeWin, countIncompleteCells, createInitialPath, toggleRegion, type PathState } from './pathEdit';
 import { computeRegions, regionAt } from './regions';
 import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
@@ -205,6 +205,35 @@ describe('computeWin', () => {
     const puzzle = twoByTwoCyclePuzzle();
     const edges = new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1']);
     expect(computeWin(puzzle, edges)).toBe(true);
+  });
+});
+
+describe('countIncompleteCells', () => {
+  it('is every cell (all degree 0) for an empty edge set', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    expect(countIncompleteCells(puzzle, new Set())).toBe(4);
+  });
+
+  it('is 0 for a full Hamiltonian cycle (every cell at degree 2, matching computeWin)', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    const edges = new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1']);
+    expect(computeWin(puzzle, edges)).toBe(true);
+    expect(countIncompleteCells(puzzle, edges)).toBe(0);
+  });
+
+  it('counts down as more cells reach degree 2, one edge at a time', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    // After 3 of the 4 cycle edges: (0,0) and (1,1) are at degree 2 already,
+    // (1,0) and (0,1) are still at degree 1 each -- 2 incomplete cells left.
+    const edges = new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1']);
+    expect(countIncompleteCells(puzzle, edges)).toBe(2);
+  });
+
+  it('counts a degree-1 (dangling) cell as incomplete, same as degree-0', () => {
+    const puzzle = twoByTwoCyclePuzzle();
+    const edges = new Set(['0,0|1,0']);
+    // Both endpoints are at degree 1, the other two cells at degree 0 -- all 4 incomplete.
+    expect(countIncompleteCells(puzzle, edges)).toBe(4);
   });
 });
 

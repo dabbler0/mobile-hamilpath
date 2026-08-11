@@ -74,6 +74,34 @@ export function computeWin(puzzle: Puzzle, edges: ReadonlySet<EdgeKey>): boolean
 }
 
 /**
+ * How many cells don't currently have their final marked-degree of 2 — i.e.,
+ * aren't yet "locked in" as part of a finished loop through them. Exactly 0
+ * at a win (`computeWin`'s own degree check requires it), and — since
+ * toggling a region can freely add *or* remove edges — not simply
+ * `totalCells(puzzle) - edges.size` either; a cell can gain or lose its
+ * degree-2 status in either direction as the player edits. Used by the
+ * live generative-music layer (`audio/music.ts`, wired up in `main.ts`) as
+ * Free Play's density signal: CLAUDE.md's "In free play mode, have it track
+ * inversely as the number of unmarked vertices" — this is that count, "just
+ * one left" being the state immediately before a win.
+ */
+export function countIncompleteCells(puzzle: Puzzle, edges: ReadonlySet<EdgeKey>): number {
+  const degree = new Map<CellKey, number>();
+  for (const ek of edges) {
+    const [a, b] = parseEdgeKey(ek);
+    const ka = key(a[0], a[1]);
+    const kb = key(b[0], b[1]);
+    degree.set(ka, (degree.get(ka) ?? 0) + 1);
+    degree.set(kb, (degree.get(kb) ?? 0) + 1);
+  }
+  let incomplete = 0;
+  for (const ck of puzzle.adj.keys()) {
+    if ((degree.get(ck) ?? 0) !== 2) incomplete++;
+  }
+  return incomplete;
+}
+
+/**
  * A region toggle, as produced by `toggleRegion`: the exact set of edges
  * flipped. Self-inverse — applying the same op a second time flips them
  * right back — which is what makes undo/redo and replay simple: there's

@@ -1,3 +1,4 @@
+import { setMusicDensity, setMusicVolume, startMusic, stopMusic } from './audio/music';
 import { playSfx, setSfxVolume } from './audio/sfx';
 import { confirmDialog } from './dialog';
 import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
@@ -7,7 +8,7 @@ import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } fro
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, resetPath as resetHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
-import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
+import { applyPathOp, countIncompleteCells, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
@@ -18,7 +19,7 @@ import { startMenuBackground } from './menuBackground';
 import { deleteBlitzRun, deleteBlitzRunsForParams, listBlitzDifficulties, listBlitzRunsForParams, saveBlitzRun, type BlitzDifficultySummary, type BlitzRunRecord } from './persistence/blitzStore';
 import { clearInProgress, deleteCompleted, getCompleted, listCompleted, listInProgress, puzzleIdOf, recordCompletion, saveInProgress, type CompletedRecord, type InProgressRecord } from './persistence/gameStore';
 import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
-import { loadSfxVolume, saveSfxVolume } from './settings';
+import { loadMusicVolume, loadSfxVolume, saveMusicVolume, saveSfxVolume } from './settings';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
 
@@ -63,6 +64,8 @@ const settingsBackBtn = byId<HTMLButtonElement>('settingsBackBtn');
 const sfxVolumeSlider = byId<HTMLInputElement>('sfxVolumeSlider');
 const sfxVolumeReadout = byId<HTMLSpanElement>('sfxVolumeReadout');
 const sfxVolumePreviewBtn = byId<HTMLButtonElement>('sfxVolumePreviewBtn');
+const musicVolumeSlider = byId<HTMLInputElement>('musicVolumeSlider');
+const musicVolumeReadout = byId<HTMLSpanElement>('musicVolumeReadout');
 
 const freePlayMenuScreenEl = byId<HTMLDivElement>('freePlayMenuScreen');
 const freePlayBackBtn = byId<HTMLButtonElement>('freePlayBackBtn');
@@ -250,6 +253,24 @@ let stopMenuBackground: (() => void) | null = null;
 const BLITZ_ADVANCE_DELAY_MS = 550;
 /** Below this many remaining milliseconds, the header timer switches to its urgent (red) styling. */
 const BLITZ_LOW_TIME_MS = 10000;
+/**
+ * Blitz's density signal for the live generative-music layer
+ * (`audio/music.ts`) — CLAUDE.md's "have the density track inversely as the
+ * amount of time left on the clock (so every time it gets low, the music
+ * gets denser)". Deliberately an absolute window, not a fraction of
+ * `startingTimeSec`: the time bank can grow arbitrarily large from
+ * time-back awards (`BlitzParams`'s own doc comment), so "fraction of the
+ * total" would mean a long, successful run's music almost never reaches its
+ * densest even as the clock gets objectively close to zero. A flat ramp
+ * window means "low on time" always means the same thing in music terms,
+ * however big the run's time bank got along the way.
+ */
+const BLITZ_MUSIC_DANGER_MS = 20000;
+
+/** Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts` expects — see `BLITZ_MUSIC_DANGER_MS`'s doc comment. */
+function blitzMusicDensity(remainingMs: number): number {
+  return 1 - Math.min(1, Math.max(0, remainingMs / BLITZ_MUSIC_DANGER_MS));
+}
 
 let blitzParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
 let blitzSeq: ReturnType<typeof createBlitzSequence> | null = null;
@@ -708,6 +729,28 @@ function updateProgress(): void {
   progressEl.textContent = `${pathState.edges.size} / ${totalCells(puzzle)}`;
 }
 
+/**
+ * Free Play's density signal for the live generative-music layer
+ * (`audio/music.ts`) — CLAUDE.md's "have it track inversely as the number
+ * of unmarked vertices (so most intense when there is just one left)".
+ * `countIncompleteCells` is "just one left"'s literal 1 right before a win
+ * (`computeWin` requires every cell at 0); this maps that range linearly
+ * onto density's [0, 1] (1 incomplete cell -> density 1; every cell still
+ * incomplete -> density 0). Called after every live edit that can change
+ * `pathState.edges` (a real move, undo/redo, reset, a hint) — see each call
+ * site — so the music always reflects how close the board actually is to
+ * finished, not just "how long it's been playing".
+ */
+function updateFreePlayMusicDensity(): void {
+  const total = totalCells(puzzle);
+  if (total <= 1) {
+    setMusicDensity(1);
+    return;
+  }
+  const incomplete = countIncompleteCells(puzzle, pathState.edges);
+  setMusicDensity(1 - Math.min(1, Math.max(0, (incomplete - 1) / (total - 1))));
+}
+
 function updatePuzzleLabel(): void {
   const opt = sizeOption(currentPuzzleId.sizeKey);
   const shapeOpt = shapeModeOption(currentPuzzleId.shapeMode);
@@ -773,7 +816,17 @@ function setFreePlayPathState(next: PathState, ops: PathOp[]): void {
   updateProgress();
   refreshControlBar();
   render();
-  if (justWon) winBannerEl.classList.add('show');
+  // A win means there's nothing left to build tension toward — stop the
+  // music instead of feeding it a density reading (`updateFreePlayMusicDensity`
+  // itself would report exactly 0 incomplete cells here regardless, but
+  // fading out reads as a deliberate resolution rather than "the density
+  // happened to bottom out").
+  if (justWon) {
+    winBannerEl.classList.add('show');
+    stopMusic();
+  } else {
+    updateFreePlayMusicDensity();
+  }
   persistLiveState();
 }
 
@@ -808,6 +861,7 @@ function performUndo(): void {
   updateProgress();
   refreshControlBar();
   render();
+  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -822,6 +876,7 @@ function performRedo(): void {
   updateProgress();
   refreshControlBar();
   render();
+  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -857,6 +912,7 @@ function performReset(): void {
   updateProgress();
   refreshControlBar();
   render();
+  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -915,7 +971,14 @@ function hintMe(): void {
   updateProgress();
   refreshControlBar();
   render();
-  if (justWon) winBannerEl.classList.add('show');
+  // See `setFreePlayPathState`'s matching comment: a win stops the music
+  // rather than feeding it a (now trivially zero) density reading.
+  if (justWon) {
+    winBannerEl.classList.add('show');
+    stopMusic();
+  } else {
+    updateFreePlayMusicDensity();
+  }
   persistLiveState();
 }
 
@@ -946,6 +1009,7 @@ async function revealSolution(): Promise<void> {
   clearEdgeAnimations();
   pathState = { edges: generateSolutionEdges(currentPuzzleId), won: false };
   gaveUp = true;
+  stopMusic(); // no more tension to build toward once the live attempt is over, win or not
   focusedRegionId = null;
   keyboardCursor = null;
   updateProgress();
@@ -1035,6 +1099,7 @@ function enterBlitzResult(opts: {
   stopLiveAnimationLoop();
   stopBlitzTimer();
   pauseBlitzReplay();
+  stopMusic();
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(blitzResultComponentColors);
@@ -1092,6 +1157,7 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   stopLiveAnimationLoop();
   stopBlitzTimer();
   pauseBlitzReplay();
+  stopMusic();
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(liveComponentColors);
@@ -1151,6 +1217,13 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   refreshControlBar();
   showScreen('game');
   layout();
+  // Live play's generative-music layer — see CLAUDE.md's "Live-play music"
+  // and `updateFreePlayMusicDensity`'s own doc comment. Started after
+  // `showScreen('game')` so it always begins from a real click/tap (New
+  // Game/Resume/Rematch's own button), same reasoning `audio/sfx.ts`
+  // documents for its own lazy `AudioContext` creation.
+  startMusic();
+  updateFreePlayMusicDensity();
 }
 
 function startNewGame(sizeKey: string, shapeMode: ShapeMode, lockedEdgeFraction?: number): void {
@@ -1286,6 +1359,7 @@ function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
   stopLiveAnimationLoop();
   stopBlitzTimer();
   pauseBlitzReplay();
+  stopMusic(); // review is read-only -- no live tension left to score
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(reviewComponentColors);
@@ -1618,6 +1692,7 @@ function blitzTick(): void {
   if (mode !== 'blitz') return;
   const remaining = blitzDeadline - performance.now();
   updateBlitzHeader();
+  setMusicDensity(blitzMusicDensity(remaining));
   if (remaining <= 0) {
     void endBlitzRun();
     return;
@@ -1643,6 +1718,7 @@ function startBlitzRun(params: BlitzParams): void {
   stopLiveAnimationLoop();
   stopBlitzTimer();
   pauseBlitzReplay();
+  stopMusic();
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(liveComponentColors);
@@ -1679,6 +1755,12 @@ function startBlitzRun(params: BlitzParams): void {
   showScreen('game');
   advanceBlitzPuzzle();
   startBlitzTimer();
+  // See `beginPuzzle`'s matching comment — same "only ever from a real
+  // click" reasoning applies here (the Blitz setup screen's own Start
+  // button). `startBlitzTimer`'s first `blitzTick` sets the actual density
+  // reading a frame later; nothing needs to happen here beyond starting
+  // the engine itself.
+  startMusic();
 }
 
 /**
@@ -1693,6 +1775,7 @@ function startBlitzRun(params: BlitzParams): void {
 async function endBlitzRun(): Promise<void> {
   if (mode !== 'blitz') return;
   stopBlitzTimer();
+  stopMusic(); // start the fade immediately rather than waiting out the async save below (enterBlitzResult calls this too, harmlessly -- see stopMusic's own doc comment)
   const scoreMs = Math.max(0, blitzElapsedMs());
   blitzEvents.push({ kind: 'runEnd', t: scoreMs, scoreMs });
   clearEdgeAnimations();
@@ -2049,6 +2132,7 @@ function pauseBlitzReplay(): void {
 function openBlitzReplay(record: BlitzRunRecord, returnScreen: Screen): void {
   stopLiveAnimationLoop();
   stopBlitzTimer();
+  stopMusic();
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(reviewComponentColors);
@@ -2145,9 +2229,12 @@ function showScreen(next: Screen): void {
     // but stopping here too means a stray navigation can never leave one of
     // these `requestAnimationFrame`/timeout chains running behind a screen
     // that no longer shows it (the same reasoning `stopLiveAnimationLoop`
-    // itself documents).
+    // itself documents). Same for `stopMusic()` — every deliberate path out
+    // of live play already stops the generative-music engine too (see
+    // `audio/music.ts`'s call sites), this just guarantees it.
     stopBlitzTimer();
     pauseBlitzReplay();
+    stopMusic();
   }
 
   screen = next;
@@ -2350,10 +2437,13 @@ if (REPLAY_SPEED_OPTIONS.includes(lastReplaySpeed)) {
 }
 
 // ---- Settings ----
-// Currently just sfx volume (`settings.ts`), applied live to `audio/sfx.ts`'s
-// shared gain node the instant the slider moves, and persisted only once the
-// player lets go (`change`, not `input`) — dragging shouldn't hammer
-// `localStorage` on every intermediate frame.
+// Sfx volume and live-play music volume (`settings.ts`), each applied live
+// to their own shared gain node the instant its slider moves, and persisted
+// only once the player lets go (`change`, not `input`) — dragging shouldn't
+// hammer `localStorage` on every intermediate frame. The two are
+// deliberately independent controls, all the way down to separate
+// `localStorage` keys and separate `AudioContext`s (`audio/sfx.ts` vs.
+// `audio/music.ts`) — turning one down doesn't touch the other.
 function updateSfxVolumeReadout(volume: number): void {
   sfxVolumeReadout.textContent = `${Math.round(volume * 100)}%`;
 }
@@ -2370,6 +2460,22 @@ sfxVolumeSlider.addEventListener('change', () => {
   saveSfxVolume(Number(sfxVolumeSlider.value) / 100);
 });
 sfxVolumePreviewBtn.addEventListener('click', () => playSfx('menuNav'));
+
+function updateMusicVolumeReadout(volume: number): void {
+  musicVolumeReadout.textContent = `${Math.round(volume * 100)}%`;
+}
+const initialMusicVolume = loadMusicVolume();
+setMusicVolume(initialMusicVolume);
+musicVolumeSlider.value = String(Math.round(initialMusicVolume * 100));
+updateMusicVolumeReadout(initialMusicVolume);
+musicVolumeSlider.addEventListener('input', () => {
+  const volume = Number(musicVolumeSlider.value) / 100;
+  setMusicVolume(volume);
+  updateMusicVolumeReadout(volume);
+});
+musicVolumeSlider.addEventListener('change', () => {
+  saveMusicVolume(Number(musicVolumeSlider.value) / 100);
+});
 
 // ---- Game name ----
 // See `gameName.ts`'s doc comment: `GAME_NAME` is the one place a rename
