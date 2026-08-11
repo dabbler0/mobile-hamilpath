@@ -1900,93 +1900,96 @@ reconstructing "remaining time" as `startingTimeSec * 1000 +
 (awarded-so-far) - t` — exactly the arithmetic `blitzDeadline` encodes live,
 just derived from the event log instead of a running timestamp.
 
+`updateBlitzReplayUI` (called from both `seekBlitzReplay` and
+`advanceBlitzReplayTo`, i.e. after every position update regardless of
+source) ends with `syncBlitzReplayEndView`, which keeps a single boolean,
+`blitzReplayShowingEndView`, in sync with `blitzReplayT >=
+blitzReplayDurationMs()` — whether playback is currently sitting at (or
+past) the very end of the recorded run. On the false→true transition it
+recomputes `blitzGhostSolutionEdges` (`generateSolutionEdges` against
+whatever `blitzReplayCurrentId` the run's own last `puzzleStart` event set)
+and `render()`'s `'blitzReplay'` branch draws it as the same translucent
+overlay the live-run result screen uses (see "The result screen" below) —
+purely a rendering toggle, not a mode switch or screen change, so
+`#blitzReplayBar`'s Close/Play-Pause/speed/scrubber stay exactly as they
+are throughout, and scrubbing back out of the end just makes the overlay
+disappear again. Deliberately keyed off actual position, not off "did
+`blitzReplayTick` just naturally finish" — so both watching a run play
+through to its end *and* manually scrubbing all the way to the end show the
+same overlay, unlike an earlier version of this feature that only
+special-cased natural completion.
+
 ### The result screen
 
 A run's end — the clock hitting zero, or an explicit Forfeit — no longer
 navigates to a separate "game over" menu screen. Instead `main.ts`'s
 `enterBlitzResult` switches `mode` to a fifth value, `'blitzResult'`, still
-on the `'game'` screen: `#boardWrap`/`#playControls`/`#blitzControls`/
-`#reviewBar`/`#blitzReplayBar` all hide in favor of `#blitzResultWrap` (two
-static, read-only board panes, side by side on a wide viewport or stacked
-on a narrow phone — see `style.css`'s media query) and
-`#blitzResultControls`, a fourth sibling of `#playControls`/`#blitzControls`
-in the game screen's own bottom control bar. The left pane is the board
-exactly as the player left it (their own marked edges, with ordinary live
-component coloring via a dedicated `blitzResultComponentColors` state, kept
-apart from `liveComponentColors`/`reviewComponentColors` for the usual
-"don't cross-contaminate" reason — see "Persistent component colors"
-above); the right pane is that same puzzle's intended solution
-(`generateSolutionEdges`), drawn `won: true` — the flat "solved" green —
-exactly like Give Up's revealed solution, since it's a genuine Hamiltonian
-cycle through the puzzle regardless of whether the player reached it
-themselves.
+on the `'game'` screen, reusing the exact same `#canvas`/`#boardWrap` every
+other mode already draws to — `activePuzzle()`/`activeRegionMap()`/
+`inputPathState()`/`render()` each just grew a `'blitzResult'` branch, the
+same way they already had one for `'reviewing'`/`'blitz'`/`'blitzReplay'`.
+Concretely this means: the board is frozen to exactly how the player left
+it when the run ended (`blitzResultFinalEdges`, a snapshot independent of
+`blitzPathState`, which "Play Again" is about to overwrite), read-only
+(`inputPathState()` reports `won: true`, blocking `toggleRegion` exactly
+like review mode already does), but still **fully pannable and zoomable** —
+pinch/drag/wheel-zoom are never gated by `.won` in the first place (only
+the tap-to-toggle path in `input.ts` is), and `attachPointerHandling` is
+wired up once at module init against these same dispatcher functions, so
+none of that needed to change at all. `#playControls`/`#blitzControls`/
+`#reviewBar`/`#blitzReplayBar` hide in favor of `#blitzResultControls` (a
+fourth sibling of `#playControls`/`#blitzControls` in the game screen's own
+bottom control bar), and the live countdown header
+(`#blitzHeaderInfo`/`#blitzTimer`/`#blitzStats`) is repurposed rather than
+swapped out — frozen to `"Time's up!"` plus a `formatBlitzScore` summary
+instead of a ticking countdown, simpler than introducing a sixth header
+layout for one static line.
 
-Both panes are drawn once via `layoutStaticBoard`/`layoutBlitzResult`, a
-parallel, simplified version of the live game's own `layout()`/`fitView()`/
-`applyTransform()` trio: size the canvas to the board (or, for a wraparound
-puzzle, to the pane's own viewport, matching `drawWrapped`'s needs) then
-compute a fit view — just applied to two independent canvases instead of
-one, since the result screen shows two boards at once. There's no pan/zoom
-chrome here at all (the zoom buttons are part of `#boardWrap`, which is
-hidden) and no animation — the run is over, both boards are static, drawn
-once and redrawn only on window resize (the `resize` listener branches on
-`mode === 'blitzResult'` to call `layoutBlitzResult()` instead of the
-ordinary `layout()`). `render()` itself early-returns the instant
-`mode === 'blitzResult'`, purely defensively — every animation loop that
-could otherwise still call it has already been stopped by
-`enterBlitzResult` (`stopLiveAnimationLoop`/`stopBlitzTimer`/
-`pauseBlitzReplay`), and `#boardWrap`/`canvas` are hidden regardless.
+**The intended solution is drawn right on top of the player's own board**,
+translucent, rather than in a second pane — `render.ts`'s
+`RenderState.ghostEdges` (`drawGhostEdges`/its `drawWrapped` counterpart): a
+uniform, semi-transparent gold (`COLORS.ghostSolution`, deliberately far
+from both the "solved" green and the component-color walk's hue so it never
+reads as "this segment is actually won") stroked over every edge of
+`generateSolutionEdges(id)`, regardless of whether the player also marked
+that edge — an edge that's both drawn overlaps the gold wash on top of the
+player's own color, reading as a soft highlight over what's already right;
+an edge only in the solution reads as a ghostly outline over what's
+missing. Purely a rendering concern, layered on after everything else
+(`drawSingleTile`/`drawWrapped`, right before the keyboard cursor) — no new
+canvas, no new pointer handling, no new pan/zoom state of its own.
 
-**Reached from two places**, both handing `enterBlitzResult` whatever
-puzzle/edges were actually on screen when the run ended plus the run's own
-final tally — the function itself owns every bit of screen-state
-bookkeeping either path needs, identically:
-
-- **`endBlitzRun`** (the clock hitting zero, or Forfeit) — the puzzle that
-  was in progress at that moment, exactly as the player left it. Captures
-  `blitzPuzzle`/`blitzCurrentId`/`blitzPathState`/`blitzParams` into locals
-  *before* `saveBlitzRun`'s `await` (which yields control), and keeps
-  setting `mode = 'playing'` synchronously beforehand — the same
-  `mode === 'blitz'` reentrancy guard this function already had before this
-  feature existed, now covering the gap until `enterBlitzResult` itself
-  sets `mode = 'blitzResult'` once the save settles.
-- **`blitzReplayTick`** reaching the natural end of a recorded run's own
-  replay (see "Recording and replaying a run" above) — whatever
-  `blitzReplayPuzzle`/`blitzReplayPathState` holds at that instant (the
-  same state the ordinary `'blitzReplay'` UI was already showing), plus
-  `blitzReplaySolved` and the record's own `scoreMs`. Deliberately triggered
-  *only* by actually watching a run through to this conclusion — scrubbing
-  `#blitzReplayScrubber` all the way to the end does **not** also pop into
-  the result screen, since that would make it impossible to scrub back out
-  again; "Watch Replay" on the result screen itself is always available if
-  the player wants to watch it again regardless of how they got here.
+**Reached only from `endBlitzRun`** (the clock hitting zero, or Forfeit) —
+captures `blitzPuzzle`/`blitzCurrentId`/`blitzPathState`/`blitzParams` into
+locals *before* `saveBlitzRun`'s `await` (which yields control), and keeps
+setting `mode = 'playing'` synchronously beforehand — the same
+`mode === 'blitz'` reentrancy guard this function already had before this
+feature existed, now covering the gap until `enterBlitzResult` itself sets
+`mode = 'blitzResult'` once the save settles. `enterBlitzResult` then owns
+every bit of the screen-state bookkeeping: freezing the final
+edges/regionMap, computing the ghost overlay, and swapping the control bar
+and header text — then just calls the ordinary `layout()`, exactly like
+every other mode-entry function does.
 
 **Play Again / Watch Replay / Back all live in `#blitzResultControls`**, a
 deliberate exception to this project's usual "back is always top-left"
 convention (see "Back/exit/done buttons are always top-left" above) — this
 feature's own spec calls for all three in the game screen's bottom control
 bar rather than a separate menu screen's button stack. Play Again
-(`startBlitzRun(blitzResultParams)`) starts a fresh run at the *result's
-own* pace — not necessarily whatever `blitzParams` happens to hold at click
-time, which matters once the result screen can be reached by watching an
-arbitrary stored run from the Leaderboard rather than only a run just
-finished live; `blitzResultParams` is set from the finishing run's own
-`blitzParams` (`endBlitzRun`) or from the watched record's own
-`startingTimeSec`/`timeBackPerEdgeSec` (`blitzReplayTick`), so either path
-replays at the difficulty actually shown. Watch Replay
-(`openBlitzReplay(blitzResultRecord, blitzResultReturnScreen)`) opens (or
-re-opens) that same run's replay from the start regardless of which path
-led here — reached via a live finish, it's the "Watch Replay" this feature
-replaces; reached via a replay that already played through to the end, it
-simply restarts the same replay — one handler covers both, since both
-entry paths land in the exact same `blitzResultRecord`/
-`blitzResultReturnScreen` state. Back
-(`showScreen(blitzResultReturnScreen)`) returns to the Blitz hub for a
-freshly-finished live run, or to wherever the replay being watched was
-itself opened from (the Leaderboard's runs list, or the result screen a
-previous replay-completion landed on) — `blitzResultReturnScreen` is set at
-entry from either `'blitzMenu'` (`endBlitzRun`) or the live
-`blitzReplayReturnScreen` (`blitzReplayTick`).
+(`startBlitzRun(blitzResultParams)`) starts a fresh run at the same pace the
+finishing run itself used; Watch Replay
+(`openBlitzReplay(blitzResultRecord, blitzResultReturnScreen)`) opens that
+run's own replay (disabled if the save failed, same as the old game-over
+screen's version of this button); Back (`showScreen(blitzResultReturnScreen)`,
+always `'blitzMenu'` here) returns to the Blitz hub.
+
+**A run's own replay reaching *its* end doesn't go through any of this** —
+see "Recording and replaying a run" above and `syncBlitzReplayEndView`:
+watching a run's replay all the way through shows the exact same gold
+ghost overlay on the final frame, but entirely inline, with `mode` staying
+`'blitzReplay'` and `#blitzReplayBar`'s Close/Play-Pause/speed/scrubber all
+staying visible and functional throughout — no mode switch, no swapped
+control bar, nothing that would make it harder to scrub back out again.
 
 ### Leaderboard
 

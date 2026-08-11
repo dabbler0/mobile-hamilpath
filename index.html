@@ -180,17 +180,22 @@
 
       <!--
         The live/reviewed/Blitz game itself — one shared canvas + board
-        layout for all three (`main.ts`'s `mode: 'playing' | 'reviewing' |
+        layout for all five (`main.ts`'s `mode: 'playing' | 'reviewing' |
         'blitz' | 'blitzReplay' | 'blitzResult'`). `#exitBtn`/`#headerInfo`/`#playControls`
         are Free Play's own; `#reviewBar` is the ordinary per-puzzle review
         overlay; `#blitzExitBtn`/`#blitzHeaderInfo`/`#blitzBar` are Blitz's
         live-run equivalents, and `#blitzReplayBar` is a Blitz *run's*
         real-time replay (distinct from `#reviewBar`'s single-puzzle replay)
         — exactly one of these sets is ever visible, toggled by `main.ts`'s
-        `mode`. `#blitzResultWrap`/`#blitzResultControls` are a fourth pair,
-        replacing `#boardWrap`/`#playControls` in place (not a separate
-        screen) once a Blitz run ends or its replay finishes — see
-        CLAUDE.md's "Blitz mode" section.
+        `mode`. `'blitzResult'` (a live run just ending) reuses this same
+        `#canvas`/`#boardWrap` outright rather than swapping in anything of
+        its own — the board stays exactly as pannable/zoomable as ever, just
+        read-only, with `#blitzResultControls` replacing `#playControls`/
+        `#blitzControls` below and the intended solution drawn as a
+        translucent overlay on top of it (`render.ts`'s `RenderState.ghostEdges`)
+        — see CLAUDE.md's "Blitz mode" section. A run's own replay
+        (`'blitzReplay'`) draws that same overlay inline, on its own final
+        frame, without changing `mode` or touching `#blitzReplayBar` at all.
       -->
       <div id="gameScreen" class="screen hidden">
         <header>
@@ -234,7 +239,7 @@
               <span id="replayCounter"></span>
             </div>
           </div>
-          <!-- Blitz run replay: plays the whole recorded run back at real pace (see game/blitz.ts's BlitzEvent). Distinct from #reviewBar, which replays one puzzle's move log. -->
+          <!-- Blitz run replay: plays the whole recorded run back at real pace (see game/blitz.ts's BlitzEvent). Distinct from #reviewBar, which replays one puzzle's move log. Stays visible/usable even once playback reaches its own final frame — see main.ts's `syncBlitzReplayEndView`. -->
           <div id="blitzReplayBar" class="hidden">
             <button class="secondary backBtn" id="blitzReplayCloseBtn">‹ Close</button>
             <button class="secondary" id="blitzReplayPlayPauseBtn">Pause</button>
@@ -246,28 +251,6 @@
             </select>
             <input type="range" id="blitzReplayScrubber" min="0" max="0" value="0" step="1" />
             <span id="blitzReplayCounter"></span>
-          </div>
-        </div>
-        <!--
-          Blitz run result: the intended solution to the final puzzle
-          side-by-side with the board exactly as the run ended, shown in
-          place of `#boardWrap` (not a separate menu screen) the instant a
-          live run ends or its own replay plays through to the end —
-          `main.ts`'s `enterBlitzResult`. Its own controls live in
-          `#blitzResultControls` below, a fourth sibling of
-          `#playControls`/`#blitzControls`.
-        -->
-        <div id="blitzResultWrap" class="hidden">
-          <div id="blitzResultScore"></div>
-          <div id="blitzResultBoards">
-            <div class="blitzResultPane">
-              <div class="blitzResultPaneLabel">Your board</div>
-              <div class="blitzResultCanvasWrap"><canvas id="blitzResultCanvasFinal"></canvas></div>
-            </div>
-            <div class="blitzResultPane">
-              <div class="blitzResultPaneLabel">Intended solution</div>
-              <div class="blitzResultCanvasWrap"><canvas id="blitzResultCanvasSolution"></canvas></div>
-            </div>
           </div>
         </div>
         <div class="controls" id="playControls">
