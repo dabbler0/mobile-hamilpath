@@ -24,16 +24,21 @@ export interface RenderState {
    */
   componentColors?: ReadonlyMap<EdgeKey, number> | null;
   /**
-   * Optional translucent overlay of the puzzle's intended solution edges,
-   * drawn on top of everything else — shown once a Blitz run's board is
-   * "final" (the run ended, or its own replay reached the end) so the
-   * player can compare their own attempt against the answer without
-   * leaving the board they were just looking at (`main.ts`'s "Blitz mode"
-   * section). Every edge in this set is drawn identically regardless of
-   * whether it's also in `edges` — overlapping segments read as a soft
-   * highlight over what's already right, non-overlapping ones as a ghostly
-   * outline over what's missing. Omitted/`null`/empty for the ordinary case
-   * (nothing to overlay).
+   * Optional halo overlay of the puzzle's intended solution edges, drawn
+   * *underneath* the ordinary board (`drawSingleTile`/`drawWrapped` draw it
+   * first, then repaint the real candidate/node/marked-edge picture on top —
+   * see `drawGhostHalo`'s doc comment for the technique and why) — shown
+   * once a Blitz run's board is "final" (the run ended, or its own replay
+   * reached the end) so the player can compare their own attempt against
+   * the answer without leaving the board they were just looking at
+   * (`main.ts`'s "Blitz mode" section). A solution edge the player also
+   * marked reads as a thin, uniform halo flush against their own stroke; a
+   * solution edge they *didn't* mark reads as the same halo with plain
+   * background (and the thin candidate line) showing through the middle —
+   * an obvious empty outline, distinct from — but legible right alongside —
+   * every other color already on screen. Every edge in this set gets the
+   * same halo regardless of whether it's also in `edges`. Omitted/`null`/
+   * empty for the ordinary case (nothing to overlay).
    */
   ghostEdges?: ReadonlySet<EdgeKey> | null;
 }
@@ -113,8 +118,6 @@ const MIN_VISIBLE_WIDTH = 0.5;
  * reasoning), so the celebratory win state stays visually clean.
  */
 const LOCKED_EDGE_OPACITY = 0.55;
-/** Opacity of the Blitz result "intended solution" overlay — see `RenderState.ghostEdges`/`drawGhostEdges`. Translucent enough that the board underneath (the player's own marked/candidate edges) always stays legible through it. */
-const GHOST_ALPHA = 0.4;
 
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
@@ -147,8 +150,18 @@ const COLORS = {
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
-  /** The translucent "here's the intended solution" overlay a Blitz result view draws on top of everything else — see `drawGhostEdges`. A warm gold, deliberately far from both `markedWon`'s green and the component-color walk's excluded band around it, so the overlay never reads as "this segment is actually won" at a glance. */
-  ghostSolution: '#ffd166',
+  /**
+   * The Blitz result "intended solution" halo — see
+   * `RenderState.ghostEdges`/`drawGhostHalo`. A bright emerald, distinct
+   * from (if in the same general family as) `markedWon`'s more forest
+   * green — sharing the hue doesn't read as confusing "this is actually
+   * won" the way it would for a translucent fill over the edge itself (an
+   * earlier design tried here, see `drawGhostHalo`'s doc comment), since a
+   * thin halo rim is a visually distinct *language* from a thick
+   * marked-edge stroke, legible right alongside it rather than blended
+   * into it.
+   */
+  ghostSolution: '#34d399',
 };
 
 export interface CometStyle {
@@ -427,11 +440,11 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
   if (puzzle.topology) {
     drawWrapped(ctx, canvasWidth, canvasHeight, state, layout, view, topologyFor(puzzle.topology));
   } else {
-    drawSingleTile(ctx, state, layout);
+    drawSingleTile(ctx, canvasWidth, canvasHeight, state, layout);
   }
 }
 
-function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
+function drawSingleTile(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasHeight: number, state: RenderState, layout: Layout): void {
   const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors, ghostEdges } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdgeCollectionHalos(ctx, puzzle, layout);
@@ -440,24 +453,80 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (!won) drawDegreeWarnings(ctx, puzzle, edges, layout);
-  if (ghostEdges && ghostEdges.size > 0) drawGhostEdges(ctx, ghostEdges, layout);
+  // Drawn last, genuinely on top of everything above (including a marked
+  // edge's own color and the degree-warning reveal) — see `drawGhostHalo`'s
+  // doc comment for why this needs an offscreen canvas rather than just
+  // moving earlier in this list the way `drawEdgeCollectionHalos` does.
+  if (ghostEdges && ghostEdges.size > 0) drawGhostHalo(ctx, ghostEdges, layout, canvasWidth, canvasHeight);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
 /**
- * Translucent overlay of the puzzle's intended solution — see
- * `RenderState.ghostEdges`'s doc comment. Every edge is drawn the same
- * uniform gold regardless of whether it's also currently marked; unlike
- * `drawMarkedEdges` there's no component coloring, animation, or
- * locked-edge dimming to account for, since this is a static, read-only
- * comparison, not a live editable path.
+ * Halo overlay of the puzzle's intended solution — see
+ * `RenderState.ghostEdges`'s doc comment. Drawn dead last in
+ * `drawSingleTile`, genuinely on top of everything else (a marked edge's
+ * own color, a degree-warning reveal, all of it), rather than underneath
+ * with the ordinary passes redrawing over it — this needs a real *hole*
+ * carved through an otherwise-opaque ring shape, not just "something drawn
+ * earlier gets painted over later", so it has to happen on an isolated
+ * offscreen canvas: draw the thick outer ring in the halo color, then erase
+ * a `markedEdgeBaseWidth`-wide (the same width a real marked edge is drawn
+ * at) strip back out of it with `globalCompositeOperation:
+ * 'destination-out'`, which only works correctly here because it's erasing
+ * pixels *this function itself just drew* on a canvas that started fully
+ * transparent — running the same erase directly against `ctx` would punch a
+ * hole straight through the real board underneath it instead. `drawImage`
+ * then stamps the finished ring (opaque halo color, with a genuinely
+ * transparent gap down the middle) onto `ctx` in one shot: the gap's
+ * zero-alpha pixels leave whatever's already on `ctx` untouched, which is what makes
+ * the marked edge's own color (or the degree-warning reveal, or the plain
+ * candidate line) show through the middle exactly as before, with the halo
+ * now sitting visibly on top everywhere else. Mirrors
+ * `drawDegreeWarningReveal`'s own "isolated offscreen canvas +
+ * composite-mode trick, then one `drawImage` back onto the real `ctx`"
+ * shape, just with `destination-out` carving a hole instead of
+ * `destination-in` masking a radial fade.
+ *
+ * Two edges sharing a vertex still join seamlessly at every corner, exactly
+ * as before: both the outer ring and the inner erase are drawn per-edge
+ * with round caps centered at the same shared vertex point, so overlapping
+ * caps blend (ring) or erase (hole) identically regardless of which edge
+ * "arrives" at that point first — no offset math, no line-join handling.
+ *
+ * (Earlier versions of this either drew a single translucent stroke
+ * directly over the edge — muddy against the player's own marked-edge
+ * coloring — or two independently-offset thin lines per edge — which
+ * self-intersected or gapped at a turn, since each edge's own offset
+ * direction has nothing to do with its neighbor's — or this same
+ * thick-ring-then-erase shape but drawn *underneath* everything else,
+ * relying on the ordinary candidate/node/marked-edge passes to redraw on
+ * top of it; that got flush corners for free but could only ever sit
+ * *behind* the rest of the board, not on top of it.)
  */
-function drawGhostEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
-  ctx.save();
-  ctx.globalAlpha = GHOST_ALPHA;
-  ctx.strokeStyle = COLORS.ghostSolution;
-  ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
-  ctx.lineCap = 'round';
+function drawGhostHalo(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout, canvasWidth: number, canvasHeight: number): void {
+  const outerWidth = markedEdgeBaseWidth(layout) + 2 * ghostHaloLineWidth(layout);
+  const innerWidth = markedEdgeBaseWidth(layout);
+
+  const off = document.createElement('canvas');
+  off.width = Math.max(1, Math.ceil(canvasWidth));
+  off.height = Math.max(1, Math.ceil(canvasHeight));
+  const octx = off.getContext('2d');
+  if (!octx) return;
+
+  octx.lineCap = 'round';
+  octx.strokeStyle = COLORS.ghostSolution;
+  octx.lineWidth = outerWidth;
+  strokeGhostEdges(octx, edges, layout);
+
+  octx.globalCompositeOperation = 'destination-out';
+  octx.lineWidth = innerWidth;
+  strokeGhostEdges(octx, edges, layout);
+
+  ctx.drawImage(off, 0, 0);
+}
+
+/** Strokes every ghost edge at `ctx`'s currently-set `strokeStyle`/`lineWidth` — the one piece of `drawGhostHalo`'s two passes (and `drawWrapped`'s own tiled equivalent) that's actually per-edge geometry, factored out so both passes (and both single-tile/wrapped call sites) share it instead of repeating the same loop body. */
+function strokeGhostEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
   for (const ek of edges) {
     const [a, b] = parseEdgeKey(ek);
     const [sx1, sy1] = toScreen(a, layout);
@@ -467,7 +536,6 @@ function drawGhostEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKe
     ctx.lineTo(sx2, sy2);
     ctx.stroke();
   }
-  ctx.restore();
 }
 
 function drawEdges(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout): void {
@@ -535,6 +603,11 @@ function computeMarkedDegrees(edges: ReadonlySet<EdgeKey>): Map<CellKey, number>
  */
 function markedEdgeBaseWidth(layout: Layout): number {
   return Math.max(3, layout.cellSize * 0.32);
+}
+
+/** Thickness of each side of `drawGhostHalo`'s rim — thin relative to a marked edge, matching `drawEdges`' own candidate-edge line width. */
+function ghostHaloLineWidth(layout: Layout): number {
+  return Math.max(1.5, layout.cellSize * 0.09);
 }
 
 /**
@@ -1129,6 +1202,17 @@ function drawWrapped(
     }
   }
 
+  // See `RenderState.ghostEdges`'s doc comment — classified once here
+  // (like every other tiled overlay above), drawn further down, before the
+  // ordinary candidate/node/marked-edge passes rather than after.
+  const tiledGhostEdges: TiledEdge[] = [];
+  if (ghostEdges) {
+    for (const ek of ghostEdges) {
+      const [a, b] = parseEdgeKey(ek);
+      tiledGhostEdges.push(classifyEdge(a, b, topology, W, H));
+    }
+  }
+
   function forEachTile(fn: (tileX: number, tileY: number) => void): void {
     for (let tileY = minTileY; tileY <= maxTileY; tileY++) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX++) fn(tileX, tileY);
@@ -1270,36 +1354,6 @@ function drawWrapped(
     }
   }
 
-  // Same "classify once, re-project per tile" pattern as every other tiled
-  // overlay above — see `RenderState.ghostEdges`'s doc comment for what this
-  // is drawing and why. Uniform gold, no per-edge styling to resolve, unlike
-  // `tiledMarkedEdges`.
-  if (ghostEdges && ghostEdges.size > 0) {
-    const tiledGhostEdges: TiledEdge[] = [];
-    for (const ek of ghostEdges) {
-      const [a, b] = parseEdgeKey(ek);
-      tiledGhostEdges.push(classifyEdge(a, b, topology, W, H));
-    }
-    ctx.globalAlpha = GHOST_ALPHA;
-    ctx.strokeStyle = COLORS.ghostSolution;
-    ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
-    ctx.lineCap = 'round';
-    forEachTile((tileX, tileY) => {
-      const oFrom = topology.tileOrientation(tileX, tileY);
-      for (const { from, to, tileDX, tileDY } of tiledGhostEdges) {
-        const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
-        const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
-        const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
-        const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
-        ctx.beginPath();
-        ctx.moveTo(sx1, sy1);
-        ctx.lineTo(sx2, sy2);
-        ctx.stroke();
-      }
-    });
-    ctx.globalAlpha = 1;
-  }
-
   if (keyboardCursor) {
     const cr = Math.max(6, layout.cellSize * 0.44);
     ctx.setLineDash([4, 4]);
@@ -1315,5 +1369,71 @@ function drawWrapped(
     ctx.setLineDash([]);
   }
 
+  // The ghost halo, drawn dead last — genuinely on top of everything else,
+  // the same as the single-tile `drawGhostHalo` (see its doc comment for
+  // the full offscreen-canvas + `destination-out` reasoning). The offscreen
+  // canvas here mirrors `ctx`'s own currently-active pan/zoom transform
+  // exactly (rather than `drawDegreeWarningReveal`'s plain `pixelScale`
+  // scale-only transform), so the *same* `toScreenTiled`-projected
+  // coordinates already used by every pass above land in the same place on
+  // both — which is what lets the final composite be a single untransformed
+  // `drawImage(off, 0, 0)`, crisp at any zoom level, with no separate
+  // scale/translate math of its own to keep in sync. `ctx`'s transform has
+  // to be reset to identity for that one `drawImage` call (`drawImage`
+  // itself is subject to the current transform same as any other canvas
+  // draw call, and `off`'s own pixels already *are* the final device-pixel
+  // image) and then restored — nothing draws after this, but resetting it
+  // unconditionally rather than assuming so is cheap insurance against a
+  // future addition silently inheriting the wrong transform.
+  if (ghostEdges && ghostEdges.size > 0) {
+    const outerWidth = markedEdgeBaseWidth(layout) + 2 * ghostHaloLineWidth(layout);
+    const innerWidth = markedEdgeBaseWidth(layout);
+
+    const off = document.createElement('canvas');
+    off.width = Math.max(1, Math.ceil(canvasWidth));
+    off.height = Math.max(1, Math.ceil(canvasHeight));
+    const octx = off.getContext('2d');
+    if (octx) {
+      octx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+      octx.lineCap = 'round';
+      octx.strokeStyle = COLORS.ghostSolution;
+      octx.lineWidth = outerWidth;
+      strokeTiledGhostEdges(octx, tiledGhostEdges, layout, topology, W, H, forEachTile);
+
+      octx.globalCompositeOperation = 'destination-out';
+      octx.lineWidth = innerWidth;
+      strokeTiledGhostEdges(octx, tiledGhostEdges, layout, topology, W, H, forEachTile);
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(off, 0, 0);
+      ctx.setTransform(view.scale, 0, 0, view.scale, view.tx, view.ty);
+    }
+  }
+
   ctx.restore();
+}
+
+/** Strokes every tiled ghost-edge segment, across every currently-visible repeated tile copy, at whichever `ctx`'s currently-set `strokeStyle`/`lineWidth` — the one piece of `drawGhostHalo`'s (wrapped-board) two passes that's actually per-edge-per-tile geometry, factored out so both passes share it instead of repeating the same nested loop body. */
+function strokeTiledGhostEdges(
+  ctx: CanvasRenderingContext2D,
+  tiledGhostEdges: readonly TiledEdge[],
+  layout: Layout,
+  topology: Topology,
+  W: number,
+  H: number,
+  forEachTile: (fn: (tileX: number, tileY: number) => void) => void,
+): void {
+  forEachTile((tileX, tileY) => {
+    const oFrom = topology.tileOrientation(tileX, tileY);
+    for (const { from, to, tileDX, tileDY } of tiledGhostEdges) {
+      const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
+      const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+      const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+      const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+      ctx.beginPath();
+      ctx.moveTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.stroke();
+    }
+  });
 }
