@@ -267,9 +267,26 @@ const BLITZ_LOW_TIME_MS = 10000;
  */
 const BLITZ_MUSIC_DANGER_MS = 20000;
 
-/** Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts` expects — see `BLITZ_MUSIC_DANGER_MS`'s doc comment. */
+/**
+ * Density floor applied even with a full clock (see `blitzMusicDensity`
+ * below) — a bare `1 - remaining/BLITZ_MUSIC_DANGER_MS` reading starts a
+ * fresh run at density 0 for as long as the clock stays outside the danger
+ * window, which `audio/music.ts`'s `evolve()` (`desired = round(1 +
+ * densityTarget * (layers.length - 1))`) maps onto just the single anchor
+ * layer — a run's opening stretch, which is most of a comfortable run, read
+ * as near-silent rather than as music. `BLITZ_MUSIC_MIN_DENSITY` raises the
+ * floor of `blitzMusicDensity`'s range instead of its ceiling, so a run
+ * still opens with a couple of instruments already going (`evolve()`'s own
+ * `DENSITY_JITTER` puts this floor's actual layer count at roughly 2-4) and
+ * still reaches the same full density as before once the clock actually
+ * gets low.
+ */
+const BLITZ_MUSIC_MIN_DENSITY = 0.15;
+
+/** Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts` expects — see `BLITZ_MUSIC_DANGER_MS`'s and `BLITZ_MUSIC_MIN_DENSITY`'s doc comments. */
 function blitzMusicDensity(remainingMs: number): number {
-  return 1 - Math.min(1, Math.max(0, remainingMs / BLITZ_MUSIC_DANGER_MS));
+  const danger = 1 - Math.min(1, Math.max(0, remainingMs / BLITZ_MUSIC_DANGER_MS));
+  return BLITZ_MUSIC_MIN_DENSITY + (1 - BLITZ_MUSIC_MIN_DENSITY) * danger;
 }
 
 let blitzParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
