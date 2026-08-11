@@ -23,6 +23,19 @@ export interface RenderState {
    * to it, same as everything else here.
    */
   componentColors?: ReadonlyMap<EdgeKey, number> | null;
+  /**
+   * Optional translucent overlay of the puzzle's intended solution edges,
+   * drawn on top of everything else — shown once a Blitz run's board is
+   * "final" (the run ended, or its own replay reached the end) so the
+   * player can compare their own attempt against the answer without
+   * leaving the board they were just looking at (`main.ts`'s "Blitz mode"
+   * section). Every edge in this set is drawn identically regardless of
+   * whether it's also in `edges` — overlapping segments read as a soft
+   * highlight over what's already right, non-overlapping ones as a ghostly
+   * outline over what's missing. Omitted/`null`/empty for the ordinary case
+   * (nothing to overlay).
+   */
+  ghostEdges?: ReadonlySet<EdgeKey> | null;
 }
 
 /** A single edge growing in from zero width (drawn at full length throughout), keyed by when it started (`main.ts`'s `growingEdges`). */
@@ -100,6 +113,8 @@ const MIN_VISIBLE_WIDTH = 0.5;
  * reasoning), so the celebratory win state stays visually clean.
  */
 const LOCKED_EDGE_OPACITY = 0.55;
+/** Opacity of the Blitz result "intended solution" overlay — see `RenderState.ghostEdges`/`drawGhostEdges`. Translucent enough that the board underneath (the player's own marked/candidate edges) always stays legible through it. */
+const GHOST_ALPHA = 0.4;
 
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
@@ -132,6 +147,8 @@ const COLORS = {
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
+  /** The translucent "here's the intended solution" overlay a Blitz result view draws on top of everything else — see `drawGhostEdges`. A warm gold, deliberately far from both `markedWon`'s green and the component-color walk's excluded band around it, so the overlay never reads as "this segment is actually won" at a glance. */
+  ghostSolution: '#ffd166',
 };
 
 export interface CometStyle {
@@ -415,7 +432,7 @@ export function draw(ctx: CanvasRenderingContext2D, canvasWidth: number, canvasH
 }
 
 function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layout: Layout): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors, ghostEdges } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdgeCollectionHalos(ctx, puzzle, layout);
   drawEdges(ctx, puzzle, layout);
@@ -423,7 +440,34 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (!won) drawDegreeWarnings(ctx, puzzle, edges, layout);
+  if (ghostEdges && ghostEdges.size > 0) drawGhostEdges(ctx, ghostEdges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
+}
+
+/**
+ * Translucent overlay of the puzzle's intended solution — see
+ * `RenderState.ghostEdges`'s doc comment. Every edge is drawn the same
+ * uniform gold regardless of whether it's also currently marked; unlike
+ * `drawMarkedEdges` there's no component coloring, animation, or
+ * locked-edge dimming to account for, since this is a static, read-only
+ * comparison, not a live editable path.
+ */
+function drawGhostEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+  ctx.save();
+  ctx.globalAlpha = GHOST_ALPHA;
+  ctx.strokeStyle = COLORS.ghostSolution;
+  ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
+  ctx.lineCap = 'round';
+  for (const ek of edges) {
+    const [a, b] = parseEdgeKey(ek);
+    const [sx1, sy1] = toScreen(a, layout);
+    const [sx2, sy2] = toScreen(b, layout);
+    ctx.beginPath();
+    ctx.moveTo(sx1, sy1);
+    ctx.lineTo(sx2, sy2);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawEdges(ctx: CanvasRenderingContext2D, puzzle: Puzzle, layout: Layout): void {
@@ -969,7 +1013,7 @@ function drawWrapped(
   view: Viewport,
   topology: Topology,
 ): void {
-  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors } = state;
+  const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors, ghostEdges } = state;
   const { W, H } = puzzle;
   const now = anim?.now ?? 0;
 
@@ -1224,6 +1268,36 @@ function drawWrapped(
         });
       });
     }
+  }
+
+  // Same "classify once, re-project per tile" pattern as every other tiled
+  // overlay above — see `RenderState.ghostEdges`'s doc comment for what this
+  // is drawing and why. Uniform gold, no per-edge styling to resolve, unlike
+  // `tiledMarkedEdges`.
+  if (ghostEdges && ghostEdges.size > 0) {
+    const tiledGhostEdges: TiledEdge[] = [];
+    for (const ek of ghostEdges) {
+      const [a, b] = parseEdgeKey(ek);
+      tiledGhostEdges.push(classifyEdge(a, b, topology, W, H));
+    }
+    ctx.globalAlpha = GHOST_ALPHA;
+    ctx.strokeStyle = COLORS.ghostSolution;
+    ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
+    ctx.lineCap = 'round';
+    forEachTile((tileX, tileY) => {
+      const oFrom = topology.tileOrientation(tileX, tileY);
+      for (const { from, to, tileDX, tileDY } of tiledGhostEdges) {
+        const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
+        const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+        const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+        const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+      }
+    });
+    ctx.globalAlpha = 1;
   }
 
   if (keyboardCursor) {
