@@ -78,7 +78,7 @@ export interface HistoryStepResult {
 }
 
 /**
- * Resets the path back to `initial` (`pathEdit.ts`'s `resetToLockedState`)
+ * Resets the path back to `initial` (`game/edgeLock.ts`'s `resetToLockedState`)
  * — modeled exactly like undo/redo: `current` goes on the undo stack (so a
  * reset can itself be undone) and a `jump` entry lands in the move log, so
  * replay shows exactly what happened — whatever moves came before, then

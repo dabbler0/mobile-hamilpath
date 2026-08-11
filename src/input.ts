@@ -128,6 +128,43 @@ export function attachPointerHandling(wrapEl: HTMLElement, host: GameInputHost):
     panState = { lastClientX: p.x, lastClientY: p.y };
   }
 
+  /**
+   * The region (if any) a client-space point lands on — `null` for outside
+   * every region, or a region whose boundary isn't actually enclosed (see
+   * `Region.enclosed`'s doc comment: not safe to toggle, so treated exactly
+   * like landing outside any region at all). Shared by `onPointerDown`
+   * (the tap-candidate highlight) and `updateHoverRegion` (the mouse-hover
+   * highlight, GitHub issue #58) so the two agree on exactly the same point
+   * — a click always lands on whatever region its own immediately-preceding
+   * hover move already highlighted.
+   */
+  function regionAtPoint(clientX: number, clientY: number): number | null {
+    const [wx, wy] = wrapLocal(clientX, clientY);
+    const [px, py] = toCanvasLocal(wx, wy, host.getView());
+    const puzzle = host.getPuzzle();
+    const layout = host.getLayout();
+    const face = faceAt(px, py, layout, puzzle.W, puzzle.H, puzzle.topology ? topologyFor(puzzle.topology) : undefined);
+    const regionMap = host.getRegionMap();
+    const regionId = regionAt(regionMap, face);
+    return regionId !== null && regionMap.regions[regionId].enclosed ? regionId : null;
+  }
+
+  /**
+   * Mouse-only "preview" highlight (GitHub issue #58): unlike a tap/click,
+   * which only briefly shows what's about to change right at pointerdown, a
+   * mouse can hover in place beforehand — so with a mouse, the region under
+   * the cursor is highlighted continuously as it moves, not just for the
+   * instant between press and release. Never called for touch/pen (no
+   * meaningful "hover" gesture exists for those, and this game's whole
+   * design is mobile-first — see `onPointerMove`/`onPointerLeave`, the only
+   * two call sites, both already gated on `evt.pointerType === 'mouse'`),
+   * and a no-op highlight-wise once the puzzle is won/reviewing, same as a
+   * press already is (nothing left to toggle).
+   */
+  function updateHoverRegion(clientX: number, clientY: number): void {
+    host.setFocusedRegion(host.getPathState().won ? null : regionAtPoint(clientX, clientY));
+  }
+
   function onPointerDown(evt: PointerEvent) {
     if (isInteractiveTarget(evt.target)) return;
     activePointers.set(evt.pointerId, { x: evt.clientX, y: evt.clientY });
@@ -140,24 +177,25 @@ export function attachPointerHandling(wrapEl: HTMLElement, host: GameInputHost):
     panState = { lastClientX: evt.clientX, lastClientY: evt.clientY };
     if (host.getPathState().won) return;
 
-    const [wx, wy] = wrapLocal(evt.clientX, evt.clientY);
-    const [px, py] = toCanvasLocal(wx, wy, host.getView());
-    const puzzle = host.getPuzzle();
-    const layout = host.getLayout();
-    const face = faceAt(px, py, layout, puzzle.W, puzzle.H, puzzle.topology ? topologyFor(puzzle.topology) : undefined);
-    const regionMap = host.getRegionMap();
-    const regionId = regionAt(regionMap, face);
-    // A region whose boundary isn't actually a closed loop (`Region.enclosed`
-    // — see its doc comment) can't be safely toggled at all, so it's treated
-    // exactly like tapping outside any region: no highlight, no candidate.
-    if (regionId !== null && regionMap.regions[regionId].enclosed) {
+    const regionId = regionAtPoint(evt.clientX, evt.clientY);
+    if (regionId !== null) {
       tapCandidate = { regionId, downClientX: evt.clientX, downClientY: evt.clientY };
       host.setFocusedRegion(regionId);
     }
   }
 
   function onPointerMove(evt: PointerEvent) {
-    if (!activePointers.has(evt.pointerId)) return;
+    if (!activePointers.has(evt.pointerId)) {
+      // Not a pointer currently pressed — for a mouse, this is a plain hover
+      // move (see `updateHoverRegion`'s doc comment); ignored for touch/pen,
+      // and while some *other* pointer/gesture (pan or pinch) is already in
+      // progress, so a second, uninvolved mouse hovering elsewhere can't
+      // fight the in-progress gesture's own highlight.
+      if (evt.pointerType === 'mouse' && !panState && !pinch && !isInteractiveTarget(evt.target)) {
+        updateHoverRegion(evt.clientX, evt.clientY);
+      }
+      return;
+    }
     activePointers.set(evt.pointerId, { x: evt.clientX, y: evt.clientY });
 
     if (pinch && activePointers.size >= 2) {
@@ -214,18 +252,37 @@ export function attachPointerHandling(wrapEl: HTMLElement, host: GameInputHost):
 
     panState = null;
     tapCandidate = null;
-    host.setFocusedRegion(null);
+    // For a mouse, the cursor is still sitting right there after the
+    // release — re-derive the hover highlight for its current position
+    // (GitHub issue #58) instead of leaving it dark until the next actual
+    // mousemove. A genuine `pointercancel` (something else took over the
+    // gesture, e.g. a browser-level scroll) skips this and just clears,
+    // same as touch/pen already do unconditionally.
+    if (evt.pointerType === 'mouse' && evt.type === 'pointerup') {
+      updateHoverRegion(evt.clientX, evt.clientY);
+    } else {
+      host.setFocusedRegion(null);
+    }
+  }
+
+  /** Clears the mouse-hover highlight (GitHub issue #58) when the cursor leaves `wrapEl` without a pointerup — e.g. moving off the edge of the board viewport — so it doesn't linger showing a region the cursor is no longer over. Ignored while a press from this same pointer is in progress (`activePointers` already tracks it): pointer capture keeps a drag's own events targeted at `wrapEl` regardless of where the cursor physically is, so a `pointerleave` mid-drag doesn't mean the gesture ended. */
+  function onPointerLeave(evt: PointerEvent) {
+    if (evt.pointerType === 'mouse' && !activePointers.has(evt.pointerId)) {
+      host.setFocusedRegion(null);
+    }
   }
 
   wrapEl.addEventListener('pointerdown', onPointerDown as EventListener);
   wrapEl.addEventListener('pointermove', onPointerMove as EventListener);
   wrapEl.addEventListener('pointerup', onPointerEnd as EventListener);
   wrapEl.addEventListener('pointercancel', onPointerEnd as EventListener);
+  wrapEl.addEventListener('pointerleave', onPointerLeave as EventListener);
 
   return () => {
     wrapEl.removeEventListener('pointerdown', onPointerDown as EventListener);
     wrapEl.removeEventListener('pointermove', onPointerMove as EventListener);
     wrapEl.removeEventListener('pointerup', onPointerEnd as EventListener);
     wrapEl.removeEventListener('pointercancel', onPointerEnd as EventListener);
+    wrapEl.removeEventListener('pointerleave', onPointerLeave as EventListener);
   };
 }

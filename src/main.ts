@@ -2,12 +2,12 @@ import { playSfx, setSfxVolume } from './audio/sfx';
 import { confirmDialog } from './dialog';
 import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
-import { applyHintedEdges, lockEdge } from './game/edgeLock';
+import { applyHintedEdges, lockEdge, resetToLockedState } from './game/edgeLock';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, resetPath as resetHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
-import { applyPathOp, createInitialPath, resetToLockedState, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
+import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
@@ -777,7 +777,7 @@ function performRedo(): void {
  * pre-reset state onto the undo stack and appends a `jump` entry to the
  * move log, so replay shows exactly what happened — whatever moves came
  * before, every unlocked edge disappearing at once, then whatever moves
- * came after. "Starting state" means `pathEdit.ts`'s `resetToLockedState`,
+ * came after. "Starting state" means `game/edgeLock.ts`'s `resetToLockedState`,
  * not the puzzle's own generation-time `initialEdges` directly — a live
  * "Hint me" session can have locked additional edges since the game began
  * (see that function's own doc comment), and the issue's spec is explicit
