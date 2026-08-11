@@ -287,6 +287,26 @@
           <button class="secondary" id="blitzResetBtn" title="Clears the board back to its starting state">Reset</button>
         </div>
       </div>
+
+      <!--
+        Shared styleable confirm dialog (GitHub issue #51), replacing the
+        native `window.confirm()` used everywhere in `main.ts`. A sibling of
+        every `.screen` (not nested in any one of them) so it works
+        identically no matter which screen it's opened from — see
+        `src/dialog.ts`'s own doc comment. Always present in the DOM;
+        `#dialogOverlay.show` (toggled only by `dialog.ts`) is what actually
+        makes it visible/interactive, mirroring `#toast`'s own
+        always-present-but-transformed-away-when-hidden pattern.
+      -->
+      <div id="dialogOverlay">
+        <div id="dialogCard" role="alertdialog" aria-modal="true">
+          <div id="dialogMessage"></div>
+          <div id="dialogButtons">
+            <button class="secondary" id="dialogCancelBtn">Cancel</button>
+            <button id="dialogConfirmBtn">Confirm</button>
+          </div>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

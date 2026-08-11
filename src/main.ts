@@ -1,4 +1,5 @@
 import { playSfx, setSfxVolume } from './audio/sfx';
+import { confirmDialog } from './dialog';
 import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { applyHintedEdges, lockEdge } from './game/edgeLock';
@@ -876,9 +877,13 @@ function hintMe(): void {
  * shows it anyway, since it's the intended answer regardless of whether the
  * player's particular collection constraints happen to also accept it.
  */
-function revealSolution(): void {
+async function revealSolution(): Promise<void> {
   if (!giveUpAllowed()) return;
-  const confirmed = window.confirm('Give up and reveal the intended solution? This puzzle will no longer count as solved.');
+  const confirmed = await confirmDialog({
+    message: 'Give up and reveal the intended solution? This puzzle will no longer count as solved.',
+    confirmLabel: 'Give Up',
+    danger: true,
+  });
   if (!confirmed) return;
 
   clearEdgeAnimations();
@@ -1116,7 +1121,7 @@ function renderResumeItem(record: InProgressRecord): HTMLDivElement {
     () => beginPuzzle(puzzleIdOf(record), { edges: record.edges, history: record.history, hintedEdges: record.hintedEdges }),
     () => {
       void (async () => {
-        if (!window.confirm('Delete this saved game? This cannot be undone.')) return;
+        if (!(await confirmDialog({ message: 'Delete this saved game? This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
         await clearInProgress(puzzleIdOf(record));
         await refreshResumeList();
       })();
@@ -1144,7 +1149,7 @@ function renderReplayItem(record: CompletedRecord): HTMLDivElement {
     () => enterReview(record, 'menu'),
     () => {
       void (async () => {
-        if (!window.confirm('Delete this replay? This cannot be undone.')) return;
+        if (!(await confirmDialog({ message: 'Delete this replay? This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
         await deleteCompleted(puzzleIdOf(record));
         await refreshReplaysList();
       })();
@@ -1589,8 +1594,10 @@ async function endBlitzRun(): Promise<void> {
 
 function forfeitBlitzRun(): void {
   if (mode !== 'blitz') return;
-  if (!window.confirm('Forfeit this Blitz run? Your score so far will still be recorded.')) return;
-  void endBlitzRun();
+  void (async () => {
+    if (!(await confirmDialog({ message: 'Forfeit this Blitz run? Your score so far will still be recorded.', confirmLabel: 'Forfeit', danger: true }))) return;
+    await endBlitzRun();
+  })();
 }
 
 // ---- Blitz mode: leaderboard ----
@@ -1622,7 +1629,7 @@ function renderBlitzDifficultyItem(d: BlitzDifficultySummary): HTMLDivElement {
     () => openBlitzLeaderboardRuns(d),
     () => {
       void (async () => {
-        if (!window.confirm(`Delete all ${d.runCount} run(s) at this difficulty? This cannot be undone.`)) return;
+        if (!(await confirmDialog({ message: `Delete all ${d.runCount} run(s) at this difficulty? This cannot be undone.`, confirmLabel: 'Delete', danger: true }))) return;
         await deleteBlitzRunsForParams(d);
         await refreshBlitzLeaderboardList();
       })();
@@ -1657,7 +1664,7 @@ function renderBlitzRunItem(run: BlitzRunRecord, rank: number): HTMLDivElement {
     () => openBlitzReplay(run, 'blitzLeaderboardRuns'),
     () => {
       void (async () => {
-        if (!window.confirm('Delete this run? This cannot be undone.')) return;
+        if (!(await confirmDialog({ message: 'Delete this run? This cannot be undone.', confirmLabel: 'Delete', danger: true }))) return;
         await deleteBlitzRun(run.id);
         await refreshBlitzLeaderboardRunsList();
       })();
