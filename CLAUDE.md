@@ -317,6 +317,30 @@ early return in `onPointerDown` for any `evt.target` inside a `button`,
 `select`, `input`, `a`, or `label`) is what keeps those working as plain
 control presses instead of being misread as a board gesture.
 
+**Mouse hover highlight** (GitHub issue #58): unlike a tap, a mouse can
+rest over a face *before* clicking, so with a mouse the region under the
+cursor is highlighted continuously as it moves, not just for the brief
+instant between mousedown and mouseup. `onPointerMove`'s early return for a
+pointer that isn't in `activePointers` (i.e. nothing pressed) is exactly
+where a bare hover move lands; there, `evt.pointerType === 'mouse'` gates a
+call to `updateHoverRegion`, which shares `onPointerDown`'s own
+face-under-point → enclosed-region lookup (factored out as
+`regionAtPoint`, so a click always agrees with whatever its own
+immediately-preceding hover move already highlighted) and reports it
+through the same `host.setFocusedRegion` a tap-candidate already uses —
+this is one shared highlight slot, not a separate hover concept, so a
+mouse's own click still shows exactly the same highlight it was already
+hovering. Never triggered for touch/pen (no meaningful "hover" gesture
+exists for those), and suppressed while a pan or pinch from some *other*
+pointer is already in progress, so an idle second mouse can't fight an
+in-progress gesture's own highlight. `onPointerLeave` (a new listener,
+gated the same way) clears the highlight when the cursor leaves `wrapEl`
+without a mouseup — otherwise it would linger showing a region the cursor
+is no longer over — and `onPointerEnd`, for a mouse's own genuine
+`pointerup` (not a `pointercancel`), re-derives the hover highlight for
+wherever the cursor still is rather than leaving it dark until the next
+physical mousemove.
+
 `src/render.ts` draws the board: candidate edges, marked edges (colored by
 connected component, `edgeComponents.ts`, unless `won` in which case there's
 only one component and it gets the single "solved" color), the region
@@ -1346,7 +1370,7 @@ place that can change `pathState.won`/`gaveUp`):
   state onto the undo stack and appends a `jump` entry to the move log,
   so a reset shows up in replay exactly like it happened: whatever moves
   came before, every unlocked edge disappearing at once, then whatever
-  moves came after. "Reset" clears the board back to `pathEdit.ts`'s
+  moves came after. "Reset" clears the board back to `game/edgeLock.ts`'s
   `resetToLockedState(puzzle, solutionEdges)`, not literally
   `createInitialPath(puzzle)` — a live "Hint me" session can have locked
   additional edges since the game began (`puzzle.lockedEdges` grows, but
@@ -1355,6 +1379,28 @@ place that can change `pathState.won`/`gaveUp`):
   reset should respect *all* currently-locked edges, not just the ones the
   puzzle started with. The two are exactly equivalent whenever nothing's
   been locked since generation, which is the common case.
+  `resetToLockedState` lives in `edgeLock.ts`, not `pathEdit.ts`, precisely
+  *because* it's built on `lockEdge`: an earlier version set each locked
+  edge's mark bit directly, with no toggle at all, which is wrong (GitHub
+  issue #57) — locking an edge *to marked* from an empty board always needs
+  a real region toggle (see "Locking edges" above), and skipping that
+  toggle can leave a cell with a single dangling marked edge (odd
+  marked-degree), a state the player can never fix by tapping, sometimes
+  making the puzzle outright unwinnable. The fix, per the issue's own
+  suggestion, is to erase every edge and re-run the actual locking
+  procedure: starting from a virgin puzzle/regionMap (`lockedEdges`
+  cleared, so nothing is pre-excluded from any boundary) and an empty path
+  state, `resetToLockedState` replays `lockEdge` over every edge in
+  `puzzle.lockedEdges`, in that `Set`'s own insertion order (generation-time
+  locks first, then any later live hints, in the order they actually
+  happened) — exactly mirroring how `puzzleGen.ts`'s `applyLockedEdges`
+  built `initialEdges` in the first place, so the two are byte-identical
+  whenever nothing's been locked since generation (`edgeLock.test.ts`
+  checks this against real generated puzzles). Collateral flipping (see
+  "Locking edges" above) is a real, unavoidable side effect of this replay,
+  same as it is at generation time — a locked edge's own toggle can
+  legitimately leave some other, unlocked edge marked too, which the player
+  remains free to toggle away again.
 - **Complete, won or given up** (`#completeControls`): **Rematch** —
   `main.ts`'s `rematch()`, which immediately starts a fresh puzzle with the
   exact same `sizeKey`/`shapeMode`/`collections` as the one just finished

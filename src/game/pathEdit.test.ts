@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyPathOp, computeWin, createInitialPath, resetToLockedState, toggleRegion, type PathState } from './pathEdit';
+import { applyPathOp, computeWin, createInitialPath, toggleRegion, type PathState } from './pathEdit';
 import { computeRegions, regionAt } from './regions';
 import { buildKleinBottlePuzzle, buildProjectivePlanePuzzle, buildPuzzle, buildRandomShapePuzzle, buildToroidalPuzzle, key, type Puzzle } from './puzzle';
 import { mulberry32 } from './rng';
@@ -55,49 +55,6 @@ describe('createInitialPath', () => {
   it('treats a puzzle with no initialEdges field the same as no puzzle at all', () => {
     const puzzle = twoByTwoCyclePuzzle();
     expect(createInitialPath(puzzle).edges.size).toBe(0);
-  });
-});
-
-describe('resetToLockedState', () => {
-  it('marks nothing when the puzzle has no locked edges', () => {
-    const puzzle = twoByTwoCyclePuzzle();
-    const solutionEdges = new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1']);
-    const state = resetToLockedState(puzzle, solutionEdges);
-    expect(state.edges.size).toBe(0);
-    expect(state.won).toBe(false);
-  });
-
-  it('marks exactly the locked edges that are also in the solution, leaving locked-but-unmarked edges out', () => {
-    const puzzle = { ...twoByTwoCyclePuzzle(), lockedEdges: new Set(['0,0|1,0', '1,0|1,1']) };
-    const solutionEdges = new Set(['0,0|1,0']); // '1,0|1,1' is locked but *not* part of the solution
-    const state = resetToLockedState(puzzle, solutionEdges);
-    expect([...state.edges]).toEqual(['0,0|1,0']);
-  });
-
-  it('matches createInitialPath exactly when lockedEdges/initialEdges are consistent (the generation-time case)', () => {
-    const base = twoByTwoCyclePuzzle();
-    const puzzle = { ...base, lockedEdges: new Set(['0,0|1,0', '1,0|1,1']), initialEdges: ['0,0|1,0'] };
-    const solutionEdges = new Set(['0,0|1,0']);
-    expect([...resetToLockedState(puzzle, solutionEdges).edges].sort()).toEqual([...createInitialPath(puzzle).edges].sort());
-  });
-
-  it('includes a locked edge added after generation (e.g. a live hint) that initialEdges never knew about', () => {
-    // Simulates a puzzle whose generation-time initialEdges only covers the
-    // original locked set, but a later "Hint me" call has since locked one
-    // more edge (game/edgeLock.ts's lockEdge updates lockedEdges, not
-    // initialEdges) — see resetToLockedState's own doc comment.
-    const puzzle = { ...twoByTwoCyclePuzzle(), lockedEdges: new Set(['0,0|1,0', '0,1|1,1']), initialEdges: ['0,0|1,0'] };
-    const solutionEdges = new Set(['0,0|1,0', '0,1|1,1']);
-    const state = resetToLockedState(puzzle, solutionEdges);
-    expect([...state.edges].sort()).toEqual(['0,0|1,0', '0,1|1,1']);
-    // createInitialPath, by contrast, only knows about the original lock.
-    expect([...createInitialPath(puzzle).edges]).toEqual(['0,0|1,0']);
-  });
-
-  it('computes won correctly when the locked-and-solution edges alone already form a full cycle', () => {
-    const puzzle = { ...twoByTwoCyclePuzzle(), lockedEdges: new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1']) };
-    const solutionEdges = new Set(['0,0|1,0', '1,0|1,1', '0,1|1,1', '0,0|0,1']);
-    expect(resetToLockedState(puzzle, solutionEdges).won).toBe(true);
   });
 });
 

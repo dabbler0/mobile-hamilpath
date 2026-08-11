@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { applyHintedEdges, lockEdge } from './edgeLock';
+import { applyHintedEdges, lockEdge, resetToLockedState } from './edgeLock';
 import { createInitialPath, toggleRegion } from './pathEdit';
+import { generatePuzzle, generateSolutionEdges, LOCKED_EDGE_FRACTION, type PuzzleId } from './puzzleGen';
 import { key, type Puzzle } from './puzzle';
-import { computeRegions, edgeKey, regionsForEdge } from './regions';
+import { computeRegions, edgeKey, isBoundaryEnclosed, regionsForEdge } from './regions';
 
 /** A puzzle with exactly `edges` as its candidate graph — same helper `regions.test.ts` uses. */
 function puzzleFromEdges(W: number, H: number, edges: [[number, number], [number, number]][]): Puzzle {
@@ -238,5 +239,107 @@ describe('applyHintedEdges', () => {
 
     const result = applyHintedEdges(locked.puzzle, locked.regionMap, locked.state, [ek], new Set([ek]));
     expect(result.puzzle.lockedEdges).toEqual(locked.puzzle.lockedEdges);
+  });
+});
+
+describe('resetToLockedState', () => {
+  it('marks nothing when the puzzle has no locked edges', () => {
+    const puzzle = twoRegionPuzzle();
+    const state = resetToLockedState(puzzle, new Set());
+    expect(state.edges.size).toBe(0);
+    expect(state.won).toBe(false);
+  });
+
+  it('matches a direct lockEdge call from an empty board when exactly one edge is locked', () => {
+    const puzzle = twoRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const ek = edgeKey([1, 0], [1, 1]);
+    const direct = lockEdge(puzzle, regionMap, createInitialPath(), ek, true);
+
+    const lockedPuzzle = { ...puzzle, lockedEdges: new Set([ek]) };
+    const state = resetToLockedState(lockedPuzzle, new Set([ek]));
+    expect(state.edges).toEqual(direct.state.edges);
+  });
+
+  it('replays multiple locked edges in Set-insertion order, matching a sequential lockEdge chain', () => {
+    const puzzle = threeRegionPuzzle();
+    const regionMap = computeRegions(puzzle);
+    const ek1 = edgeKey([1, 0], [1, 1]);
+    const ek2 = edgeKey([2, 0], [2, 1]);
+    const solutionEdges = new Set([ek1]); // ek1 correctly marked, ek2 correctly unmarked
+
+    const step1 = lockEdge(puzzle, regionMap, createInitialPath(), ek1, true);
+    const step2 = lockEdge(step1.puzzle, step1.regionMap, step1.state, ek2, false);
+
+    // A real `Set`'s iteration order follows insertion order, so building
+    // `lockedEdges` in the same [ek1, ek2] order the live locks happened in
+    // is exactly what a real puzzle's `lockedEdges` would look like.
+    const lockedPuzzle = { ...puzzle, lockedEdges: new Set([ek1, ek2]) };
+    const state = resetToLockedState(lockedPuzzle, solutionEdges);
+    expect(state.edges).toEqual(step2.state.edges);
+  });
+
+  it('never produces a dangling odd-marked-degree cell when locking a single edge forces collateral flips on the rest of its region (GitHub issue #57)', () => {
+    // A 2x2 single-face board: the only region's boundary is the entire
+    // 4-edge cycle, so locking *any* one edge on it forces a real toggle of
+    // the whole boundary — collateral flipping is unavoidable here. An
+    // earlier, buggy version of `resetToLockedState` set each locked edge's
+    // mark bit directly with no toggle at all, which — on a board like this
+    // one — would have left just the one locked edge marked, a dangling
+    // single marked edge at each of its two endpoints (odd marked-degree).
+    const W = 2;
+    const H = 2;
+    const adj = new Map<string, Set<string>>();
+    for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) adj.set(key(x, y), new Set());
+    const cycleEdges: [[number, number], [number, number]][] = [
+      [[0, 0], [1, 0]],
+      [[1, 0], [1, 1]],
+      [[1, 1], [0, 1]],
+      [[0, 1], [0, 0]],
+    ];
+    for (const [a, b] of cycleEdges) {
+      adj.get(key(a[0], a[1]))!.add(key(b[0], b[1]));
+      adj.get(key(b[0], b[1]))!.add(key(a[0], a[1]));
+    }
+    const ek = edgeKey([0, 0], [1, 0]);
+    const puzzle: Puzzle = { adj, W, H, startCell: [0, 0], lockedEdges: new Set([ek]) };
+    const solutionEdges = new Set([ek]);
+
+    const state = resetToLockedState(puzzle, solutionEdges);
+    expect(isBoundaryEnclosed([...state.edges])).toBe(true);
+    expect(state.edges.has(ek)).toBe(true);
+    expect(state.edges.size).toBe(4); // the whole region's boundary came along, not just `ek`
+  });
+
+  it('matches createInitialPath/puzzle.initialEdges exactly for a real, generation-time-only locked puzzle', () => {
+    for (const seed of [1, 2, 3, 4, 5]) {
+      const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+      const puzzle = generatePuzzle(id);
+      expect(puzzle.lockedEdges?.size).toBeGreaterThan(0); // sanity: this seed actually locked something
+      const solutionEdges = generateSolutionEdges(id);
+      const state = resetToLockedState(puzzle, solutionEdges);
+      expect([...state.edges].sort()).toEqual([...createInitialPath(puzzle).edges].sort());
+    }
+  });
+
+  it('also accounts for a locked edge added after generation (e.g. a live "Hint me" call)', () => {
+    const id: PuzzleId = { sizeKey: 'small', shapeMode: 'rect', seed: 1, lockedEdgeFraction: LOCKED_EDGE_FRACTION };
+    const generated = generatePuzzle(id);
+    expect(generated.lockedEdges?.size).toBeGreaterThan(0);
+    const solutionEdges = generateSolutionEdges(id);
+    const regionMap = computeRegions(generated);
+
+    // Simulate a live hint locking one more, still-unlocked solution edge.
+    const hintCandidate = [...solutionEdges].find((ek) => !generated.lockedEdges?.has(ek))!;
+    const hinted = lockEdge(generated, regionMap, createInitialPath(generated), hintCandidate, true);
+
+    const state = resetToLockedState(hinted.puzzle, solutionEdges);
+    // Every locked edge — generation-time and the live hint alike — ends up
+    // marked exactly per the solution, and the result stays a well-formed
+    // union of closed loops.
+    for (const ek of hinted.puzzle.lockedEdges ?? []) {
+      expect(state.edges.has(ek)).toBe(solutionEdges.has(ek));
+    }
+    expect(isBoundaryEnclosed([...state.edges])).toBe(true);
   });
 });

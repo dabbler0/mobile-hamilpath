@@ -1,6 +1,6 @@
 import { computeWin, toggleRegion, type PathState } from './pathEdit';
 import type { Puzzle } from './puzzle';
-import { lockEdgeInRegionMap, regionsForEdge, type EdgeKey, type RegionMap } from './regions';
+import { computeRegions, lockEdgeInRegionMap, regionsForEdge, type EdgeKey, type RegionMap } from './regions';
 
 export interface LockEdgeResult {
   puzzle: Puzzle;
@@ -178,4 +178,78 @@ export function applyHintedEdges(puzzle: Puzzle, regionMap: RegionMap, state: Pa
     result = { puzzle: p, regionMap: rm, state: s, strandedEdges: [...result.strandedEdges, ...strandedEdges] };
   }
   return result;
+}
+
+/**
+ * The path state a "reset" (`main.ts`'s `performReset`/Blitz's
+ * `resetBlitzBoard`) restores: exactly as if the board had just been
+ * generated with its *current* set of locked edges (`puzzle.lockedEdges` —
+ * a strict superset of `puzzle.initialEdges` once a live "Hint me" session
+ * has locked additional edges mid-game) as the starting locked set — "the
+ * board state after a clear should be as if the game had just started, with
+ * the present set of locked edges as the starting set of them" (GitHub issue
+ * #48).
+ *
+ * An earlier version of this function built that state by directly setting
+ * each locked-and-in-solution edge's mark bit, with no toggle at all — which
+ * is wrong (GitHub issue #57): per this module's own doc comment, locking an
+ * edge *to marked* from an empty board always needs a real region toggle,
+ * which necessarily flips every *other* edge on that region's boundary too
+ * ("collateral flipping" — a real, unavoidable consequence of "region toggle
+ * is the only edit primitive this game has", not something a reset can skip
+ * without breaking the result). Setting only the locked edges' own bits
+ * directly, with nothing else disturbed, produces a marked-edge set that
+ * isn't a union of closed loops in general — some cell can end up with a
+ * dangling single marked edge (odd marked-degree), a state the player can
+ * never recover from by tapping (isolated from any cycle, per the issue),
+ * which can make the puzzle unwinnable.
+ *
+ * The fix, per issue #57's own suggestion: erase every edge, then re-run the
+ * *same* locking procedure (`lockEdge`) on every edge that's currently
+ * locked, starting from a completely virgin puzzle/regionMap (`lockedEdges`
+ * cleared, so nothing is pre-excluded from any region's boundary) and an
+ * empty path state — exactly mirroring how `puzzleGen.ts`'s
+ * `applyLockedEdges` built the puzzle's own `initialEdges` in the first
+ * place. `puzzle.lockedEdges`'s own `Set`-iteration order (a real JS `Set`
+ * preserves insertion order) is used as the replay order — generation-time
+ * locks first (in the order `applyLockedEdges` originally committed them),
+ * then any later live "Hint me" locks in the order they were actually
+ * applied. `lockEdge`'s own region selection (which of an edge's bordering
+ * regions to toggle) depends only on `regionMap`'s structure, never on which
+ * edges happen to already be marked, so replaying in this order reconstructs
+ * *exactly* the same region-merge history the live puzzle's own `regionMap`
+ * already reflects — every locked edge ends up excluded from every boundary
+ * by the time this returns, same as the live board.
+ *
+ * A locked edge that was only ever *stranded* by an earlier lock in this
+ * replay (interior to an already-merged region, never itself run through a
+ * real toggle) is handled by the exact same `lockEdge` call as every other
+ * locked edge: `regionsForEdge` finds no boundary for it any more, so
+ * `lockEdge` falls back to setting its mark directly — always safe for a
+ * genuinely stranded edge (see `lockEdge`'s own doc comment) — or is skipped
+ * outright as a no-op ("already locked") if some *other* edge's toggle
+ * earlier in this same replay already folded it in.
+ *
+ * The resulting `edges` isn't guaranteed to reproduce live play's own
+ * historical collateral marks edge-for-edge when the puzzle has any
+ * mid-game hints: a live hint's toggle flips whatever was *actually* marked
+ * on the board at that moment, which can include arbitrary player moves this
+ * reset is precisely meant to discard. What's guaranteed instead is that the
+ * result is always a well-formed board (every cell at even marked-degree,
+ * so it stays winnable) with every currently-locked edge correctly marked —
+ * "as if the game had just started" was never a promise to replay the
+ * player's own move history, just the locking.
+ */
+export function resetToLockedState(puzzle: Puzzle, solutionEdges: ReadonlySet<EdgeKey>): PathState {
+  let workingPuzzle: Puzzle = { ...puzzle, lockedEdges: undefined };
+  let regionMap = computeRegions(workingPuzzle);
+  let state: PathState = { edges: new Set(), won: false };
+  for (const edge of puzzle.lockedEdges ?? []) {
+    if (workingPuzzle.lockedEdges?.has(edge)) continue; // already folded in by an earlier edge's lock in this same replay
+    const result = lockEdge(workingPuzzle, regionMap, state, edge, solutionEdges.has(edge));
+    workingPuzzle = result.puzzle;
+    regionMap = result.regionMap;
+    state = result.state;
+  }
+  return { edges: state.edges, won: computeWin(puzzle, state.edges) };
 }
