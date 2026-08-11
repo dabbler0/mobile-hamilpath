@@ -679,46 +679,88 @@ function degreeWarningRadius(layout: Layout): number {
  * (its canvas is a fixed-resolution bitmap panned/zoomed via a CSS
  * transform on the whole element, so this reveal blurring along with
  * everything else at extreme zoom is nothing new), so it always passes `1`.
+ *
+ * **Cached** (`degreeWarningCache`) rather than rebuilt from scratch on
+ * every call: unlike every other overlay in this file, an over-marked cell
+ * isn't a bounded-duration animation — a self-crossing board state can sit
+ * there for as long as the player keeps panning/zooming/editing elsewhere —
+ * and this content never actually depends on which *frame* is being drawn
+ * (a marked edge is never part of it; only the static candidate edges/node
+ * underneath are). Rebuilding it every frame regardless meant a fresh
+ * `document.createElement('canvas')` plus a full radial-gradient composite
+ * per warning cell, per frame — multiplied by every repeated tile copy a
+ * zoomed-out wraparound board shows at once — which was the measured source
+ * of this feature's animation jank, not the (tiny) actual pixel work.
+ * `cacheKey` is whatever the caller has already established distinguishes
+ * one reveal's pixel content from another (cell identity alone for the
+ * single-tile case; cell + tile `Orientation` + `pixelScale` bucket for the
+ * tiled case, since those are the only other inputs this content actually
+ * varies with — see both call sites). Invalidated wholesale
+ * (`invalidateDegreeWarningCacheIfStale`) the moment the puzzle or layout
+ * this cache was built against no longer matches.
  */
+let degreeWarningCache = new Map<string, HTMLCanvasElement>();
+let degreeWarningCachePuzzle: Puzzle | null = null;
+let degreeWarningCacheCellSize = 0;
+let degreeWarningCachePad = 0;
+
+function invalidateDegreeWarningCacheIfStale(puzzle: Puzzle, layout: Layout): void {
+  if (puzzle === degreeWarningCachePuzzle && layout.cellSize === degreeWarningCacheCellSize && layout.pad === degreeWarningCachePad) return;
+  degreeWarningCache.clear();
+  degreeWarningCachePuzzle = puzzle;
+  degreeWarningCacheCellSize = layout.cellSize;
+  degreeWarningCachePad = layout.pad;
+}
+
 function drawDegreeWarningReveal(
   ctx: CanvasRenderingContext2D,
   sx: number,
   sy: number,
   layout: Layout,
   pixelScale: number,
+  puzzle: Puzzle,
+  cacheKey: string,
   drawUnderlay: (octx: CanvasRenderingContext2D) => void,
 ): void {
+  invalidateDegreeWarningCacheIfStale(puzzle, layout);
+
   const r = degreeWarningRadius(layout);
-  const coreR = degreeWarningCoreRadius(layout);
   const size = Math.max(1, Math.ceil(r * 2));
-  const off = document.createElement('canvas');
-  off.width = Math.max(1, Math.ceil(size * pixelScale));
-  off.height = off.width;
-  const octx = off.getContext('2d');
-  if (!octx) return;
 
-  octx.scale(pixelScale, pixelScale);
-  octx.fillStyle = COLORS.background;
-  octx.beginPath();
-  octx.arc(r, r, r, 0, Math.PI * 2);
-  octx.fill();
+  let off = degreeWarningCache.get(cacheKey);
+  if (!off) {
+    const coreR = degreeWarningCoreRadius(layout);
+    off = document.createElement('canvas');
+    off.width = Math.max(1, Math.ceil(size * pixelScale));
+    off.height = off.width;
+    const octx = off.getContext('2d');
+    if (!octx) return;
 
-  octx.translate(r - sx, r - sy);
-  drawUnderlay(octx);
-  // Undo the translate above (keeping `pixelScale`) before the mask fill
-  // below, which needs to cover the offscreen canvas's own `size x size`
-  // extent, not wherever the translate left the origin.
-  octx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+    octx.scale(pixelScale, pixelScale);
+    octx.fillStyle = COLORS.background;
+    octx.beginPath();
+    octx.arc(r, r, r, 0, Math.PI * 2);
+    octx.fill();
 
-  // Only this gradient's *alpha* is ever used — `destination-in` reads
-  // nothing else from its source — so the color itself is never painted.
-  const mask = octx.createRadialGradient(r, r, 0, r, r, r);
-  mask.addColorStop(0, 'rgba(0, 0, 0, 1)');
-  mask.addColorStop(coreR / r, 'rgba(0, 0, 0, 1)');
-  mask.addColorStop(1, 'rgba(0, 0, 0, 0)');
-  octx.globalCompositeOperation = 'destination-in';
-  octx.fillStyle = mask;
-  octx.fillRect(0, 0, size, size);
+    octx.translate(r - sx, r - sy);
+    drawUnderlay(octx);
+    // Undo the translate above (keeping `pixelScale`) before the mask fill
+    // below, which needs to cover the offscreen canvas's own `size x size`
+    // extent, not wherever the translate left the origin.
+    octx.setTransform(pixelScale, 0, 0, pixelScale, 0, 0);
+
+    // Only this gradient's *alpha* is ever used — `destination-in` reads
+    // nothing else from its source — so the color itself is never painted.
+    const mask = octx.createRadialGradient(r, r, 0, r, r, r);
+    mask.addColorStop(0, 'rgba(0, 0, 0, 1)');
+    mask.addColorStop(coreR / r, 'rgba(0, 0, 0, 1)');
+    mask.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    octx.globalCompositeOperation = 'destination-in';
+    octx.fillStyle = mask;
+    octx.fillRect(0, 0, size, size);
+
+    degreeWarningCache.set(cacheKey, off);
+  }
 
   ctx.drawImage(off, sx - r, sy - r, size, size);
 }
@@ -809,7 +851,10 @@ function drawDegreeWarnings(ctx: CanvasRenderingContext2D, puzzle: Puzzle, edges
     if (degree <= 2) continue;
     const cell = parseKey(ck);
     const [sx, sy] = toScreen(cell, layout);
-    drawDegreeWarningReveal(ctx, sx, sy, layout, 1, (octx) => drawDegreeWarningUnderlay(octx, cell, puzzle, layout));
+    // `pixelScale` is always 1 and there's only ever one "tile", so the
+    // cell key alone already uniquely identifies this reveal's content —
+    // see `drawDegreeWarningReveal`'s caching doc comment.
+    drawDegreeWarningReveal(ctx, sx, sy, layout, 1, puzzle, ck, (octx) => drawDegreeWarningUnderlay(octx, cell, puzzle, layout));
   }
 }
 
@@ -1342,11 +1387,25 @@ function drawWrapped(
         }
         return incident;
       });
+      // This reveal's content only varies with the cell, the tile's own
+      // `Orientation` (only ever one of four flipX/flipY combos — see
+      // `topology.ts`), and the current zoom (`pixelScale`, rounded to a
+      // couple of decimal places so settling back to roughly the same zoom
+      // level still hits the cache instead of missing on float noise) — not
+      // with which particular repeated tile copy is being drawn (a fixed
+      // orientation's tiles are pure translations of each other, and the
+      // reveal is built pre-translated to its own local center regardless —
+      // see `drawDegreeWarningReveal`'s caching doc comment) — so every tile
+      // copy of the same cell reuses one cached canvas instead of building
+      // its own.
+      const pixelScaleKey = view.scale.toFixed(2);
       forEachTile((tileX, tileY) => {
         const orientation = topology.tileOrientation(tileX, tileY);
+        const orientationKey = `${orientation.flipX ? 1 : 0}${orientation.flipY ? 1 : 0}`;
         overfullCells.forEach((cell, i) => {
           const [sx, sy] = toScreenTiled(cell, layout, tileX, tileY, W, H, orientation);
-          drawDegreeWarningReveal(ctx, sx, sy, layout, view.scale, (octx) =>
+          const cacheKey = `${key(cell[0], cell[1])}::${orientationKey}::${pixelScaleKey}`;
+          drawDegreeWarningReveal(ctx, sx, sy, layout, view.scale, puzzle, cacheKey, (octx) =>
             drawDegreeWarningUnderlayTiled(octx, incidentEdgesByCell[i], cell, layout, topology, tileX, tileY, W, H, orientation),
           );
         });
