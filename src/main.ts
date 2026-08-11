@@ -257,36 +257,66 @@ const BLITZ_LOW_TIME_MS = 10000;
  * Blitz's density signal for the live generative-music layer
  * (`audio/music.ts`) — CLAUDE.md's "have the density track inversely as the
  * amount of time left on the clock (so every time it gets low, the music
- * gets denser)". Deliberately an absolute window, not a fraction of
- * `startingTimeSec`: the time bank can grow arbitrarily large from
- * time-back awards (`BlitzParams`'s own doc comment), so "fraction of the
- * total" would mean a long, successful run's music almost never reaches its
- * densest even as the clock gets objectively close to zero. A flat ramp
- * window means "low on time" always means the same thing in music terms,
- * however big the run's time bank got along the way.
+ * gets denser)", refined by two more reference points below so a run's
+ * *starting* clock reads as a mid-density opening rather than either
+ * extreme. `BLITZ_MUSIC_DANGER_MS` is deliberately an absolute window, not a
+ * fraction of `startingTimeSec`: the time bank can grow arbitrarily large
+ * from time-back awards (`BlitzParams`'s own doc comment), so a
+ * fraction-of-total reading would mean a long, successful run's music almost
+ * never reaches its densest even as the clock gets objectively close to
+ * zero. A flat window means "low on time" always means the same thing in
+ * music terms, however big the run's time bank got along the way.
  */
 const BLITZ_MUSIC_DANGER_MS = 20000;
+/** Density at/below `BLITZ_MUSIC_DANGER_MS` remaining — genuinely almost out of time, so the music goes as dense as it gets. */
+const BLITZ_MUSIC_MAX_DENSITY = 1;
+/**
+ * Density exactly at a run's own starting clock value (`remainingMs ===
+ * startingTimeSec * 1000`) — i.e. the density a fresh run actually opens at,
+ * before any move or award has touched the clock. Deliberately the
+ * *midpoint* of the range, not the floor: a comfortable run spends a lot of
+ * its time with the bank sitting somewhere around this value, and CLAUDE.md
+ * asks for that stretch to already sound like "several instruments" playing,
+ * with room left to both intensify as the clock actually gets low and thin
+ * out further if the bank grows well past its starting size (see
+ * `BLITZ_MUSIC_MIN_DENSITY` below).
+ */
+const BLITZ_MUSIC_MID_DENSITY = 0.5;
+/**
+ * Density at/beyond `BLITZ_MUSIC_HIGH_BANK_MULTIPLE` times a run's starting
+ * clock — reached only by a run that's been earning refunds well ahead of
+ * spending them, i.e. genuinely coasting. `audio/music.ts`'s `evolve()`
+ * (`desired = round(1 + densityTarget * (layers.length - 1))`) maps this
+ * onto right around 2 active layers — CLAUDE.md's "go down to just two
+ * instruments" once the clock gets "really high".
+ */
+const BLITZ_MUSIC_MIN_DENSITY = 0.08;
+/** How many multiples of a run's starting clock its bank has to reach before density bottoms out at `BLITZ_MUSIC_MIN_DENSITY` — CLAUDE.md's "regularly gets refunded to twice or three times the starting blitz clock". */
+const BLITZ_MUSIC_HIGH_BANK_MULTIPLE = 2.5;
 
 /**
- * Density floor applied even with a full clock (see `blitzMusicDensity`
- * below) — a bare `1 - remaining/BLITZ_MUSIC_DANGER_MS` reading starts a
- * fresh run at density 0 for as long as the clock stays outside the danger
- * window, which `audio/music.ts`'s `evolve()` (`desired = round(1 +
- * densityTarget * (layers.length - 1))`) maps onto just the single anchor
- * layer — a run's opening stretch, which is most of a comfortable run, read
- * as near-silent rather than as music. `BLITZ_MUSIC_MIN_DENSITY` raises the
- * floor of `blitzMusicDensity`'s range instead of its ceiling, so a run
- * still opens with a couple of instruments already going (`evolve()`'s own
- * `DENSITY_JITTER` puts this floor's actual layer count at roughly 2-4) and
- * still reaches the same full density as before once the clock actually
- * gets low.
+ * Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts`
+ * expects, via three fixed reference points in strictly descending order of
+ * `remainingMs` — `(BLITZ_MUSIC_DANGER_MS, MAX)`, `(startingTimeSec * 1000,
+ * MID)`, `(startingTimeSec * 1000 * BLITZ_MUSIC_HIGH_BANK_MULTIPLE, MIN)` —
+ * linearly interpolated between whichever pair `remainingMs` currently falls
+ * between, and clamped flat beyond either end. The middle point is
+ * `startingTimeSec`-relative (unlike the low-time danger point — see
+ * `BLITZ_MUSIC_DANGER_MS`'s doc comment) quite deliberately: it's what makes
+ * a run's own starting clock value read as "the middle of the range" for
+ * every pace preset, not just whichever one happens to sit near 40 seconds.
  */
-const BLITZ_MUSIC_MIN_DENSITY = 0.15;
-
-/** Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts` expects — see `BLITZ_MUSIC_DANGER_MS`'s and `BLITZ_MUSIC_MIN_DENSITY`'s doc comments. */
-function blitzMusicDensity(remainingMs: number): number {
-  const danger = 1 - Math.min(1, Math.max(0, remainingMs / BLITZ_MUSIC_DANGER_MS));
-  return BLITZ_MUSIC_MIN_DENSITY + (1 - BLITZ_MUSIC_MIN_DENSITY) * danger;
+function blitzMusicDensity(remainingMs: number, startingTimeSec: number): number {
+  const startingMs = startingTimeSec * 1000;
+  const highBankMs = startingMs * BLITZ_MUSIC_HIGH_BANK_MULTIPLE;
+  if (remainingMs <= BLITZ_MUSIC_DANGER_MS) return BLITZ_MUSIC_MAX_DENSITY;
+  if (remainingMs <= startingMs) {
+    const t = (remainingMs - BLITZ_MUSIC_DANGER_MS) / (startingMs - BLITZ_MUSIC_DANGER_MS);
+    return BLITZ_MUSIC_MAX_DENSITY + t * (BLITZ_MUSIC_MID_DENSITY - BLITZ_MUSIC_MAX_DENSITY);
+  }
+  if (remainingMs >= highBankMs) return BLITZ_MUSIC_MIN_DENSITY;
+  const t = (remainingMs - startingMs) / (highBankMs - startingMs);
+  return BLITZ_MUSIC_MID_DENSITY + t * (BLITZ_MUSIC_MIN_DENSITY - BLITZ_MUSIC_MID_DENSITY);
 }
 
 let blitzParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
@@ -1709,7 +1739,7 @@ function blitzTick(): void {
   if (mode !== 'blitz') return;
   const remaining = blitzDeadline - performance.now();
   updateBlitzHeader();
-  setMusicDensity(blitzMusicDensity(remaining));
+  setMusicDensity(blitzMusicDensity(remaining, blitzParams.startingTimeSec));
   if (remaining <= 0) {
     void endBlitzRun();
     return;
