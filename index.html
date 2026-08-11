@@ -38,7 +38,7 @@
         </div>
       </div>
 
-      <!-- Settings: adjust sfx volume (persisted locally, see src/settings.ts). -->
+      <!-- Settings: adjust sfx volume and live-play generative music volume (both persisted locally, see src/settings.ts). -->
       <div id="settingsScreen" class="screen menuBgScreen hidden">
         <div class="menuHeader">
           <button class="secondary backBtn" id="settingsBackBtn">‹ Menu</button>
@@ -53,6 +53,13 @@
             </span>
           </label>
           <button class="secondary" id="sfxVolumePreviewBtn">Preview</button>
+          <label class="volumeLabel"
+            >Music volume
+            <span class="volumeRow">
+              <input type="range" id="musicVolumeSlider" min="0" max="100" value="50" step="1" />
+              <span id="musicVolumeReadout">50%</span>
+            </span>
+          </label>
         </div>
       </div>
 
