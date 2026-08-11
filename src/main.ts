@@ -17,7 +17,7 @@ import { attachKeyboardHandling, type KeyboardInputHost } from './keyboard';
 import { startMenuBackground } from './menuBackground';
 import { deleteBlitzRun, deleteBlitzRunsForParams, listBlitzDifficulties, listBlitzRunsForParams, saveBlitzRun, type BlitzDifficultySummary, type BlitzRunRecord } from './persistence/blitzStore';
 import { clearInProgress, deleteCompleted, getCompleted, listCompleted, listInProgress, puzzleIdOf, recordCompletion, saveInProgress, type CompletedRecord, type InProgressRecord } from './persistence/gameStore';
-import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState } from './render';
+import { draw, GROW_MS, midgameRippleDelayMs, PULSE_MS, RIPPLE_STAGGER_MS, segmentColor, SHRINK_MS, type AnimationState, type RenderState } from './render';
 import { loadSfxVolume, saveSfxVolume } from './settings';
 import './style.css';
 import { computeFitView, computeZoomAt, panToKeepVisible, type Viewport, type ViewportBounds } from './view/viewport';
@@ -49,7 +49,7 @@ function byId<T extends HTMLElement>(id: string): T {
 // runs each screen's enter/leave side effects (starting/stopping the main
 // menu's animated background, refreshing the Resume/Replays lists, halting
 // the live game's animation loop when it's no longer on screen).
-type Screen = 'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' | 'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' | 'blitzGameOver' | 'settings';
+type Screen = 'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' | 'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' | 'settings';
 let screen: Screen = 'mainMenu';
 
 const mainMenuScreenEl = byId<HTMLDivElement>('mainMenuScreen');
@@ -103,12 +103,6 @@ const blitzLeaderboardRunsBackBtn = byId<HTMLButtonElement>('blitzLeaderboardRun
 const blitzLeaderboardRunsTitleEl = byId<HTMLHeadingElement>('blitzLeaderboardRunsTitle');
 const blitzLeaderboardRunsListEl = byId<HTMLDivElement>('blitzLeaderboardRunsListEl');
 
-const blitzGameOverScreenEl = byId<HTMLDivElement>('blitzGameOverScreen');
-const blitzGameOverScoreEl = byId<HTMLParagraphElement>('blitzGameOverScore');
-const blitzPlayAgainBtn = byId<HTMLButtonElement>('blitzPlayAgainBtn');
-const blitzGameOverReplayBtn = byId<HTMLButtonElement>('blitzGameOverReplayBtn');
-const blitzGameOverMenuBtn = byId<HTMLButtonElement>('blitzGameOverMenuBtn');
-
 const gameScreenEl = byId<HTMLDivElement>('gameScreen');
 const wrapEl = byId<HTMLDivElement>('boardWrap');
 const canvas = byId<HTMLCanvasElement>('canvas');
@@ -155,17 +149,39 @@ const blitzReplaySpeedSelect = byId<HTMLSelectElement>('blitzReplaySpeedSelect')
 const blitzReplayScrubberEl = byId<HTMLInputElement>('blitzReplayScrubber');
 const blitzReplayCounterEl = byId<HTMLSpanElement>('blitzReplayCounter');
 
+const blitzResultWrapEl = byId<HTMLDivElement>('blitzResultWrap');
+const blitzResultScoreEl = byId<HTMLDivElement>('blitzResultScore');
+const blitzResultCanvasFinal = byId<HTMLCanvasElement>('blitzResultCanvasFinal');
+const blitzResultCanvasSolution = byId<HTMLCanvasElement>('blitzResultCanvasSolution');
+const maybeBlitzResultCtxFinal = blitzResultCanvasFinal.getContext('2d');
+if (!maybeBlitzResultCtxFinal) throw new Error('2D canvas context unavailable');
+const blitzResultCtxFinal: CanvasRenderingContext2D = maybeBlitzResultCtxFinal;
+const maybeBlitzResultCtxSolution = blitzResultCanvasSolution.getContext('2d');
+if (!maybeBlitzResultCtxSolution) throw new Error('2D canvas context unavailable');
+const blitzResultCtxSolution: CanvasRenderingContext2D = maybeBlitzResultCtxSolution;
+const blitzResultControlsEl = byId<HTMLDivElement>('blitzResultControls');
+const blitzResultPlayAgainBtn = byId<HTMLButtonElement>('blitzResultPlayAgainBtn');
+const blitzResultReplayBtn = byId<HTMLButtonElement>('blitzResultReplayBtn');
+const blitzResultBackBtn = byId<HTMLButtonElement>('blitzResultBackBtn');
+
 /**
  * `'blitz'` is a live Blitz run and `'blitzReplay'` is watching a recorded
  * one back — both reuse the `'game'` screen and its single canvas exactly
  * like `'playing'`/`'reviewing'` do (see index.html's doc comment on
  * `#gameScreen`), so this stays one `Mode` union rather than Blitz getting
  * its own parallel screen/canvas setup. `activePuzzle()`/`activeRegionMap()`/
- * `inputPathState()` below branch on all four; `render()` branches on all
- * four too, for exactly the same reason `'reviewing'` already needed its own
- * branch there.
+ * `inputPathState()` below branch on all five; `render()` branches on the
+ * first four (see its own doc comment for why `'blitzResult'` is the one
+ * exception — it draws to its own pair of canvases instead).
+ *
+ * `'blitzResult'` is a fifth mode, entered only via `enterBlitzResult` once
+ * a live run ends or its own replay (`'blitzReplay'`) plays through to the
+ * end — see CLAUDE.md's "Blitz mode" section. Still the `'game'` screen (no
+ * `showScreen` navigation happens), just with `#boardWrap`/`#playControls`/
+ * `#blitzControls`/`#reviewBar`/`#blitzReplayBar` all hidden in favor of
+ * `#blitzResultWrap`/`#blitzResultControls`.
  */
-type Mode = 'playing' | 'reviewing' | 'blitz' | 'blitzReplay';
+type Mode = 'playing' | 'reviewing' | 'blitz' | 'blitzReplay' | 'blitzResult';
 let mode: Mode = 'playing';
 
 let currentPuzzleId: PuzzleId;
@@ -258,8 +274,6 @@ let blitzDeadline = 0;
 let blitzPuzzlesSolved = 0;
 let blitzTimerRafId: number | null = null;
 let blitzAdvanceTimeoutId: number | null = null;
-/** The most recently finished run, kept around purely so the game-over screen's "Watch Replay" button has something to open without a round-trip to IndexedDB. `null` if saving it failed (still shows the game-over screen with its score — CLAUDE.md's "final score" doesn't depend on persistence succeeding). */
-let blitzLastRecord: BlitzRunRecord | null = null;
 
 /** Which difficulty (`BlitzParams`) the Leaderboard's runs list is currently showing — set by `openBlitzLeaderboardRuns`, read by `refreshBlitzLeaderboardRunsList`. */
 let currentLeaderboardParams: BlitzParams | null = null;
@@ -283,6 +297,27 @@ let blitzReplayPlaying = false;
 let blitzReplaySpeed = 1;
 let blitzReplayLastPerf = 0;
 let blitzReplayRafId: number | null = null;
+
+// ---- Blitz mode: run-end / replay-end result screen ----
+// Shown in place of the ordinary board once a live run ends or its own
+// replay plays through to the end — `enterBlitzResult`, called from both
+// `endBlitzRun` and `blitzReplayTick` — see CLAUDE.md's "Blitz mode"
+// section. A small state bag of its own rather than reusing `blitzPuzzle`/
+// `blitzReplayPuzzle` directly, since either entry path feeds it and the
+// result view outlives whichever one supplied it (e.g. a live run's own
+// `blitzPuzzle` is about to be replaced the moment "Play Again" starts a
+// fresh run).
+let blitzResultPuzzle: Puzzle | null = null;
+let blitzResultFinalEdges: ReadonlySet<EdgeKey> = new Set();
+let blitzResultFinalWon = false;
+let blitzResultSolutionEdges: ReadonlySet<EdgeKey> = new Set();
+/** Which pace "Play Again" should start — the run's own params, whether that run was just finished live or is a stored run being watched via replay (see `enterBlitzResult`'s callers). */
+let blitzResultParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
+/** The result's own run record, for the "Watch Replay" button — `null` if saving a just-finished live run failed (the result screen still shows with its score either way — CLAUDE.md's "final score" doesn't depend on persistence succeeding). */
+let blitzResultRecord: BlitzRunRecord | null = null;
+/** Where "Back" (and "Watch Replay", once closed) returns to — the Blitz hub for a freshly-finished live run, or wherever the replay being watched was itself opened from. */
+let blitzResultReturnScreen: Screen = 'blitzMenu';
+const blitzResultComponentColors: ComponentColorState = createComponentColorState();
 
 /**
  * ## Animations
@@ -482,6 +517,7 @@ function activePuzzle(): Puzzle {
   if (mode === 'reviewing' && reviewPuzzle) return reviewPuzzle;
   if (mode === 'blitz') return blitzPuzzle;
   if (mode === 'blitzReplay' && blitzReplayPuzzle) return blitzReplayPuzzle;
+  if (mode === 'blitzResult' && blitzResultPuzzle) return blitzResultPuzzle;
   return puzzle;
 }
 
@@ -522,6 +558,15 @@ function activeRegionMap(): RegionMap {
  * left off rather than racing ahead of it.
  */
 function render(): void {
+  // `'blitzResult'` draws to its own pair of canvases (`layoutBlitzResult`),
+  // not the shared `canvas`/`ctx` this function owns — and `#boardWrap` is
+  // hidden while it's active anyway, so there's nothing here to draw. Every
+  // caller that could still reach `render()` while this mode is active
+  // (a leftover animation-loop tick, a stray `setFocusedRegion`) has
+  // already been stopped by `enterBlitzResult`, so this is purely
+  // defensive — see `Mode`'s doc comment.
+  if (mode === 'blitzResult') return;
+
   const now = performance.now();
   pruneFinishedEdgeAnims(now);
 
@@ -954,6 +999,122 @@ function layout(): void {
   render();
 }
 
+/**
+ * Draws one static, read-only board into `canvasEl`/`ctxEl`, fitted to
+ * whatever size `wrapElement` currently is — the same two-step "size the
+ * canvas to the board (or, for a wraparound board, to the viewport itself)
+ * then compute a fit view" `layout()`/`fitView()`/`applyTransform()` already
+ * do together for the live game, just applied per-canvas here since
+ * `#blitzResultWrap` shows two boards at once instead of one. No pan/zoom
+ * state to track and no animation — the run is over, and both panes are
+ * drawn once and left alone until the next resize.
+ */
+function layoutStaticBoard(canvasEl: HTMLCanvasElement, ctxEl: CanvasRenderingContext2D, wrapElement: HTMLElement, state: RenderState): void {
+  const { puzzle } = state;
+  const availW = wrapElement.clientWidth;
+  const availH = wrapElement.clientHeight;
+  if (puzzle.topology) {
+    canvasEl.width = availW;
+    canvasEl.height = availH;
+    canvasEl.style.transform = '';
+    const { w, h } = boardPixelSize(puzzle, LAYOUT);
+    const fit = computeFitView(w, h, availW, availH, VIEW_BOUNDS);
+    draw(ctxEl, canvasEl.width, canvasEl.height, state, LAYOUT, fit);
+  } else {
+    const { w, h } = boardPixelSize(puzzle, LAYOUT);
+    canvasEl.width = w;
+    canvasEl.height = h;
+    const fit = computeFitView(w, h, availW, availH, VIEW_BOUNDS);
+    canvasEl.style.transform = `translate(${fit.tx}px, ${fit.ty}px) scale(${fit.scale})`;
+    draw(ctxEl, canvasEl.width, canvasEl.height, state, LAYOUT, fit);
+  }
+}
+
+/**
+ * Redraws both `#blitzResultWrap` panes at their current container size —
+ * called once on entering the result screen (`enterBlitzResult`) and again
+ * on every window resize while it's showing (mirroring `layout()`'s own
+ * role for the live board — see the `resize` listener below). The final
+ * board uses ordinary live component coloring (`blitzResultComponentColors`,
+ * a `ComponentColorState` of its own so it can't cross-contaminate
+ * `liveComponentColors`/`reviewComponentColors`); the solution pane is
+ * always drawn `won: true` — the flat "solved" color — exactly like Give
+ * Up's revealed solution (`revealSolution`), since it *is* a genuine
+ * Hamiltonian cycle through this puzzle, just not necessarily the one the
+ * player reached themselves.
+ */
+function layoutBlitzResult(): void {
+  if (!blitzResultPuzzle) return;
+  const finalColors = blitzResultFinalWon ? null : updateComponentColors(blitzResultComponentColors, blitzResultFinalEdges);
+  layoutStaticBoard(blitzResultCanvasFinal, blitzResultCtxFinal, blitzResultCanvasFinal.parentElement!, {
+    puzzle: blitzResultPuzzle,
+    edges: blitzResultFinalEdges,
+    won: blitzResultFinalWon,
+    componentColors: finalColors,
+  });
+  layoutStaticBoard(blitzResultCanvasSolution, blitzResultCtxSolution, blitzResultCanvasSolution.parentElement!, {
+    puzzle: blitzResultPuzzle,
+    edges: blitzResultSolutionEdges,
+    won: true,
+  });
+}
+
+/**
+ * Switches into the Blitz run result view — see `Mode`'s doc comment and
+ * CLAUDE.md's "Blitz mode" section. Reached either from `endBlitzRun` (a
+ * live run finishing) or from `blitzReplayTick` reaching the end of a
+ * recorded run's own replay; both hand this whatever puzzle/edges were
+ * actually on screen when the run ended plus the run's own final tally, and
+ * this function owns every bit of the screen-state bookkeeping either path
+ * needs — identical either way.
+ */
+function enterBlitzResult(opts: {
+  puzzle: Puzzle;
+  puzzleId: PuzzleId;
+  finalEdges: ReadonlySet<EdgeKey>;
+  finalWon: boolean;
+  scoreMs: number;
+  puzzlesSolved: number;
+  params: BlitzParams;
+  record: BlitzRunRecord | null;
+  returnScreen: Screen;
+}): void {
+  stopLiveAnimationLoop();
+  stopBlitzTimer();
+  pauseBlitzReplay();
+  clearEdgeAnimations();
+  resetWinLoopState();
+  resetComponentColorState(blitzResultComponentColors);
+
+  mode = 'blitzResult';
+  blitzResultPuzzle = opts.puzzle;
+  blitzResultFinalEdges = opts.finalEdges;
+  blitzResultFinalWon = opts.finalWon;
+  blitzResultSolutionEdges = generateSolutionEdges(opts.puzzleId);
+  blitzResultParams = opts.params;
+  blitzResultRecord = opts.record;
+  blitzResultReturnScreen = opts.returnScreen;
+  focusedRegionId = null;
+  keyboardCursor = null;
+
+  resetWinBanner();
+  headerInfoEl.classList.add('hidden');
+  blitzHeaderInfoEl.classList.add('hidden');
+  exitBtn.classList.add('hidden');
+  blitzExitBtn.classList.add('hidden');
+  playControlsEl.classList.add('hidden');
+  blitzControlsEl.classList.add('hidden');
+  reviewBarEl.classList.add('hidden');
+  blitzReplayBarEl.classList.add('hidden');
+  wrapEl.classList.add('hidden');
+  blitzResultWrapEl.classList.remove('hidden');
+  blitzResultControlsEl.classList.remove('hidden');
+  blitzResultReplayBtn.disabled = !opts.record;
+  blitzResultScoreEl.textContent = `You lasted ${formatBlitzScore(opts.scoreMs)} and solved ${opts.puzzlesSolved} puzzle${opts.puzzlesSolved === 1 ? '' : 's'}.`;
+
+  layoutBlitzResult();
+}
+
 const LAST_SIZE_STORAGE_KEY = 'loopit:lastSize';
 const LAST_SHAPE_STORAGE_KEY = 'loopit:lastShape';
 const LAST_REPLAY_SPEED_KEY = 'loopit:replaySpeed';
@@ -980,9 +1141,10 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   localStorage.setItem(LAST_SIZE_STORAGE_KEY, id.sizeKey);
   localStorage.setItem(LAST_SHAPE_STORAGE_KEY, id.shapeMode);
 
-  // Defensive resets in case the previous screen was a Blitz run/replay,
-  // which repurpose these same header/bar elements — see index.html's doc
-  // comment on `#gameScreen`. A no-op when coming from anywhere else.
+  // Defensive resets in case the previous screen was a Blitz run/replay/
+  // result, which repurpose these same header/bar elements — see
+  // index.html's doc comment on `#gameScreen`. A no-op when coming from
+  // anywhere else.
   headerInfoEl.classList.remove('hidden');
   blitzHeaderInfoEl.classList.add('hidden');
   exitBtn.classList.remove('hidden');
@@ -991,6 +1153,9 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   blitzControlsEl.classList.add('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
+  wrapEl.classList.remove('hidden');
+  blitzResultWrapEl.classList.add('hidden');
+  blitzResultControlsEl.classList.add('hidden');
 
   currentPuzzleId = id;
   puzzle = generatePuzzle(id);
@@ -1169,12 +1334,15 @@ function enterReview(item: CompletedRecord, origin: 'game' | 'menu'): void {
   clearEdgeAnimations();
   resetWinLoopState();
   resetComponentColorState(reviewComponentColors);
-  // Defensive: hide Blitz's header/bar in case the previous screen was a
-  // Blitz run/replay — see `beginPuzzle`'s matching comment.
+  // Defensive: hide Blitz's header/bar/result in case the previous screen
+  // was a Blitz run/replay/result — see `beginPuzzle`'s matching comment.
   blitzHeaderInfoEl.classList.add('hidden');
   blitzExitBtn.classList.add('hidden');
   blitzControlsEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
+  wrapEl.classList.remove('hidden');
+  blitzResultWrapEl.classList.add('hidden');
+  blitzResultControlsEl.classList.add('hidden');
   headerInfoEl.classList.remove('hidden');
   const id = puzzleIdOf(item);
   reviewPuzzle = generatePuzzle(id);
@@ -1546,6 +1714,9 @@ function startBlitzRun(params: BlitzParams): void {
   blitzControlsEl.classList.remove('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.add('hidden');
+  wrapEl.classList.remove('hidden');
+  blitzResultWrapEl.classList.add('hidden');
+  blitzResultControlsEl.classList.add('hidden');
 
   // `showScreen('game')` must run before `advanceBlitzPuzzle()`'s `layout()`
   // — `#gameScreen` is still `.hidden` (`display: none`) up to that call, so
@@ -1558,19 +1729,36 @@ function startBlitzRun(params: BlitzParams): void {
   startBlitzTimer();
 }
 
-function showBlitzGameOver(record: BlitzRunRecord | null, scoreMs: number): void {
-  blitzGameOverScoreEl.textContent = `You lasted ${formatBlitzScore(scoreMs)} and solved ${blitzPuzzlesSolved} puzzle${blitzPuzzlesSolved === 1 ? '' : 's'}.`;
-  blitzGameOverReplayBtn.disabled = !record;
-  showScreen('blitzGameOver');
-}
-
-/** Ends the current run (timer hit zero, or the player forfeited) — records it (score = total real time survived, CLAUDE.md's "final score is the total amount of time they lasted") and shows the game-over screen. Guarded by `mode === 'blitz'` so the timer's own expiry check and an explicit forfeit can't both fire. */
+/**
+ * Ends the current run (timer hit zero, or the player forfeited) — records
+ * it (score = total real time survived, CLAUDE.md's "final score is the
+ * total amount of time they lasted") and switches into the result
+ * split-screen (`enterBlitzResult`) showing the puzzle that was in progress
+ * when the run ended, side by side with its intended solution. Guarded by
+ * `mode === 'blitz'` so the timer's own expiry check and an explicit
+ * forfeit can't both fire.
+ */
 async function endBlitzRun(): Promise<void> {
   if (mode !== 'blitz') return;
   stopBlitzTimer();
   const scoreMs = Math.max(0, blitzElapsedMs());
   blitzEvents.push({ kind: 'runEnd', t: scoreMs, scoreMs });
   clearEdgeAnimations();
+  // Captured before the `saveBlitzRun` await below, which yields control —
+  // `blitzPuzzle`/`blitzCurrentId`/`blitzPathState`/`blitzParams` are all
+  // Blitz *live-play* state that a concurrent "Play Again" (unreachable
+  // mid-await, but still worth being explicit about) could otherwise
+  // reassign out from under this function before it reads them.
+  const finalPuzzle = blitzPuzzle;
+  const finalPuzzleId = blitzCurrentId!;
+  const finalEdges = blitzPathState.edges;
+  const finalWon = blitzPathState.won;
+  const puzzlesSolved = blitzPuzzlesSolved;
+  const params = blitzParams;
+  // See `enterBlitzResult`'s call below: setting `mode` away from `'blitz'`
+  // synchronously (rather than waiting for that call) keeps this function's
+  // own `mode === 'blitz'` reentrancy guard meaningful for the duration of
+  // the save, exactly as before this feature existed.
   mode = 'playing';
 
   let saved: BlitzRunRecord | null = null;
@@ -1588,8 +1776,17 @@ async function endBlitzRun(): Promise<void> {
   } catch (err) {
     console.error('failed to save blitz run', err);
   }
-  blitzLastRecord = saved;
-  showBlitzGameOver(saved, scoreMs);
+  enterBlitzResult({
+    puzzle: finalPuzzle,
+    puzzleId: finalPuzzleId,
+    finalEdges,
+    finalWon,
+    scoreMs,
+    puzzlesSolved,
+    params,
+    record: saved,
+    returnScreen: 'blitzMenu',
+  });
 }
 
 function forfeitBlitzRun(): void {
@@ -1828,6 +2025,17 @@ function advanceBlitzReplayTo(target: number, animate: boolean): void {
   render();
 }
 
+/**
+ * Advances one replay tick and, if that reaches the very end of the
+ * recorded run, switches into the same result split-screen a live run
+ * lands on (`enterBlitzResult`) instead of just leaving the last puzzle's
+ * board sitting there in the ordinary replay chrome. Deliberately only
+ * triggered by actually watching a run through to this natural conclusion —
+ * scrubbing the scrubber all the way to the end (`seekBlitzReplay`) does
+ * *not* also pop into the result screen, since that would make it
+ * impossible to scrub back out of it; "Replay" on the result screen itself
+ * is always available if the player wants to watch it again anyway.
+ */
 function blitzReplayTick(): void {
   if (!blitzReplayPlaying || !blitzReplayRecord) return;
   const now = performance.now();
@@ -1836,7 +2044,26 @@ function blitzReplayTick(): void {
   const duration = blitzReplayDurationMs();
   advanceBlitzReplayTo(Math.min(blitzReplayT + dt, duration), true);
   if (blitzReplayT >= duration) {
+    const record = blitzReplayRecord;
+    const finalPuzzle = blitzReplayPuzzle;
+    const finalPuzzleId = blitzReplayCurrentId;
+    const finalEdges = blitzReplayPathState.edges;
+    const finalWon = blitzReplayPathState.won;
+    const puzzlesSolved = blitzReplaySolved;
     pauseBlitzReplay();
+    if (finalPuzzle && finalPuzzleId) {
+      enterBlitzResult({
+        puzzle: finalPuzzle,
+        puzzleId: finalPuzzleId,
+        finalEdges,
+        finalWon,
+        scoreMs: record.scoreMs,
+        puzzlesSolved,
+        params: { startingTimeSec: record.startingTimeSec, timeBackPerEdgeSec: record.timeBackPerEdgeSec },
+        record,
+        returnScreen: blitzReplayReturnScreen,
+      });
+    }
     return;
   }
   blitzReplayRafId = requestAnimationFrame(blitzReplayTick);
@@ -1884,6 +2111,9 @@ function openBlitzReplay(record: BlitzRunRecord, returnScreen: Screen): void {
   blitzControlsEl.classList.add('hidden');
   reviewBarEl.classList.add('hidden');
   blitzReplayBarEl.classList.remove('hidden');
+  wrapEl.classList.remove('hidden');
+  blitzResultWrapEl.classList.add('hidden');
+  blitzResultControlsEl.classList.add('hidden');
 
   // `showScreen('game')` must come before `seekBlitzReplay(0)`: that call
   // synchronously applies t=0's `puzzleStart` event, which now itself calls
@@ -1915,13 +2145,17 @@ function closeBlitzReplay(): void {
  * shows the animated postgame-loop background behind it — see `index.html`'s
  * `#menuCanvas` doc comment. The Resume/Replays lists and the game screen
  * itself keep an opaque background instead. Blitz mirrors Free Play exactly:
- * its two fixed-layout screens (`blitzMenu`, `blitzSetup`, plus the
- * game-over screen) opt in, its variable-length leaderboard lists
- * (`blitzLeaderboard`, `blitzLeaderboardRuns`) don't — same reasoning as
- * Resume/Replays. Settings is fixed-layout too (a single slider + a preview
- * button, same shape as New Game's form), so it opts in as well.
+ * its two fixed-layout screens (`blitzMenu`, `blitzSetup`) opt in, its
+ * variable-length leaderboard lists (`blitzLeaderboard`,
+ * `blitzLeaderboardRuns`) don't — same reasoning as Resume/Replays. There
+ * used to be a separate "game over" screen here too; it's gone now — a
+ * finished run's result lives inside `'game'` itself (`mode ===
+ * 'blitzResult'`, see CLAUDE.md's "Blitz mode" section), which already
+ * keeps its own opaque background like the rest of the game screen.
+ * Settings is fixed-layout too (a single slider + a preview button, same
+ * shape as New Game's form), so it opts in as well.
  */
-const BACKGROUND_SCREENS: readonly Screen[] = ['mainMenu', 'freePlay', 'newGame', 'blitzMenu', 'blitzSetup', 'blitzGameOver', 'settings'];
+const BACKGROUND_SCREENS: readonly Screen[] = ['mainMenu', 'freePlay', 'newGame', 'blitzMenu', 'blitzSetup', 'settings'];
 
 /**
  * Hides every screen but `next` and runs each screen's enter/leave side
@@ -1970,7 +2204,6 @@ function showScreen(next: Screen): void {
   blitzSetupScreenEl.classList.toggle('hidden', next !== 'blitzSetup');
   blitzLeaderboardScreenEl.classList.toggle('hidden', next !== 'blitzLeaderboard');
   blitzLeaderboardRunsScreenEl.classList.toggle('hidden', next !== 'blitzLeaderboardRuns');
-  blitzGameOverScreenEl.classList.toggle('hidden', next !== 'blitzGameOver');
   settingsScreenEl.classList.toggle('hidden', next !== 'settings');
   gameScreenEl.classList.toggle('hidden', next !== 'game');
 
@@ -2042,14 +2275,20 @@ blitzStartBtn.addEventListener(
 );
 blitzExitBtn.addEventListener('click', navClick(forfeitBlitzRun));
 blitzResetBtn.addEventListener('click', resetBlitzBoard);
-blitzPlayAgainBtn.addEventListener('click', navClick(() => startBlitzRun(blitzParams)));
-blitzGameOverReplayBtn.addEventListener(
+// Blitz result screen's own controls — see `enterBlitzResult`. "Watch
+// Replay" reopens `blitzResultRecord` from the start regardless of whether
+// this result was reached from a live run just finishing or from watching
+// a replay through to its own end (in the latter case this just restarts
+// the same replay) -- both entry paths land here through the exact same
+// state, so one handler covers both.
+blitzResultPlayAgainBtn.addEventListener('click', navClick(() => startBlitzRun(blitzResultParams)));
+blitzResultReplayBtn.addEventListener(
   'click',
   navClick(() => {
-    if (blitzLastRecord) openBlitzReplay(blitzLastRecord, 'blitzGameOver');
+    if (blitzResultRecord) openBlitzReplay(blitzResultRecord, blitzResultReturnScreen);
   }),
 );
-blitzGameOverMenuBtn.addEventListener('click', navClick(() => showScreen('blitzMenu')));
+blitzResultBackBtn.addEventListener('click', navClick(() => showScreen(blitzResultReturnScreen)));
 blitzReplayCloseBtn.addEventListener('click', navClick(closeBlitzReplay));
 blitzReplayPlayPauseBtn.addEventListener('click', () => {
   if (blitzReplayPlaying) pauseBlitzReplay();
@@ -2126,7 +2365,12 @@ window.addEventListener('resize', () => {
   // the time `screen === 'game'` is reachable at all (`beginPuzzle`,
   // `startBlitzRun`, `enterReview`, `openBlitzReplay`), so `activePuzzle()`
   // is always safe to call here regardless of which one it is.
-  if (screen === 'game') layout();
+  if (screen !== 'game') return;
+  // `'blitzResult'` draws to its own pair of canvases, sized off
+  // `#blitzResultWrap`'s panes rather than `#boardWrap` — `layout()` itself
+  // only knows about the latter, so it needs its own resize path here.
+  if (mode === 'blitzResult') layoutBlitzResult();
+  else layout();
 });
 
 wrapEl.addEventListener(
