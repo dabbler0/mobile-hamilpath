@@ -1946,17 +1946,39 @@ instead of a ticking countdown, simpler than introducing a sixth header
 layout for one static line.
 
 **The intended solution is drawn right on top of the player's own board**,
-translucent, rather than in a second pane — `render.ts`'s
-`RenderState.ghostEdges` (`drawGhostEdges`/its `drawWrapped` counterpart): a
-uniform, semi-transparent gold (`COLORS.ghostSolution`, deliberately far
-from both the "solved" green and the component-color walk's hue so it never
-reads as "this segment is actually won") stroked over every edge of
-`generateSolutionEdges(id)`, regardless of whether the player also marked
-that edge — an edge that's both drawn overlaps the gold wash on top of the
-player's own color, reading as a soft highlight over what's already right;
-an edge only in the solution reads as a ghostly outline over what's
-missing. Purely a rendering concern, layered on after everything else
-(`drawSingleTile`/`drawWrapped`, right before the keyboard cursor) — no new
+as a halo, rather than in a second pane — `render.ts`'s
+`RenderState.ghostEdges`, stroked over every edge of
+`generateSolutionEdges(id)` regardless of whether the player also marked
+that edge. Two earlier designs were tried and dropped before this one: a
+single translucent wash directly over the edge itself read as muddy (a
+*missing* solution edge was easy to miss against the ordinary gray
+candidate line underneath, at any opacity legible enough to still show
+through the player's own marked-edge coloring); a version after that drew
+two thin full-opacity lines independently offset to either side of each
+edge, which looked right along a straight run but self-intersected or left
+a gap at a turn, since each edge's own perpendicular offset direction has
+nothing to do with its neighbor's.
+
+The current version (`drawGhostHalo`) instead reuses a technique already in
+this file for edge collections (`drawEdgeCollectionHalos`): draw a thick
+halo *underneath* everything else, then let the ordinary board redraw on
+top of it. Concretely, for every ghost edge: a thick outer stroke in the
+halo color, then a second stroke in the *background* color at exactly
+`markedEdgeBaseWidth` — the same width a real marked edge is drawn at. This
+pair is drawn *before* `drawEdges`/`drawNodes`/`drawMarkedEdges`, not after
+— and since those are already full passes over the *entire* puzzle (every
+candidate edge, every node, every currently-marked edge, not just the
+ghost ones), they naturally repaint the real picture on top of the erased
+hole regardless of whether a given edge/vertex happens to sit on the ghost
+path. This is what makes the halo end up flush against a marked edge's
+real width with zero gap (the erase width exactly matches what the marked
+edge redraw is about to refill) and a uniform rim thickness whether a given
+ghost edge turns out marked or not. Corners need no special handling at
+all: two edges sharing a vertex join seamlessly because their round caps
+are centered at the exact same point, the same technique every other edge
+in this file already relies on for its own corners — there's no offset
+vector to keep consistent between neighbors in the first place, since
+every stroke is drawn directly on the real edge's own centerline. No new
 canvas, no new pointer handling, no new pan/zoom state of its own.
 
 **Reached only from `endBlitzRun`** (the clock hitting zero, or Forfeit) —
@@ -1985,8 +2007,8 @@ always `'blitzMenu'` here) returns to the Blitz hub.
 
 **A run's own replay reaching *its* end doesn't go through any of this** —
 see "Recording and replaying a run" above and `syncBlitzReplayEndView`:
-watching a run's replay all the way through shows the exact same gold
-ghost overlay on the final frame, but entirely inline, with `mode` staying
+watching a run's replay all the way through shows the exact same emerald
+halo overlay on the final frame, but entirely inline, with `mode` staying
 `'blitzReplay'` and `#blitzReplayBar`'s Close/Play-Pause/speed/scrubber all
 staying visible and functional throughout — no mode switch, no swapped
 control bar, nothing that would make it harder to scrub back out again.

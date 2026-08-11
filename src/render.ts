@@ -24,16 +24,21 @@ export interface RenderState {
    */
   componentColors?: ReadonlyMap<EdgeKey, number> | null;
   /**
-   * Optional translucent overlay of the puzzle's intended solution edges,
-   * drawn on top of everything else — shown once a Blitz run's board is
-   * "final" (the run ended, or its own replay reached the end) so the
-   * player can compare their own attempt against the answer without
-   * leaving the board they were just looking at (`main.ts`'s "Blitz mode"
-   * section). Every edge in this set is drawn identically regardless of
-   * whether it's also in `edges` — overlapping segments read as a soft
-   * highlight over what's already right, non-overlapping ones as a ghostly
-   * outline over what's missing. Omitted/`null`/empty for the ordinary case
-   * (nothing to overlay).
+   * Optional halo overlay of the puzzle's intended solution edges, drawn
+   * *underneath* the ordinary board (`drawSingleTile`/`drawWrapped` draw it
+   * first, then repaint the real candidate/node/marked-edge picture on top —
+   * see `drawGhostHalo`'s doc comment for the technique and why) — shown
+   * once a Blitz run's board is "final" (the run ended, or its own replay
+   * reached the end) so the player can compare their own attempt against
+   * the answer without leaving the board they were just looking at
+   * (`main.ts`'s "Blitz mode" section). A solution edge the player also
+   * marked reads as a thin, uniform halo flush against their own stroke; a
+   * solution edge they *didn't* mark reads as the same halo with plain
+   * background (and the thin candidate line) showing through the middle —
+   * an obvious empty outline, distinct from — but legible right alongside —
+   * every other color already on screen. Every edge in this set gets the
+   * same halo regardless of whether it's also in `edges`. Omitted/`null`/
+   * empty for the ordinary case (nothing to overlay).
    */
   ghostEdges?: ReadonlySet<EdgeKey> | null;
 }
@@ -113,8 +118,6 @@ const MIN_VISIBLE_WIDTH = 0.5;
  * reasoning), so the celebratory win state stays visually clean.
  */
 const LOCKED_EDGE_OPACITY = 0.55;
-/** Opacity of the Blitz result "intended solution" overlay — see `RenderState.ghostEdges`/`drawGhostEdges`. Translucent enough that the board underneath (the player's own marked/candidate edges) always stays legible through it. */
-const GHOST_ALPHA = 0.4;
 
 function smoothstep(t: number): number {
   const c = Math.max(0, Math.min(1, t));
@@ -147,8 +150,18 @@ const COLORS = {
   collectionError: '#e6483c',
   /** Badge text/outline color, kept constant across both the normal (collection-color) and error-red badge fills for contrast. */
   collectionBadgeText: '#ffffff',
-  /** The translucent "here's the intended solution" overlay a Blitz result view draws on top of everything else — see `drawGhostEdges`. A warm gold, deliberately far from both `markedWon`'s green and the component-color walk's excluded band around it, so the overlay never reads as "this segment is actually won" at a glance. */
-  ghostSolution: '#ffd166',
+  /**
+   * The Blitz result "intended solution" halo — see
+   * `RenderState.ghostEdges`/`drawGhostHalo`. A bright emerald, distinct
+   * from (if in the same general family as) `markedWon`'s more forest
+   * green — sharing the hue doesn't read as confusing "this is actually
+   * won" the way it would for a translucent fill over the edge itself (an
+   * earlier design tried here, see `drawGhostHalo`'s doc comment), since a
+   * thin halo rim is a visually distinct *language* from a thick
+   * marked-edge stroke, legible right alongside it rather than blended
+   * into it.
+   */
+  ghostSolution: '#34d399',
 };
 
 export interface CometStyle {
@@ -435,37 +448,70 @@ function drawSingleTile(ctx: CanvasRenderingContext2D, state: RenderState, layou
   const { puzzle, edges, won, focusedRegion, keyboardCursor, anim, componentColors, ghostEdges } = state;
   if (focusedRegion) drawRegionHighlight(ctx, focusedRegion, layout);
   drawEdgeCollectionHalos(ctx, puzzle, layout);
+  if (ghostEdges && ghostEdges.size > 0) drawGhostHalo(ctx, ghostEdges, layout);
   drawEdges(ctx, puzzle, layout);
   drawNodes(ctx, puzzle, layout);
   drawMarkedEdges(ctx, edges, won, layout, anim, componentColors, puzzle.lockedEdges);
   drawEdgeCollectionBadges(ctx, puzzle, edges, layout);
   if (!won) drawDegreeWarnings(ctx, puzzle, edges, layout);
-  if (ghostEdges && ghostEdges.size > 0) drawGhostEdges(ctx, ghostEdges, layout);
   if (keyboardCursor) drawCursor(ctx, keyboardCursor, layout);
 }
 
 /**
- * Translucent overlay of the puzzle's intended solution — see
- * `RenderState.ghostEdges`'s doc comment. Every edge is drawn the same
- * uniform gold regardless of whether it's also currently marked; unlike
- * `drawMarkedEdges` there's no component coloring, animation, or
- * locked-edge dimming to account for, since this is a static, read-only
- * comparison, not a live editable path.
+ * Halo overlay of the puzzle's intended solution — see
+ * `RenderState.ghostEdges`'s doc comment. Drawn *before* the ordinary
+ * candidate/node/marked-edge passes, not after — the same "thick colored
+ * halo first, real content drawn on top right after" technique
+ * `drawEdgeCollectionHalos` already uses for edge collections, applied here
+ * too: each ghost edge gets a thick outer stroke in the halo color, then an
+ * erase (a second stroke, in the background color, at exactly
+ * `markedEdgeBaseWidth` — the same width a real marked edge is drawn at).
+ * The very next calls in `drawSingleTile` (`drawEdges`/`drawNodes`/
+ * `drawMarkedEdges` — full passes over the *entire* puzzle, not just ghost
+ * edges) then repaint whatever's actually there on top of that erased hole.
+ * This is what makes the halo end up flush against a marked edge's real
+ * width with zero gap (the erase width exactly matches what the marked
+ * edge redraw is about to refill) and a uniform rim thickness regardless of
+ * whether a given ghost edge turns out marked or not (an *unmarked* one
+ * leaves most of the erased hole as plain background alongside the thin
+ * candidate line redrawn through the middle of it, rather than the halo
+ * color showing through a thinner line and reading as a fatter rim than the
+ * marked case). Two edges sharing a vertex join seamlessly, at every
+ * corner, because their round caps are centered at the exact same point —
+ * the same technique every other edge in this file already relies on for
+ * its own corners; no offset math or line-join handling needed.
+ *
+ * (An earlier version of this drew a single translucent stroke directly
+ * over the edge itself, which read as muddy against the player's own
+ * marked-edge coloring; the version right before this one tried two
+ * independently-offset thin lines per edge, which technically worked for a
+ * lone straight edge but self-intersected or gapped at a turn, since each
+ * edge's perpendicular offset direction is unrelated to its neighbor's.
+ * Neither problem exists here, since this never computes an offset at all —
+ * it draws *on* the real edge, at the real edge's own centerline, exactly
+ * like every other pass in this file.)
  */
-function drawGhostEdges(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+function drawGhostHalo(ctx: CanvasRenderingContext2D, edges: ReadonlySet<EdgeKey>, layout: Layout): void {
+  const outerWidth = markedEdgeBaseWidth(layout) + 2 * ghostHaloLineWidth(layout);
+  const innerWidth = markedEdgeBaseWidth(layout);
   ctx.save();
-  ctx.globalAlpha = GHOST_ALPHA;
-  ctx.strokeStyle = COLORS.ghostSolution;
-  ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
+  ctx.globalAlpha = 1;
   ctx.lineCap = 'round';
-  for (const ek of edges) {
-    const [a, b] = parseEdgeKey(ek);
-    const [sx1, sy1] = toScreen(a, layout);
-    const [sx2, sy2] = toScreen(b, layout);
-    ctx.beginPath();
-    ctx.moveTo(sx1, sy1);
-    ctx.lineTo(sx2, sy2);
-    ctx.stroke();
+  for (const [color, lineWidth] of [
+    [COLORS.ghostSolution, outerWidth],
+    [COLORS.background, innerWidth],
+  ] as const) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    for (const ek of edges) {
+      const [a, b] = parseEdgeKey(ek);
+      const [sx1, sy1] = toScreen(a, layout);
+      const [sx2, sy2] = toScreen(b, layout);
+      ctx.beginPath();
+      ctx.moveTo(sx1, sy1);
+      ctx.lineTo(sx2, sy2);
+      ctx.stroke();
+    }
   }
   ctx.restore();
 }
@@ -535,6 +581,11 @@ function computeMarkedDegrees(edges: ReadonlySet<EdgeKey>): Map<CellKey, number>
  */
 function markedEdgeBaseWidth(layout: Layout): number {
   return Math.max(3, layout.cellSize * 0.32);
+}
+
+/** Thickness of each side of `drawGhostHalo`'s rim — thin relative to a marked edge, matching `drawEdges`' own candidate-edge line width. */
+function ghostHaloLineWidth(layout: Layout): number {
+  return Math.max(1.5, layout.cellSize * 0.09);
 }
 
 /**
@@ -1129,6 +1180,17 @@ function drawWrapped(
     }
   }
 
+  // See `RenderState.ghostEdges`'s doc comment — classified once here
+  // (like every other tiled overlay above), drawn further down, before the
+  // ordinary candidate/node/marked-edge passes rather than after.
+  const tiledGhostEdges: TiledEdge[] = [];
+  if (ghostEdges) {
+    for (const ek of ghostEdges) {
+      const [a, b] = parseEdgeKey(ek);
+      tiledGhostEdges.push(classifyEdge(a, b, topology, W, H));
+    }
+  }
+
   function forEachTile(fn: (tileX: number, tileY: number) => void): void {
     for (let tileY = minTileY; tileY <= maxTileY; tileY++) {
       for (let tileX = minTileX; tileX <= maxTileX; tileX++) fn(tileX, tileY);
@@ -1168,6 +1230,42 @@ function drawWrapped(
       ctx.stroke();
     }
   });
+
+  // The ghost halo, drawn *before* the ordinary candidate/node/marked-edge
+  // passes below (not after) — see the single-tile `drawGhostHalo`'s doc
+  // comment for the technique (thick halo stroke, then an exact-width erase
+  // back to background) and why drawing it first is what makes it flush:
+  // every one of those later passes below is already a *full* pass over the
+  // entire puzzle, tiled edges/nodes/marked edges alike, not just the ghost
+  // ones, so they naturally repaint the real picture on top of the erased
+  // hole regardless of whether a given cell/edge happens to sit on the
+  // ghost path or not.
+  if (ghostEdges && ghostEdges.size > 0) {
+    const outerWidth = markedEdgeBaseWidth(layout) + 2 * ghostHaloLineWidth(layout);
+    const innerWidth = markedEdgeBaseWidth(layout);
+    ctx.lineCap = 'round';
+    ctx.globalAlpha = 1;
+    for (const [color, lineWidth] of [
+      [COLORS.ghostSolution, outerWidth],
+      [COLORS.background, innerWidth],
+    ] as const) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      forEachTile((tileX, tileY) => {
+        const oFrom = topology.tileOrientation(tileX, tileY);
+        for (const { from, to, tileDX, tileDY } of tiledGhostEdges) {
+          const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
+          const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
+          const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
+          const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
+          ctx.beginPath();
+          ctx.moveTo(sx1, sy1);
+          ctx.lineTo(sx2, sy2);
+          ctx.stroke();
+        }
+      });
+    }
+  }
 
   ctx.strokeStyle = COLORS.edge;
   ctx.lineWidth = Math.max(1.5, layout.cellSize * 0.09);
@@ -1268,36 +1366,6 @@ function drawWrapped(
         });
       });
     }
-  }
-
-  // Same "classify once, re-project per tile" pattern as every other tiled
-  // overlay above — see `RenderState.ghostEdges`'s doc comment for what this
-  // is drawing and why. Uniform gold, no per-edge styling to resolve, unlike
-  // `tiledMarkedEdges`.
-  if (ghostEdges && ghostEdges.size > 0) {
-    const tiledGhostEdges: TiledEdge[] = [];
-    for (const ek of ghostEdges) {
-      const [a, b] = parseEdgeKey(ek);
-      tiledGhostEdges.push(classifyEdge(a, b, topology, W, H));
-    }
-    ctx.globalAlpha = GHOST_ALPHA;
-    ctx.strokeStyle = COLORS.ghostSolution;
-    ctx.lineWidth = markedEdgeBaseWidth(layout) * 1.1;
-    ctx.lineCap = 'round';
-    forEachTile((tileX, tileY) => {
-      const oFrom = topology.tileOrientation(tileX, tileY);
-      for (const { from, to, tileDX, tileDY } of tiledGhostEdges) {
-        const [sx1, sy1] = toScreenTiled(from, layout, tileX, tileY, W, H, oFrom);
-        const [toTileX, toTileY] = wrapToTile(oFrom, tileX, tileY, tileDX, tileDY);
-        const oTo = tileDX === 0 && tileDY === 0 ? oFrom : topology.tileOrientation(toTileX, toTileY);
-        const [sx2, sy2] = toScreenTiled(to, layout, toTileX, toTileY, W, H, oTo);
-        ctx.beginPath();
-        ctx.moveTo(sx1, sy1);
-        ctx.lineTo(sx2, sy2);
-        ctx.stroke();
-      }
-    });
-    ctx.globalAlpha = 1;
   }
 
   if (keyboardCursor) {
