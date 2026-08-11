@@ -541,3 +541,61 @@ button:disabled {
 .listItemDelete:hover {
   background: #3a2226;
 }
+
+/*
+ * Shared confirm dialog (`src/dialog.ts`, GitHub issue #51) — replaces the
+ * native `window.confirm()`. Always present in the DOM (`index.html`), a
+ * `position: fixed` layer above every `.screen` (highest z-index in this
+ * file), shown/hidden purely via `.show` toggling opacity/pointer-events —
+ * the same "always in flow, transformed away when hidden" approach
+ * `#toast` above already uses, chosen for the same reason: a plain CSS
+ * transition animates it for free, with no `display: none` timing to
+ * coordinate from `dialog.ts`.
+ */
+#dialogOverlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 8, 11, 0);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, background 0.2s ease;
+  z-index: 20;
+}
+#dialogOverlay.show {
+  opacity: 1;
+  pointer-events: auto;
+  background: rgba(8, 8, 11, 0.6);
+}
+#dialogCard {
+  width: min(340px, 100%);
+  background: #24262e;
+  border: 1px solid #3a3c46;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+  transform: scale(0.94);
+  transition: transform 0.2s cubic-bezier(0.2, 1.4, 0.4, 1);
+}
+#dialogOverlay.show #dialogCard {
+  transform: scale(1);
+}
+#dialogMessage {
+  color: #e8e8ea;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1.4;
+  margin-bottom: 18px;
+  white-space: pre-line;
+}
+#dialogButtons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+#dialogConfirmBtn.dialogBtnDanger {
+  background: #d9584a;
+}

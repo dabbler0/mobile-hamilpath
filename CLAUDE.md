@@ -924,6 +924,48 @@ against it. `gameStore.test.ts`'s round-trip test checks exactly this: that
 `generatePuzzle(puzzleIdOf(record))` reproduces the identical `adj` graph
 (not just a graph with the field present) as the original locked puzzle.
 
+## Confirm dialogs
+
+`src/dialog.ts`'s `confirmDialog({ message, confirmLabel?, cancelLabel?,
+danger? })` is a small styleable confirm prompt (GitHub issue #51) that
+replaces every `window.confirm()` call in the codebase — the browser's own
+confirm box can't be restyled at all, so it looked nothing like the rest of
+this game's UI. It's a drop-in async replacement: every former `if
+(!window.confirm(msg)) return;` call site just becomes `if
+(!(await confirmDialog({ message: msg, ... }))) return;`, resolving `true`
+(Confirm), `false` (Cancel, a direct tap on the backdrop, or Escape).
+`danger: true` (used by every current call site — Give Up, and every
+Resume/Replays/Blitz-leaderboard Delete/Forfeit) styles the confirm button
+with the same destructive red accent `style.css`'s `.listItemDelete`
+already uses elsewhere, instead of the ordinary primary blue.
+
+`index.html`'s `#dialogOverlay` is a sibling of every `.screen` (not nested
+in any one of them), so the dialog works identically no matter which screen
+it's opened from — a menu list's delete button or a live in-game button
+(Give Up, Blitz Forfeit) alike. It's always present in the DOM, shown/hidden
+purely by toggling a `.show` class that CSS transitions opacity/
+pointer-events on — the same "always in flow, transformed away when
+hidden" approach `main.ts`'s `showToast`/`#toast` already uses, chosen for
+the same reason: a plain CSS transition animates it for free, with no
+`display: none` timing for `dialog.ts` to coordinate. It needs no special
+handling to block board
+input while open: `#dialogOverlay` is a `position: fixed` layer above every
+`.screen` (this stylesheet's highest `z-index`), so a tap anywhere on
+screen lands on it or its card rather than on the board underneath, and
+`confirmDialog` always focuses one of its own buttons the instant it opens
+— `keyboard.ts`'s own board-cursor handling already ignores any keydown
+whose target is a `BUTTON` (`NATIVE_CONTROL_TAGS`), so arrow
+keys/Enter/Space can never leak through to move the cursor or toggle a
+region while a dialog is up, with no changes needed in `keyboard.ts` itself.
+
+Only one dialog can be open at a time — opening a second one while the
+first is still awaiting a response resolves the first as `false`
+(cancelled) rather than leaving its promise dangling forever. Nothing in
+this codebase actually triggers that today (every call site `await`s the
+result before doing anything else that could open another dialog), but it
+keeps `confirmDialog` a well-behaved general-purpose primitive rather than
+one that silently assumes its own callers' discipline.
+
 ## Give Up
 
 The "Give Up" button (`main.ts`'s `revealSolution`) reveals the puzzle's
