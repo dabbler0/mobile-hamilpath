@@ -484,6 +484,68 @@ button:disabled {
   white-space: nowrap;
 }
 
+/*
+ * Blitz result: two static, read-only board panes side by side (stacked on
+ * a narrow phone) in place of `#boardWrap` — see `main.ts`'s
+ * `enterBlitzResult`. No pan/zoom chrome here (unlike the live board) since
+ * each pane is drawn once, already fitted to its own pane size.
+ */
+#blitzResultWrap {
+  flex: 1;
+  min-height: 0;
+  margin: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+}
+#blitzResultScore {
+  flex: 0 0 auto;
+  text-align: center;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #e8e8ea;
+  padding: 2px 8px;
+}
+#blitzResultBoards {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 8px;
+}
+.blitzResultPane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.blitzResultPaneLabel {
+  flex: 0 0 auto;
+  text-align: center;
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: #9a9aa4;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.blitzResultCanvasWrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #14151a;
+  border: 1px solid #2a2c34;
+}
+/* Two side-by-side panes get cramped on a narrow phone — stack them instead. */
+@media (max-width: 480px) {
+  #blitzResultBoards {
+    flex-direction: column;
+  }
+}
+
 /* ---- Resume / Replays lists ---- */
 /* Headers are `.menuHeader` (shared with Free Play/New Game) for the same
    back-button-top-left layout everywhere; see that rule above. */

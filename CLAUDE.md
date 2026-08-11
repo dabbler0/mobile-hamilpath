@@ -1263,12 +1263,13 @@ re-opening).
 The app is a small stack of full-screen "pages" rather than the single
 always-visible game view it used to be. `src/main.ts`'s `Screen` type —
 `'mainMenu' | 'freePlay' | 'newGame' | 'resume' | 'replays' | 'game' |
-'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns' |
-'blitzGameOver'` — names them; `showScreen(next)` is the *only* place that
+'blitzMenu' | 'blitzSetup' | 'blitzLeaderboard' | 'blitzLeaderboardRuns'` —
+names them; `showScreen(next)` is the *only* place that
 toggles `.hidden` on their root elements (`index.html` gives each one its
 own top-level `<div class="screen">` inside `#app`) and runs each screen's
 enter/leave side effects. Exactly one screen is ever visible at a time. A
-live Blitz run and watching a Blitz run's replay both reuse the `'game'`
+live Blitz run, watching a Blitz run's replay, and a Blitz run's own result
+split-screen (see "Blitz mode"'s "The result screen") all reuse the `'game'`
 screen (and its single canvas) rather than getting screens of their own —
 see "Blitz mode" below for why.
 
@@ -1812,17 +1813,9 @@ lasted," which is exactly this, *not* a countdown-remaining or
 time-bank-remaining number — a run that earned lots of refunds simply lasted
 longer in real time, which this measures directly rather than by summing
 awards), records the run (`saveBlitzRun`, see "Recording and replaying a
-run" below), and shows the Blitz game-over screen (`#blitzGameOverScreen`,
-one of `BACKGROUND_SCREENS` — see "Main menu background" above — showing
-the shared animated background same as the other fixed-layout Blitz
-screens) with **Play Again** (same `BlitzParams`, a brand-new
-`randomSeed()` — mirrors Free Play's Rematch) and **Watch Replay** (opens
-the just-finished run in the real-time replay viewer, disabled if the save
-itself failed) as its button stack, plus its own top-left `.menuHeader`
-back button ("‹ Blitz") — moved there from a third button at the bottom of
-the stack so it follows this project's usual "back is always top-left"
-convention (see "Back/exit/done buttons are always top-left" above, and
-GitHub issue #47).
+run" below), and switches into the result split-screen — see "The result
+screen" below — rather than navigating to a separate game-over menu screen
+(there used to be one, `#blitzGameOverScreen`; it's gone now).
 
 ### Recording and replaying a run
 
@@ -1906,6 +1899,94 @@ that. `#blitzReplayBar` reuses `#blitzHeaderInfo`'s timer/stats display,
 reconstructing "remaining time" as `startingTimeSec * 1000 +
 (awarded-so-far) - t` — exactly the arithmetic `blitzDeadline` encodes live,
 just derived from the event log instead of a running timestamp.
+
+### The result screen
+
+A run's end — the clock hitting zero, or an explicit Forfeit — no longer
+navigates to a separate "game over" menu screen. Instead `main.ts`'s
+`enterBlitzResult` switches `mode` to a fifth value, `'blitzResult'`, still
+on the `'game'` screen: `#boardWrap`/`#playControls`/`#blitzControls`/
+`#reviewBar`/`#blitzReplayBar` all hide in favor of `#blitzResultWrap` (two
+static, read-only board panes, side by side on a wide viewport or stacked
+on a narrow phone — see `style.css`'s media query) and
+`#blitzResultControls`, a fourth sibling of `#playControls`/`#blitzControls`
+in the game screen's own bottom control bar. The left pane is the board
+exactly as the player left it (their own marked edges, with ordinary live
+component coloring via a dedicated `blitzResultComponentColors` state, kept
+apart from `liveComponentColors`/`reviewComponentColors` for the usual
+"don't cross-contaminate" reason — see "Persistent component colors"
+above); the right pane is that same puzzle's intended solution
+(`generateSolutionEdges`), drawn `won: true` — the flat "solved" green —
+exactly like Give Up's revealed solution, since it's a genuine Hamiltonian
+cycle through the puzzle regardless of whether the player reached it
+themselves.
+
+Both panes are drawn once via `layoutStaticBoard`/`layoutBlitzResult`, a
+parallel, simplified version of the live game's own `layout()`/`fitView()`/
+`applyTransform()` trio: size the canvas to the board (or, for a wraparound
+puzzle, to the pane's own viewport, matching `drawWrapped`'s needs) then
+compute a fit view — just applied to two independent canvases instead of
+one, since the result screen shows two boards at once. There's no pan/zoom
+chrome here at all (the zoom buttons are part of `#boardWrap`, which is
+hidden) and no animation — the run is over, both boards are static, drawn
+once and redrawn only on window resize (the `resize` listener branches on
+`mode === 'blitzResult'` to call `layoutBlitzResult()` instead of the
+ordinary `layout()`). `render()` itself early-returns the instant
+`mode === 'blitzResult'`, purely defensively — every animation loop that
+could otherwise still call it has already been stopped by
+`enterBlitzResult` (`stopLiveAnimationLoop`/`stopBlitzTimer`/
+`pauseBlitzReplay`), and `#boardWrap`/`canvas` are hidden regardless.
+
+**Reached from two places**, both handing `enterBlitzResult` whatever
+puzzle/edges were actually on screen when the run ended plus the run's own
+final tally — the function itself owns every bit of screen-state
+bookkeeping either path needs, identically:
+
+- **`endBlitzRun`** (the clock hitting zero, or Forfeit) — the puzzle that
+  was in progress at that moment, exactly as the player left it. Captures
+  `blitzPuzzle`/`blitzCurrentId`/`blitzPathState`/`blitzParams` into locals
+  *before* `saveBlitzRun`'s `await` (which yields control), and keeps
+  setting `mode = 'playing'` synchronously beforehand — the same
+  `mode === 'blitz'` reentrancy guard this function already had before this
+  feature existed, now covering the gap until `enterBlitzResult` itself
+  sets `mode = 'blitzResult'` once the save settles.
+- **`blitzReplayTick`** reaching the natural end of a recorded run's own
+  replay (see "Recording and replaying a run" above) — whatever
+  `blitzReplayPuzzle`/`blitzReplayPathState` holds at that instant (the
+  same state the ordinary `'blitzReplay'` UI was already showing), plus
+  `blitzReplaySolved` and the record's own `scoreMs`. Deliberately triggered
+  *only* by actually watching a run through to this conclusion — scrubbing
+  `#blitzReplayScrubber` all the way to the end does **not** also pop into
+  the result screen, since that would make it impossible to scrub back out
+  again; "Watch Replay" on the result screen itself is always available if
+  the player wants to watch it again regardless of how they got here.
+
+**Play Again / Watch Replay / Back all live in `#blitzResultControls`**, a
+deliberate exception to this project's usual "back is always top-left"
+convention (see "Back/exit/done buttons are always top-left" above) — this
+feature's own spec calls for all three in the game screen's bottom control
+bar rather than a separate menu screen's button stack. Play Again
+(`startBlitzRun(blitzResultParams)`) starts a fresh run at the *result's
+own* pace — not necessarily whatever `blitzParams` happens to hold at click
+time, which matters once the result screen can be reached by watching an
+arbitrary stored run from the Leaderboard rather than only a run just
+finished live; `blitzResultParams` is set from the finishing run's own
+`blitzParams` (`endBlitzRun`) or from the watched record's own
+`startingTimeSec`/`timeBackPerEdgeSec` (`blitzReplayTick`), so either path
+replays at the difficulty actually shown. Watch Replay
+(`openBlitzReplay(blitzResultRecord, blitzResultReturnScreen)`) opens (or
+re-opens) that same run's replay from the start regardless of which path
+led here — reached via a live finish, it's the "Watch Replay" this feature
+replaces; reached via a replay that already played through to the end, it
+simply restarts the same replay — one handler covers both, since both
+entry paths land in the exact same `blitzResultRecord`/
+`blitzResultReturnScreen` state. Back
+(`showScreen(blitzResultReturnScreen)`) returns to the Blitz hub for a
+freshly-finished live run, or to wherever the replay being watched was
+itself opened from (the Leaderboard's runs list, or the result screen a
+previous replay-completion landed on) — `blitzResultReturnScreen` is set at
+entry from either `'blitzMenu'` (`endBlitzRun`) or the live
+`blitzReplayReturnScreen` (`blitzReplayTick`).
 
 ### Leaderboard
 
