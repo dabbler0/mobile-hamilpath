@@ -46,6 +46,25 @@ export const BLITZ_PACE_OPTIONS: ReadonlyArray<{ key: BlitzPace; label: string }
 ];
 
 /**
+ * Tempo (BPM) for `audio/music.ts`'s live-run generative percussion, keyed
+ * by the same pace preset as `BLITZ_PACE_PARAMS` but deliberately a
+ * separate table — a run's clock pacing and its music's tempo are related
+ * only by both scaling with how "fast" a pace feels, not by any shared
+ * formula, so retuning one shouldn't require touching the other. A
+ * first-pass balance, may change later. `main.ts`'s `startBlitzRun` looks
+ * this up via `paceForParams` (falling back to `DEFAULT_BLITZ_PACE` for a
+ * `BlitzParams` that doesn't match a current preset, same as the
+ * leaderboard's own label lookup does) and passes it straight to
+ * `startMusic`; the tempo is then fixed for the whole run — only the
+ * rhythm itself changes mid-run, via `regenerateBlitzRhythm`.
+ */
+export const BLITZ_PACE_MUSIC_BPM: Record<BlitzPace, number> = {
+  slow: 240,
+  normal: 270,
+  fast: 300,
+};
+
+/**
  * The pace preset a given `BlitzParams` exactly matches, or `null` if it
  * doesn't match any current preset — which happens for a run recorded before
  * the pace presets existed (or, in principle, if the presets are retuned

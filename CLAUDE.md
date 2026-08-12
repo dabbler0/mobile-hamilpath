@@ -2058,91 +2058,77 @@ of raw numbers whenever its params match one of the three current presets.
 
 ## Live-play music
 
-A generative background music layer plays for the duration of a live
-attempt — Free Play (`mode === 'playing'`) and a live Blitz run
-(`mode === 'blitz'`) alike — built with the Web Audio API (no audio files,
-everything synthesized on the fly, same approach `audio/sfx.ts` already
-uses for interaction sounds). `src/audio/music.ts` ported a standalone
-generative-percussion prototype almost verbatim: ten polyrhythmic
-percussion layers on coprime/irrational tick subdivisions of a shared
-cycle (2, 3, 4, 5, 6, 7, 9, φ, π, 11 — the irrational ones deliberately
-never re-sync with anything, giving a shimmering non-repeating texture),
-plus three drone tones stacked a fifth apart, each independently fading
-in/out. The one thing the prototype had that this port doesn't need is its
-own UI (a play button, LEDs, a density-history canvas) — this module is
-headless, `main.ts` is its only caller.
+A generative background percussion layer plays for the duration of a live
+Blitz run (`mode === 'blitz'`) — **Free Play plays no music at all**, a
+deliberate scope cut (see below). Built with the Web Audio API, no audio
+files, everything synthesized on the fly, same approach `audio/sfx.ts`
+already uses for interaction sounds. `src/audio/music.ts` ported a
+standalone "Euclidean Timeline Generator" prototype: Bjorklund's algorithm
+(`bjorklund(k, n)`) distributes `k` onsets as evenly as possible among `n`
+steps, which is what gives the rhythm its steady-but-not-four-on-the-floor
+feel; a random rotation of the resulting pattern (`rotateSteps`) keeps
+successive rhythms from all starting on an onset. Onsets play as a snare,
+rests as a shaker, and step 0 (the cycle's downbeat) always plays as a
+kick, whether or not the rotation happens to land an onset there too. The
+prototype's own UI (n/k number inputs, a tempo slider, a play button, an
+SVG ring visualizer, manual Generate/Reroll buttons) is gone — this module
+is headless, `main.ts` is its only caller, and its own two knobs (tempo,
+rhythm reroll) are driven externally instead of by on-screen controls.
 
-**Architecture, mirroring `audio/sfx.ts`'s own indirection**: nothing
-outside `music.ts` names a synth function directly. `LAYER_DEFS` is the one
-list of "what layers exist" (id, role, base volume, tick subdivision or
-drone root frequency); `SYNTH_MAP` is the one place mapping a layer's `id`
-to the function that actually renders it — adding a brand-new layer later
-is a two-line change (one entry in each), not a redesign. A periodic
-`evolve()` pass (roughly every two musical cycles) decides how many layers
-should currently be audible and fades layers in/out to match, same
-add/remove/swap logic the prototype used.
+This replaced an earlier ten-layer polyrhythmic-percussion-plus-drone
+generator that played in *both* Free Play and Blitz, with an externally-fed
+0-1 "density" input (`setMusicDensity`) that added/removed layers to track
+how close to finished (Free Play) or how low on time (Blitz) the player
+was. Neither half of that carried over: Free Play's live tension no longer
+gets scored by music at all, and this engine has no "layers" for a density
+signal to drive in the first place — Blitz's own sense of escalation now
+comes from the rhythm itself changing, not from more instruments joining
+in.
 
-**The prototype's own density source is gone.** It decided "how many layers
-right now" from an internal sawtooth arc (slowly build up, drop, repeat) —
-this port replaces that with `setMusicDensity(target: number)`, a plain 0-1
-input `evolve()` builds each cycle's target around (with a little jitter,
-`DENSITY_JITTER`, layered on top for the same organic "never quite repeats"
-feel the arc had). `setMusicDensity` itself has no opinion about *why* the
-value is what it is — that policy question is deliberately kept entirely on
-the `main.ts` side, one function per mode:
+**The two externally-driven knobs**:
 
-- **`updateFreePlayMusicDensity`** (`main.ts`) implements "have it track
-  inversely as the number of unmarked vertices (so most intense when there
-  is just one left)". "Unmarked vertex" here means `game/pathEdit.ts`'s
-  `countIncompleteCells` — a cell not yet at its final marked-degree of 2,
-  i.e. not yet locked into the loop (0 exactly at a win, same as
-  `computeWin`'s own check) — not simply `totalCells - edges.size`, since
-  toggling a region can remove edges as freely as it adds them. Density maps
-  linearly onto that count: 1 incomplete cell -> density 1 ("just one
-  left"), every cell still incomplete -> density 0. Called after every live
-  edit that can change `pathState.edges` — a real move
-  (`setFreePlayPathState`), Undo/Redo, Reset, and Hint (whichever of those
-  doesn't itself just end the game, see below) — so the music always
-  reflects how close the board actually is to finished, not how long it's
-  been playing.
-- **`blitzMusicDensity`** (`main.ts`) implements "have the density track
-  inversely as the amount of time left on the clock (so every time it gets
-  low, the music gets denser)". Deliberately an *absolute* ramp window
-  (`BLITZ_MUSIC_DANGER_MS`, 20 seconds) rather than a fraction of
-  `startingTimeSec`: a run's time bank can grow arbitrarily large from
-  time-back awards (see "Blitz mode" above), so "fraction of the total"
-  would mean a long, successful run's music almost never reaches its
-  densest even as the clock gets objectively close to zero — a flat window
-  means "low on time" always means the same thing in music terms, however
-  big the bank got along the way. Read every frame from `blitzTick` (the
-  live countdown's own `requestAnimationFrame` loop), reusing the `remaining`
-  it already computes — cheap, since `setMusicDensity` only ever writes a
-  number; the actual layer add/remove work happens on `evolve()`'s own
-  slower cadence, not on every call.
+- **Tempo** (`startMusic(bpm: number)`) is fixed for the whole run, set
+  once when the run starts. `main.ts`'s `startBlitzRun` derives it from the
+  chosen pace via `game/blitz.ts`'s `BLITZ_PACE_MUSIC_BPM` (slow 240 ·
+  normal 270 · fast 300 BPM, one pulse per beat — a first-pass balance,
+  may change later), looking the pace up from `params` via `paceForParams`
+  (falling back to `DEFAULT_BLITZ_PACE` for a non-preset `BlitzParams`,
+  same fallback the leaderboard's own label lookup uses). Deliberately a
+  *separate* table from `BLITZ_PACE_PARAMS` — a run's clock pacing and its
+  music's tempo are related only by both scaling with how "fast" a pace
+  feels, not by a shared formula, so retuning one shouldn't force touching
+  the other.
+- **Rhythm** (`regenerateBlitzRhythm()`) is rerolled — a fresh random
+  `n`/`k`/rotation, via the same `generateEuclideanPattern` `startMusic`
+  itself uses — every time the puzzle changes. `main.ts`'s
+  `advanceBlitzPuzzle` (pulls the next puzzle from the run's sequence, on
+  every solve and once to start the run — see "Blitz mode" above) calls
+  this unconditionally; on the very first puzzle of a run it's a harmless
+  no-op (`advanceBlitzPuzzle` runs *before* `startBlitzRun`'s own
+  `startMusic()` call, so the engine doesn't exist yet — that first
+  puzzle's rhythm comes from whatever fresh pattern `startMusic` itself
+  rolls a moment later instead).
 
 **Starting and stopping** follows the same "only from a real user gesture"
 rule `audio/sfx.ts`'s lazy `AudioContext` documents (mobile Safari's
 autoplay policy blocks constructing/resuming one before any click/tap) —
-`startMusic()` is only ever called from `beginPuzzle` (New Game/Resume/
-Rematch, all reached from a button) and `startBlitzRun` (the setup screen's
-Start button), both after their own `showScreen('game')`. `stopMusic()`
+`startMusic()` is only ever called from `startBlitzRun` (the Blitz setup
+screen's Start button), after its own `showScreen('game')`. `stopMusic()`
 fades the master gain out over `STOP_FADE_SEC` before actually tearing the
 `AudioContext` down (an abrupt cutoff would click/thump); it's called
-whenever there's no more live tension to score: a real win
-(`setFreePlayPathState`/`hintMe`'s `justWon` branch), Give Up
-(`revealSolution`), a Blitz run ending (`endBlitzRun`, redundantly but
-harmlessly also reached via `enterBlitzResult` — `stopMusic` is safe to call
-when already stopped), and every mode-entry function that leaves live play
-(`enterReview`, `enterBlitzResult`, `openBlitzReplay`) calls it defensively
-up front, exactly the same defensive-stop pattern `beginPuzzle`/
-`enterReview`/`startBlitzRun` already use for
-`stopLiveAnimationLoop`/`stopBlitzTimer`/`pauseBlitzReplay` — plus one more
-copy in `showScreen`'s own "just left `'game'`" block, for a stray
-navigation that isn't any of those. A fast Rematch/Play Again right after a
-`stopMusic()` fade has started is handled explicitly: `startMusic` cancels
-any pending teardown `setTimeout` rather than racing it, so the old
-engine's delayed `audioCtx.close()` can never fire after a new context has
-already been built.
+whenever a live Blitz run ends or is left behind — `endBlitzRun`
+(redundantly but harmlessly also reached via `enterBlitzResult` —
+`stopMusic` is safe to call when already stopped) — and every mode-entry
+function (`beginPuzzle`, `enterReview`, `openBlitzReplay`) calls it
+defensively up front regardless of whether that particular mode ever
+started it, exactly the same defensive-stop pattern those functions
+already use for `stopLiveAnimationLoop`/`stopBlitzTimer`/
+`pauseBlitzReplay` — plus one more copy in `showScreen`'s own "just left
+`'game'`" block, for a stray navigation that isn't any of those. A fast
+Play Again right after a `stopMusic()` fade has started is handled
+explicitly: `startMusic` cancels any pending teardown `setTimeout` rather
+than racing it, so the old engine's delayed `audioCtx.close()` can never
+fire after a new context has already been built.
 
 **Volume** is a separate, independent control from sfx volume — the
 Settings screen's second slider (`#musicVolumeSlider`), backed by its own

@@ -1,14 +1,14 @@
-import { setMusicDensity, setMusicVolume, startMusic, stopMusic } from './audio/music';
+import { regenerateBlitzRhythm, setMusicVolume, startMusic, stopMusic } from './audio/music';
 import { playSfx, setSfxVolume } from './audio/sfx';
 import { confirmDialog } from './dialog';
-import { BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
+import { BLITZ_PACE_MUSIC_BPM, BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
 import { createComponentColorState, previewComponentColors, resetComponentColorState, snapshotEdgeColors, updateComponentColors, type ComponentColorState } from './game/componentColors';
 import { applyHintedEdges, lockEdge, resetToLockedState } from './game/edgeLock';
 import { computeFarthestCell, computeReachableEdges, computeRecoloredEdges } from './game/edgeRipple';
 import { boardPixelSize, faceToScreen, type Layout } from './game/geometry';
 import { canRedo, canUndo, createHistory, decodeMoveLog, recordHint, recordMove, redo as redoHistory, resetPath as resetHistory, undo as undoHistory, type HistoryState } from './game/history';
 import { orderLoopCells } from './game/loopOrder';
-import { applyPathOp, countIncompleteCells, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
+import { applyPathOp, createInitialPath, type EdgeKey, type PathOp, type PathState } from './game/pathEdit';
 import { allEdgeKeys, NO_EDGE_COLLECTIONS, totalCells, type Puzzle } from './game/puzzle';
 import { generatePuzzle, generateSolutionEdges, randomSeed, SELECTABLE_SHAPE_MODE_OPTIONS, SIZE_OPTIONS, shapeModeOption, sizeOption, type PuzzleId, type ShapeMode } from './game/puzzleGen';
 import { computeRegions, type Face, type Region, type RegionMap } from './game/regions';
@@ -253,71 +253,6 @@ let stopMenuBackground: (() => void) | null = null;
 const BLITZ_ADVANCE_DELAY_MS = 550;
 /** Below this many remaining milliseconds, the header timer switches to its urgent (red) styling. */
 const BLITZ_LOW_TIME_MS = 10000;
-/**
- * Blitz's density signal for the live generative-music layer
- * (`audio/music.ts`) — CLAUDE.md's "have the density track inversely as the
- * amount of time left on the clock (so every time it gets low, the music
- * gets denser)", refined by two more reference points below so a run's
- * *starting* clock reads as a mid-density opening rather than either
- * extreme. `BLITZ_MUSIC_DANGER_MS` is deliberately an absolute window, not a
- * fraction of `startingTimeSec`: the time bank can grow arbitrarily large
- * from time-back awards (`BlitzParams`'s own doc comment), so a
- * fraction-of-total reading would mean a long, successful run's music almost
- * never reaches its densest even as the clock gets objectively close to
- * zero. A flat window means "low on time" always means the same thing in
- * music terms, however big the run's time bank got along the way.
- */
-const BLITZ_MUSIC_DANGER_MS = 20000;
-/** Density at/below `BLITZ_MUSIC_DANGER_MS` remaining — genuinely almost out of time, so the music goes as dense as it gets. */
-const BLITZ_MUSIC_MAX_DENSITY = 1;
-/**
- * Density exactly at a run's own starting clock value (`remainingMs ===
- * startingTimeSec * 1000`) — i.e. the density a fresh run actually opens at,
- * before any move or award has touched the clock. Deliberately the
- * *midpoint* of the range, not the floor: a comfortable run spends a lot of
- * its time with the bank sitting somewhere around this value, and CLAUDE.md
- * asks for that stretch to already sound like "several instruments" playing,
- * with room left to both intensify as the clock actually gets low and thin
- * out further if the bank grows well past its starting size (see
- * `BLITZ_MUSIC_MIN_DENSITY` below).
- */
-const BLITZ_MUSIC_MID_DENSITY = 0.5;
-/**
- * Density at/beyond `BLITZ_MUSIC_HIGH_BANK_MULTIPLE` times a run's starting
- * clock — reached only by a run that's been earning refunds well ahead of
- * spending them, i.e. genuinely coasting. `audio/music.ts`'s `evolve()`
- * (`desired = round(1 + densityTarget * (layers.length - 1))`) maps this
- * onto right around 2 active layers — CLAUDE.md's "go down to just two
- * instruments" once the clock gets "really high".
- */
-const BLITZ_MUSIC_MIN_DENSITY = 0.08;
-/** How many multiples of a run's starting clock its bank has to reach before density bottoms out at `BLITZ_MUSIC_MIN_DENSITY` — CLAUDE.md's "regularly gets refunded to twice or three times the starting blitz clock". */
-const BLITZ_MUSIC_HIGH_BANK_MULTIPLE = 2.5;
-
-/**
- * Maps remaining Blitz clock time onto the [0, 1] density `audio/music.ts`
- * expects, via three fixed reference points in strictly descending order of
- * `remainingMs` — `(BLITZ_MUSIC_DANGER_MS, MAX)`, `(startingTimeSec * 1000,
- * MID)`, `(startingTimeSec * 1000 * BLITZ_MUSIC_HIGH_BANK_MULTIPLE, MIN)` —
- * linearly interpolated between whichever pair `remainingMs` currently falls
- * between, and clamped flat beyond either end. The middle point is
- * `startingTimeSec`-relative (unlike the low-time danger point — see
- * `BLITZ_MUSIC_DANGER_MS`'s doc comment) quite deliberately: it's what makes
- * a run's own starting clock value read as "the middle of the range" for
- * every pace preset, not just whichever one happens to sit near 40 seconds.
- */
-function blitzMusicDensity(remainingMs: number, startingTimeSec: number): number {
-  const startingMs = startingTimeSec * 1000;
-  const highBankMs = startingMs * BLITZ_MUSIC_HIGH_BANK_MULTIPLE;
-  if (remainingMs <= BLITZ_MUSIC_DANGER_MS) return BLITZ_MUSIC_MAX_DENSITY;
-  if (remainingMs <= startingMs) {
-    const t = (remainingMs - BLITZ_MUSIC_DANGER_MS) / (startingMs - BLITZ_MUSIC_DANGER_MS);
-    return BLITZ_MUSIC_MAX_DENSITY + t * (BLITZ_MUSIC_MID_DENSITY - BLITZ_MUSIC_MAX_DENSITY);
-  }
-  if (remainingMs >= highBankMs) return BLITZ_MUSIC_MIN_DENSITY;
-  const t = (remainingMs - startingMs) / (highBankMs - startingMs);
-  return BLITZ_MUSIC_MID_DENSITY + t * (BLITZ_MUSIC_MIN_DENSITY - BLITZ_MUSIC_MID_DENSITY);
-}
 
 let blitzParams: BlitzParams = BLITZ_PACE_PARAMS[DEFAULT_BLITZ_PACE];
 let blitzSeq: ReturnType<typeof createBlitzSequence> | null = null;
@@ -776,28 +711,6 @@ function updateProgress(): void {
   progressEl.textContent = `${pathState.edges.size} / ${totalCells(puzzle)}`;
 }
 
-/**
- * Free Play's density signal for the live generative-music layer
- * (`audio/music.ts`) — CLAUDE.md's "have it track inversely as the number
- * of unmarked vertices (so most intense when there is just one left)".
- * `countIncompleteCells` is "just one left"'s literal 1 right before a win
- * (`computeWin` requires every cell at 0); this maps that range linearly
- * onto density's [0, 1] (1 incomplete cell -> density 1; every cell still
- * incomplete -> density 0). Called after every live edit that can change
- * `pathState.edges` (a real move, undo/redo, reset, a hint) — see each call
- * site — so the music always reflects how close the board actually is to
- * finished, not just "how long it's been playing".
- */
-function updateFreePlayMusicDensity(): void {
-  const total = totalCells(puzzle);
-  if (total <= 1) {
-    setMusicDensity(1);
-    return;
-  }
-  const incomplete = countIncompleteCells(puzzle, pathState.edges);
-  setMusicDensity(1 - Math.min(1, Math.max(0, (incomplete - 1) / (total - 1))));
-}
-
 function updatePuzzleLabel(): void {
   const opt = sizeOption(currentPuzzleId.sizeKey);
   const shapeOpt = shapeModeOption(currentPuzzleId.shapeMode);
@@ -863,17 +776,7 @@ function setFreePlayPathState(next: PathState, ops: PathOp[]): void {
   updateProgress();
   refreshControlBar();
   render();
-  // A win means there's nothing left to build tension toward — stop the
-  // music instead of feeding it a density reading (`updateFreePlayMusicDensity`
-  // itself would report exactly 0 incomplete cells here regardless, but
-  // fading out reads as a deliberate resolution rather than "the density
-  // happened to bottom out").
-  if (justWon) {
-    winBannerEl.classList.add('show');
-    stopMusic();
-  } else {
-    updateFreePlayMusicDensity();
-  }
+  if (justWon) winBannerEl.classList.add('show');
   persistLiveState();
 }
 
@@ -908,7 +811,6 @@ function performUndo(): void {
   updateProgress();
   refreshControlBar();
   render();
-  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -923,7 +825,6 @@ function performRedo(): void {
   updateProgress();
   refreshControlBar();
   render();
-  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -959,7 +860,6 @@ function performReset(): void {
   updateProgress();
   refreshControlBar();
   render();
-  updateFreePlayMusicDensity();
   persistLiveState();
 }
 
@@ -1018,14 +918,7 @@ function hintMe(): void {
   updateProgress();
   refreshControlBar();
   render();
-  // See `setFreePlayPathState`'s matching comment: a win stops the music
-  // rather than feeding it a (now trivially zero) density reading.
-  if (justWon) {
-    winBannerEl.classList.add('show');
-    stopMusic();
-  } else {
-    updateFreePlayMusicDensity();
-  }
+  if (justWon) winBannerEl.classList.add('show');
   persistLiveState();
 }
 
@@ -1056,7 +949,6 @@ async function revealSolution(): Promise<void> {
   clearEdgeAnimations();
   pathState = { edges: generateSolutionEdges(currentPuzzleId), won: false };
   gaveUp = true;
-  stopMusic(); // no more tension to build toward once the live attempt is over, win or not
   focusedRegionId = null;
   keyboardCursor = null;
   updateProgress();
@@ -1264,13 +1156,6 @@ function beginPuzzle(id: PuzzleId, resume?: { edges: EdgeKey[]; history?: Histor
   refreshControlBar();
   showScreen('game');
   layout();
-  // Live play's generative-music layer — see CLAUDE.md's "Live-play music"
-  // and `updateFreePlayMusicDensity`'s own doc comment. Started after
-  // `showScreen('game')` so it always begins from a real click/tap (New
-  // Game/Resume/Rematch's own button), same reasoning `audio/sfx.ts`
-  // documents for its own lazy `AudioContext` creation.
-  startMusic();
-  updateFreePlayMusicDensity();
 }
 
 function startNewGame(sizeKey: string, shapeMode: ShapeMode, lockedEdgeFraction?: number): void {
@@ -1646,6 +1531,14 @@ function updateBlitzHeader(): void {
  * call of a run forces `t: 0` exactly (rather than `blitzElapsedMs()`, which
  * would be a sub-millisecond positive jitter) so `seekBlitzReplay(0)` can
  * find it with a simple `<=` comparison.
+ *
+ * Also rerolls the live-run generative percussion's rhythm
+ * (`audio/music.ts`'s `regenerateBlitzRhythm`) — CLAUDE.md's "rerandomize
+ * the rhythm every time the puzzle changes". A no-op on the very first call
+ * of a run: `startBlitzRun` calls this before the music engine exists yet
+ * (`startMusic` itself hasn't run), so that first puzzle's rhythm instead
+ * comes from whatever fresh pattern `startMusic` rolls when it starts a
+ * moment later.
  */
 function advanceBlitzPuzzle(): void {
   clearEdgeAnimations();
@@ -1662,6 +1555,7 @@ function advanceBlitzPuzzle(): void {
   blitzEvents.push({ kind: 'puzzleStart', t: blitzEvents.length === 0 ? 0 : blitzElapsedMs(), sizeKey: id.sizeKey, shapeMode: id.shapeMode, seed: id.seed, lockedEdgeFraction: id.lockedEdgeFraction, timeAwardedMs: awardMs });
   showToast(`+${(awardMs / 1000).toFixed(1)}s for this puzzle`);
   updateBlitzHeader();
+  regenerateBlitzRhythm();
   layout();
 }
 
@@ -1739,7 +1633,6 @@ function blitzTick(): void {
   if (mode !== 'blitz') return;
   const remaining = blitzDeadline - performance.now();
   updateBlitzHeader();
-  setMusicDensity(blitzMusicDensity(remaining, blitzParams.startingTimeSec));
   if (remaining <= 0) {
     void endBlitzRun();
     return;
@@ -1802,12 +1695,16 @@ function startBlitzRun(params: BlitzParams): void {
   showScreen('game');
   advanceBlitzPuzzle();
   startBlitzTimer();
-  // See `beginPuzzle`'s matching comment — same "only ever from a real
-  // click" reasoning applies here (the Blitz setup screen's own Start
-  // button). `startBlitzTimer`'s first `blitzTick` sets the actual density
-  // reading a frame later; nothing needs to happen here beyond starting
-  // the engine itself.
-  startMusic();
+  // Live-run generative percussion (`audio/music.ts`) — Blitz-only, see
+  // CLAUDE.md's "Live-play music"; Free Play never calls `startMusic` at
+  // all. Started only from a real click (the Blitz setup screen's own Start
+  // button), same "only ever from a user gesture" reasoning `audio/sfx.ts`
+  // documents for its own lazy `AudioContext` creation. Tempo is fixed for
+  // the whole run by the chosen pace (`paceForParams` recovers the pace
+  // name from `params`, falling back to the default for a non-preset
+  // `BlitzParams`, same as the leaderboard's own label lookup); the rhythm
+  // itself is rerolled per puzzle instead — see `advanceBlitzPuzzle`.
+  startMusic(BLITZ_PACE_MUSIC_BPM[paceForParams(params) ?? DEFAULT_BLITZ_PACE]);
 }
 
 /**
