@@ -1,107 +1,130 @@
 /**
- * Generative background percussion + drone music for live play, built with
- * the Web Audio API (no audio files — every sound is synthesized on the
- * fly). Ported from a standalone proof-of-concept (ten polyrhythmic
- * percussion layers on coprime/irrational tick subdivisions of a shared
- * cycle, plus three fifth-stacked drone tones), stripped of its own UI (the
- * prototype had a play button, LEDs, and a density arc canvas — this module
- * is headless; `main.ts` is the only caller) and given one addition the
- * prototype didn't need: an externally-driven density input.
+ * Live Blitz-run background percussion, built with the Web Audio API (no
+ * audio files — everything synthesized on the fly, same approach
+ * `audio/sfx.ts` already uses). Ported from a standalone "Euclidean
+ * Timeline Generator" prototype: Bjorklund's algorithm distributes `k`
+ * onsets as evenly as possible among `n` steps (`bjorklund`), which is what
+ * gives the pattern its steady-but-not-four-on-the-floor feel; a random
+ * rotation of that pattern is what keeps successive rhythms from all
+ * starting on an onset. Stripped of the prototype's own UI (a tempo slider,
+ * n/k number inputs, a play button, an SVG ring visualizer — this module is
+ * headless, `main.ts` is its only caller) and of its manual Generate/Reroll
+ * buttons, replaced by `regenerateBlitzRhythm` (see below).
  *
- * Architecture, mirroring `audio/sfx.ts`'s own indirection: nothing outside
- * this file names a synth function directly. `LAYER_DEFS` is the one list
- * of "what layers exist" (id, role, base volume, tick subdivision or drone
- * root frequency); `SYNTH_MAP` is the one place mapping a layer's `id` to
- * the function that actually renders it. Adding a brand-new layer later is
- * exactly a two-line change — one entry in each — not a redesign; the
- * scheduler/evolution logic below never needs to know a new layer exists
- * beyond that.
- *
- * The prototype decided how many layers should be audible at any moment
- * from its own internal sawtooth "build up, drop, repeat" arc. That arc is
- * gone: `setMusicDensity` is the replacement input, and it's deliberately
- * just a plain 0-1 number with no opinion about *why* it's that value —
- * `main.ts` is what decides the actual policy (Blitz's countdown clock vs.
- * Free Play's unmarked-cell count, see its own "Live-play music" section),
- * so a future third policy (a new game mode, a difficulty-based one, ...)
- * is purely a `main.ts`-side change, never one here. `evolve()` still adds
- * a little per-cycle jitter around whatever target it's given, for the same
- * organic "never quite repeats" feel the original arc had — see
- * `DENSITY_JITTER`.
+ * This replaced an earlier ten-layer polyrhythmic-percussion-plus-drone
+ * generator that played in *both* Free Play and Blitz, with its own
+ * externally-driven "density" input tracking how close to finished (Free
+ * Play) or how low on time (Blitz) the player was. Free Play has no
+ * generative music at all now — CLAUDE.md's "Live-play music" section, and
+ * `main.ts`'s call sites, no longer call anything in this file from any
+ * Free Play code path. Blitz's own former density-tracking behavior is
+ * gone too: this engine has no "layers" to add/remove, so there's nothing
+ * for a density signal to drive — instead, a run's rhythm is simply
+ * rerolled fresh every time the puzzle changes (`regenerateBlitzRhythm`,
+ * called from `main.ts`'s `advanceBlitzPuzzle`), and its tempo is fixed for
+ * the whole run, set once by `startMusic`'s `bpm` argument (Blitz's pace
+ * preset — see `game/blitz.ts`'s `BLITZ_PACE_MUSIC_BPM`).
  */
 
-// ---- Layer definitions ----
-// ticks = subdivisions per shared cycle. Mix of small integers, coprime
-// primes, and one irrational ratio (never re-syncs, gives a shimmering
-// non-repeating texture) — same set as the prototype, verbatim.
-type MusicLayerRole = 'anchor' | 'rhythm' | 'texture' | 'color' | 'drone';
+// ---- Pattern generation ----
+// Ported verbatim from the prototype's own `bjorklund`/`rotate`/coprime-pick
+// logic.
 
-interface LayerDef {
-  id: string;
-  /** Subdivisions per shared cycle; `null` for a drone layer (continuously running, not tick-scheduled). */
-  ticks: number | null;
-  role: MusicLayerRole;
-  baseGain: number;
-  /** Drone layers only: the fundamental this drone's oscillator stack is built from. */
-  rootFreq?: number;
+function gcd(a: number, b: number): number {
+  while (b) {
+    [a, b] = [b, a % b];
+  }
+  return a;
 }
 
-const LAYER_DEFS: readonly LayerDef[] = [
-  { id: 'anchor', ticks: 2, role: 'anchor', baseGain: 0.85 },
-  { id: 'wood3', ticks: 3, role: 'rhythm', baseGain: 0.55 },
-  { id: 'conga4', ticks: 4, role: 'rhythm', baseGain: 0.45 },
-  { id: 'snare5', ticks: 5, role: 'rhythm', baseGain: 0.5 },
-  { id: 'tom6', ticks: 6, role: 'rhythm', baseGain: 0.42 },
-  { id: 'hat7', ticks: 7, role: 'texture', baseGain: 0.38 },
-  { id: 'rim9', ticks: 9, role: 'texture', baseGain: 0.3 },
-  { id: 'shaker', ticks: 1.6180339887, role: 'texture', baseGain: 0.32 }, // phi
-  { id: 'hat_pi', ticks: Math.PI, role: 'texture', baseGain: 0.3 },
-  { id: 'tap11', ticks: 11, role: 'color', baseGain: 0.16 },
-  { id: 'drone', ticks: null, role: 'drone', baseGain: 0.1, rootFreq: 110 },
-  { id: 'drone2', ticks: null, role: 'drone', baseGain: 0.09, rootFreq: 165 },
-  { id: 'drone3', ticks: null, role: 'drone', baseGain: 0.08, rootFreq: 247.5 },
-];
-
-interface DroneNodes {
-  oscs: OscillatorNode[];
-  lfo: OscillatorNode;
+/** Bjorklund's algorithm: distributes `k` onsets as evenly as possible among `n` steps. Returns a 0/1 array of length `n`. */
+function bjorklund(k: number, n: number): number[] {
+  if (k <= 0) return new Array(n).fill(0);
+  if (k >= n) return new Array(n).fill(1);
+  let a: number[][] = [];
+  let b: number[][] = [];
+  for (let i = 0; i < k; i++) a.push([1]);
+  for (let i = 0; i < n - k; i++) b.push([0]);
+  while (b.length > 1) {
+    const m = Math.min(a.length, b.length);
+    const newA: number[][] = [];
+    for (let i = 0; i < m; i++) newA.push(a[i].concat(b[i]));
+    const remainder = a.length > b.length ? a.slice(m) : b.slice(m);
+    a = newA;
+    b = remainder;
+    if (a.length <= 1) break;
+  }
+  return a.concat(b).flat();
 }
 
-interface Layer extends LayerDef {
-  active: boolean;
-  tickIndex: number;
-  period: number;
-  gainNode: GainNode | null;
-  droneNodes?: DroneNodes;
+function rotateSteps(steps: readonly number[], r: number): number[] {
+  const n = steps.length;
+  const rr = ((r % n) + n) % n;
+  return steps.slice(rr).concat(steps.slice(0, rr));
+}
+
+/** The `n` range a fresh pattern's step count is drawn from — same defaults the prototype's own min/max inputs started at. */
+const PATTERN_N_MIN = 8;
+const PATTERN_N_MAX = 24;
+/** Fallback pattern (E(3,8), no rotation) for the astronomically unlikely case `pickCoprimeNK` exhausts its attempts — keeps pattern generation total rather than ever leaving the engine without a rhythm to play. */
+const FALLBACK_PATTERN = bjorklund(3, 8);
+
+/**
+ * Draws a random `n` in `[PATTERN_N_MIN, PATTERN_N_MAX]`, then a random `k`
+ * uniformly among the integers in `[ceil(n/4), floor(n/2)]` that are
+ * coprime with `n` (so the pattern doesn't reduce to a shorter repeated
+ * cell) — retrying with a fresh `n` if that band happens to have no coprime
+ * candidate for the chosen `n`. In practice this virtually always succeeds
+ * on the first attempt or two; `maxAttempts` just bounds the loop so a
+ * pathological range can't spin forever.
+ */
+function pickCoprimeNK(): { n: number; k: number } | null {
+  const maxAttempts = 200;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const n = PATTERN_N_MIN + Math.floor(Math.random() * (PATTERN_N_MAX - PATTERN_N_MIN + 1));
+    const kLo = Math.ceil(n / 4);
+    const kHi = Math.floor(n / 2);
+    const candidates: number[] = [];
+    for (let k = kLo; k <= kHi; k++) {
+      if (k >= 2 && k < n && gcd(n, k) === 1) candidates.push(k);
+    }
+    if (candidates.length > 0) {
+      return { n, k: candidates[Math.floor(Math.random() * candidates.length)] };
+    }
+  }
+  return null;
+}
+
+/** A fresh random Euclidean rhythm: `bjorklund(k, n)` at a random rotation. Always returns a non-empty 0/1 step array (falls back to `FALLBACK_PATTERN` — see its own doc comment). */
+function generateEuclideanPattern(): number[] {
+  const picked = pickCoprimeNK();
+  if (!picked) return FALLBACK_PATTERN;
+  const base = bjorklund(picked.k, picked.n);
+  const rotation = Math.floor(Math.random() * picked.n);
+  return rotateSteps(base, rotation);
 }
 
 // ---- Module state ----
-// Deliberately a single always-at-most-one-running engine (there's only
-// ever one live puzzle/run on screen at a time) rather than something
-// instantiable — same "one shared context" shape as `audio/sfx.ts`, just
-// with a start/stop lifecycle instead of always-ready fire-and-forget.
+// One always-at-most-one-running engine, same "single shared context" shape
+// as `audio/sfx.ts` and the earlier version of this file.
 let audioCtx: AudioContext | null = null;
 let masterGain: GainNode | null = null;
 let noiseBuffer: AudioBuffer | null = null;
-let layers: Layer[] = [];
 let running = false;
 
-let cycleDuration = 2.0; // seconds -- fixed for now; see this file's doc comment for tempo as a future extension point
-let globalStart = 0;
+let currentPattern: number[] = FALLBACK_PATTERN;
+let currentStep = 0;
+let currentBpm = 240;
+let nextNoteTime = 0;
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
-let evolveTimer: ReturnType<typeof setInterval> | null = null;
 let stopFadeTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Mirrors whatever `setMusicVolume` was last called with, even before `audioCtx` exists — same pattern as `sfx.ts`'s `currentVolume`. */
 let currentVolume = 0.5;
-/** The latest value passed to `setMusicDensity` — read by `evolve()`, not applied directly (see `DENSITY_JITTER`). */
-let externalDensityTarget = 0;
 
+const SCHEDULE_AHEAD_SEC = 0.1;
 const SCHEDULER_INTERVAL_MS = 25;
-const SCHEDULER_LOOKAHEAD_SEC = 0.12;
-/** How far `evolve()`'s actual per-cycle density is allowed to wander from `externalDensityTarget`, for a bit of organic variation instead of a perfectly mechanical mapping. */
-const DENSITY_JITTER = 0.12;
-/** Fade-out length before `stopMusic` actually tears the context down — long enough to not click/thump, short enough that a quick Rematch doesn't leave two engines briefly overlapping. */
+/** Fade-out length before `stopMusic` actually tears the context down — long enough to not click/thump, short enough that a quick Play Again doesn't leave two engines briefly overlapping. */
 const STOP_FADE_SEC = 0.4;
 
 function clamp01(n: number): number {
@@ -110,10 +133,10 @@ function clamp01(n: number): number {
 }
 
 // ---- Synths ----
-// Ported verbatim from the prototype (see this file's doc comment), only
-// adapted to read `audioCtx`/`noiseBuffer` off module state instead of a
-// script-global, and to take an explicit `out` destination the way
-// `sfx.ts`'s own synths do.
+// Ported verbatim from the prototype (kick as the downbeat marker, snare for
+// an onset step, shaker for a rest step), adapted only to take an explicit
+// `out` destination the way `sfx.ts`'s own synths do, instead of always
+// connecting straight to `ctx.destination`.
 
 function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
   const size = ctx.sampleRate * 1;
@@ -123,368 +146,150 @@ function makeNoiseBuffer(ctx: AudioContext): AudioBuffer {
   return buf;
 }
 
-function playKick(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
+function noiseSource(ctx: AudioContext): AudioBufferSourceNode {
+  const src = ctx.createBufferSource();
+  src.buffer = noiseBuffer;
+  return src;
+}
+
+/** Kick drum: always plays on step 0, the cycle's downbeat, regardless of whether the rotated pattern happens to place an onset there. Fast pitch-dropping sine body plus a tiny noise click for the beater attack. */
+function playKick(ctx: AudioContext, t: number, out: AudioNode): void {
   const osc = ctx.createOscillator();
-  const g = ctx.createGain();
+  const oscGain = ctx.createGain();
   osc.type = 'sine';
   osc.frequency.setValueAtTime(150, t);
-  osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.9 * vel, t + 0.005);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
-  osc.connect(g).connect(out);
+  osc.frequency.exponentialRampToValueAtTime(45, t + 0.09);
+  oscGain.gain.setValueAtTime(0.0001, t);
+  oscGain.gain.exponentialRampToValueAtTime(0.9, t + 0.006);
+  oscGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+  osc.connect(oscGain).connect(out);
   osc.start(t);
-  osc.stop(t + 0.3);
-}
+  osc.stop(t + 0.34);
 
-function playWood(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  // sharp noise click for the "stick contact" transient
-  const click = ctx.createBufferSource();
-  click.buffer = noiseBuffer;
-  const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass';
-  hp.frequency.value = 2500;
-  const cg = ctx.createGain();
-  cg.gain.setValueAtTime(0.0001, t);
-  cg.gain.exponentialRampToValueAtTime(0.45 * vel, t + 0.001);
-  cg.gain.exponentialRampToValueAtTime(0.0001, t + 0.015);
-  click.connect(hp).connect(cg).connect(out);
+  const click = noiseSource(ctx);
+  const clickFilter = ctx.createBiquadFilter();
+  clickFilter.type = 'highpass';
+  clickFilter.frequency.setValueAtTime(2000, t);
+  const clickGain = ctx.createGain();
+  clickGain.gain.setValueAtTime(0.0001, t);
+  clickGain.gain.exponentialRampToValueAtTime(0.25, t + 0.001);
+  clickGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.012);
+  click.connect(clickFilter).connect(clickGain).connect(out);
   click.start(t);
   click.stop(t + 0.02);
-
-  // fixed-pitch resonant body — no sweep, so it reads as a knock, not a zap
-  const osc = ctx.createOscillator();
-  osc.type = 'square';
-  osc.frequency.value = 1400;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = 1400;
-  bp.Q.value = 6;
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.5 * vel, t + 0.002);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.045);
-  osc.connect(bp).connect(g).connect(out);
-  osc.start(t);
-  osc.stop(t + 0.05);
 }
 
-function playSnare(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuffer;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = 1800;
-  bp.Q.value = 0.8;
-  const ng = ctx.createGain();
-  ng.gain.setValueAtTime(0.0001, t);
-  ng.gain.exponentialRampToValueAtTime(0.6 * vel, t + 0.005);
-  ng.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
-  noise.connect(bp).connect(ng).connect(out);
+/** Snare: an onset step. `accent` (true only on the shared downbeat, step 0) brightens/thickens the hit a little so the cycle's start still reads distinctly even though the kick already marks it. */
+function playSnare(ctx: AudioContext, t: number, out: AudioNode, accent: boolean): void {
+  const noise = noiseSource(ctx);
+  const noiseFilter = ctx.createBiquadFilter();
+  noiseFilter.type = 'bandpass';
+  noiseFilter.frequency.setValueAtTime(1800, t);
+  noiseFilter.Q.value = 0.7;
+  const noiseGain = ctx.createGain();
+  noiseGain.gain.setValueAtTime(0.0001, t);
+  noiseGain.gain.exponentialRampToValueAtTime(accent ? 0.55 : 0.4, t + 0.002);
+  noiseGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+  noise.connect(noiseFilter).connect(noiseGain).connect(out);
   noise.start(t);
   noise.stop(t + 0.16);
 
   const osc = ctx.createOscillator();
+  const oscGain = ctx.createGain();
   osc.type = 'triangle';
-  osc.frequency.value = 190;
-  const og = ctx.createGain();
-  og.gain.setValueAtTime(0.0001, t);
-  og.gain.exponentialRampToValueAtTime(0.25 * vel, t + 0.004);
-  og.gain.exponentialRampToValueAtTime(0.0001, t + 0.09);
-  osc.connect(og).connect(out);
+  osc.frequency.setValueAtTime(accent ? 210 : 180, t);
+  osc.frequency.exponentialRampToValueAtTime(90, t + 0.08);
+  oscGain.gain.setValueAtTime(0.0001, t);
+  oscGain.gain.exponentialRampToValueAtTime(accent ? 0.32 : 0.22, t + 0.002);
+  oscGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+  osc.connect(oscGain).connect(out);
   osc.start(t);
-  osc.stop(t + 0.1);
+  osc.stop(t + 0.12);
+
+  const res = noiseSource(ctx);
+  const resFilter = ctx.createBiquadFilter();
+  resFilter.type = 'bandpass';
+  resFilter.frequency.setValueAtTime(320, t);
+  resFilter.Q.value = 3.5;
+  const resGain = ctx.createGain();
+  resGain.gain.setValueAtTime(0.0001, t);
+  resGain.gain.exponentialRampToValueAtTime(accent ? 0.16 : 0.11, t + 0.01);
+  resGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+  res.connect(resFilter).connect(resGain).connect(out);
+  res.start(t);
+  res.stop(t + 0.34);
 }
 
-function playHat(ctx: AudioContext, t: number, out: AudioNode, vel: number, open: boolean): void {
-  const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuffer;
-  const hp = ctx.createBiquadFilter();
-  hp.type = 'highpass';
-  hp.frequency.value = 7000;
-  const g = ctx.createGain();
-  const dur = open ? 0.22 : 0.055;
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.35 * vel, t + 0.002);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  noise.connect(hp).connect(g).connect(out);
-  noise.start(t);
-  noise.stop(t + dur + 0.02);
-}
-
-function playConga(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  // noisy attack transient — the "hand hitting skin" contact sound
-  const attack = ctx.createBufferSource();
-  attack.buffer = noiseBuffer;
-  const abp = ctx.createBiquadFilter();
-  abp.type = 'bandpass';
-  abp.frequency.value = 1000;
-  abp.Q.value = 1.2;
-  const ag = ctx.createGain();
-  ag.gain.setValueAtTime(0.0001, t);
-  ag.gain.exponentialRampToValueAtTime(0.35 * vel, t + 0.002);
-  ag.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
-  attack.connect(abp).connect(ag).connect(out);
-  attack.start(t);
-  attack.stop(t + 0.03);
-
-  // pitched membrane body — low-passed to tame the sweep so it reads as a
-  // drum thump rather than a synth glide
-  const osc = ctx.createOscillator();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(220, t);
-  osc.frequency.exponentialRampToValueAtTime(170, t + 0.05);
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.value = 900;
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.55 * vel, t + 0.006);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
-  osc.connect(lp).connect(g).connect(out);
-  osc.start(t);
-  osc.stop(t + 0.16);
-}
-
-function playTom(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  const osc = ctx.createOscillator();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(200, t);
-  osc.frequency.exponentialRampToValueAtTime(85, t + 0.22);
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.6 * vel, t + 0.006);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
-  osc.connect(g).connect(out);
-  osc.start(t);
-  osc.stop(t + 0.32);
-}
-
-function playRimClick(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuffer;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = 3500;
-  bp.Q.value = 3;
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.4 * vel, t + 0.001);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.03);
-  noise.connect(bp).connect(g).connect(out);
-  noise.start(t);
-  noise.stop(t + 0.04);
-}
-
-function playShaker(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  const noise = ctx.createBufferSource();
-  noise.buffer = noiseBuffer;
-  const bp = ctx.createBiquadFilter();
-  bp.type = 'bandpass';
-  bp.frequency.value = 5000;
-  bp.Q.value = 0.5;
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.linearRampToValueAtTime(0.28 * vel, t + 0.015);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
-  noise.connect(bp).connect(g).connect(out);
-  noise.start(t);
-  noise.stop(t + 0.12);
-}
-
-function playMutedTap(ctx: AudioContext, t: number, out: AudioNode, vel: number): void {
-  // soft, short, low-pass-filtered thud — deliberately unobtrusive since
-  // this layer fires more often (11 ticks/cycle) than any other
-  const g = ctx.createGain();
-  g.gain.setValueAtTime(0.0001, t);
-  g.gain.exponentialRampToValueAtTime(0.45 * vel, t + 0.004);
-  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.055);
-  const osc = ctx.createOscillator();
-  osc.type = 'sine';
-  osc.frequency.setValueAtTime(300, t);
-  osc.frequency.exponentialRampToValueAtTime(160, t + 0.05);
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.value = 700;
-  osc.connect(lp).connect(g).connect(out);
-  osc.start(t);
-  osc.stop(t + 0.06);
-}
-
-/** Which sound-synthesis function renders each `LAYER_DEFS` id — see this file's doc comment for why call sites never reach past this map. */
-const SYNTH_MAP: Record<string, (ctx: AudioContext, t: number, out: AudioNode, vel: number) => void> = {
-  anchor: playKick,
-  wood3: playWood,
-  conga4: playConga,
-  snare5: playSnare,
-  tom6: playTom,
-  hat7: (ctx, t, out, vel) => playHat(ctx, t, out, vel, false),
-  rim9: playRimClick,
-  shaker: playShaker,
-  hat_pi: (ctx, t, out, vel) => playHat(ctx, t, out, vel, true),
-  tap11: playMutedTap,
-};
-
-// Drones: not tick-scheduled like the percussion layers — a few
-// continuously running oscillators through a slow-moving filter, gated by
-// the layer's own gain node exactly like everything else, so each fades
-// in/out independently. Each drone layer has its own rootFreq; the three
-// are stacked a fifth apart (root, +5th, +5th again), so any combination
-// that's active still sounds in tune.
-function setupDrone(ctx: AudioContext, layer: Layer): void {
-  const now = ctx.currentTime + 0.1;
-  const root = layer.rootFreq!;
-  const freqs = [root, root * 1.5, root * 2]; // root, fifth, octave
-  const mix = ctx.createGain();
-  mix.gain.value = 0.12;
-  const lp = ctx.createBiquadFilter();
-  lp.type = 'lowpass';
-  lp.frequency.value = 450;
-  const lfo = ctx.createOscillator();
-  lfo.frequency.value = 0.05 + Math.random() * 0.03;
-  const lfoGain = ctx.createGain();
-  lfoGain.gain.value = 140;
-  lfo.connect(lfoGain).connect(lp.frequency);
-  const oscs = freqs.map((f, i) => {
-    const o = ctx.createOscillator();
-    o.type = i === 0 ? 'sawtooth' : 'sine';
-    o.frequency.value = f;
-    o.detune.value = (Math.random() - 0.5) * 6;
-    o.connect(mix);
-    return o;
-  });
-  mix.connect(lp).connect(layer.gainNode!);
-  oscs.forEach((o) => o.start(now));
-  lfo.start(now);
-  layer.droneNodes = { oscs, lfo };
-}
-
-// ---- Layer lifecycle ----
-function activateLayer(ctx: AudioContext, layer: Layer): void {
-  if (layer.active) return;
-  layer.active = true;
-  const now = ctx.currentTime;
-  if (layer.role !== 'drone') {
-    layer.period = cycleDuration / layer.ticks!;
-    layer.tickIndex = Math.ceil((now + 0.1 - globalStart) / layer.period);
+/** Shaker: a rest step. A soft, breathy noise decay (a gentle attack, not a sharp transient) plus a couple of tiny offset bursts to suggest beads rattling. */
+function playShaker(ctx: AudioContext, t: number, out: AudioNode): void {
+  const bursts = [
+    { offset: 0, gain: 0.13, dur: 0.13 },
+    { offset: 0.015, gain: 0.06, dur: 0.09 },
+    { offset: 0.03, gain: 0.035, dur: 0.06 },
+  ];
+  for (const b of bursts) {
+    const bt = t + b.offset;
+    const noise = noiseSource(ctx);
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(6500, bt);
+    filter.Q.value = 0.5;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, bt);
+    gain.gain.linearRampToValueAtTime(b.gain, bt + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, bt + b.dur);
+    noise.connect(filter).connect(gain).connect(out);
+    noise.start(bt);
+    noise.stop(bt + b.dur + 0.02);
   }
-  const rampTime = layer.role === 'drone' ? 1.4 : 0.6;
-  const target = layer.role === 'drone' ? layer.baseGain : 1.0;
-  layer.gainNode!.gain.cancelScheduledValues(now);
-  layer.gainNode!.gain.setTargetAtTime(target, now, rampTime);
-}
-
-function deactivateLayer(ctx: AudioContext, layer: Layer, hard = false): void {
-  if (!layer.active) return;
-  layer.active = false;
-  const now = ctx.currentTime;
-  const rampTime = hard ? (layer.role === 'drone' ? 0.35 : 0.12) : layer.role === 'drone' ? 1.8 : 0.6;
-  layer.gainNode!.gain.cancelScheduledValues(now);
-  layer.gainNode!.gain.setTargetAtTime(0.0, now, rampTime);
-}
-
-function buildLayers(ctx: AudioContext): void {
-  layers = LAYER_DEFS.map((def) => {
-    const layer: Layer = { ...def, active: false, tickIndex: 0, period: 0, gainNode: null };
-    layer.gainNode = ctx.createGain();
-    layer.gainNode.gain.value = 0;
-    layer.gainNode.connect(masterGain!);
-    if (layer.role === 'drone') setupDrone(ctx, layer);
-    return layer;
-  });
 }
 
 // ---- Scheduler ----
-function scheduleTick(ctx: AudioContext, layer: Layer, t: number): void {
-  const jitter = layer.role === 'anchor' ? 0 : (Math.random() - 0.5) * layer.period * 0.03;
-  const vel = layer.role === 'anchor' ? 1 : 0.85 + Math.random() * 0.3;
-  const playT = t + jitter;
-  SYNTH_MAP[layer.id](ctx, playT, layer.gainNode!, (vel * layer.baseGain) / 0.85);
+// A standard lookahead scheduler (schedule everything due within
+// `SCHEDULE_AHEAD_SEC`, on a `setInterval` polling every
+// `SCHEDULER_INTERVAL_MS`) — same shape the earlier version of this file
+// used, just driving one pattern instead of several independent layers.
+
+function scheduleStep(ctx: AudioContext, out: AudioNode, step: number, t: number): void {
+  const onset = currentPattern[step] === 1;
+  if (step === 0) playKick(ctx, t, out);
+  if (onset) playSnare(ctx, t, out, step === 0);
+  else playShaker(ctx, t, out);
 }
 
 function schedulerLoop(): void {
-  if (!audioCtx) return;
+  if (!audioCtx || !masterGain) return;
   const ctx = audioCtx;
-  const now = ctx.currentTime;
-  layers.forEach((layer) => {
-    if (!layer.active || layer.role === 'drone') return;
-    let nextTime = globalStart + layer.tickIndex * layer.period;
-    while (nextTime < now + SCHEDULER_LOOKAHEAD_SEC) {
-      scheduleTick(ctx, layer, nextTime);
-      layer.tickIndex++;
-      nextTime = globalStart + layer.tickIndex * layer.period;
-    }
-  });
-}
-
-// ---- Evolution ----
-// Decides, roughly every couple of musical cycles, which layers should be
-// audible right now. `densityTarget` is `externalDensityTarget` (the
-// caller's density input) plus a little jitter (`DENSITY_JITTER`) for
-// organic variation — see this file's doc comment for why the target
-// itself is entirely the caller's decision, not this module's.
-function evolve(): void {
-  if (!audioCtx) return;
-  const ctx = audioCtx;
-  const densityTarget = clamp01(externalDensityTarget + (Math.random() - 0.5) * DENSITY_JITTER);
-
-  const desired = Math.round(1 + densityTarget * (layers.length - 1));
-  const activeLayers = layers.filter((l) => l.active);
-  const inactiveLayers = layers.filter((l) => !l.active);
-  const dropCount = activeLayers.length - desired;
-
-  if (dropCount > 0) {
-    // Remove however many are needed to hit the target in ONE step, not one
-    // per evolve() call — otherwise a big density drop trickles off over
-    // many calls and layers stop at different times.
-    const isBreakdown = dropCount >= 2;
-    let candidates = activeLayers.filter((l) => l.role !== 'anchor');
-    candidates.sort(() => Math.random() - 0.5);
-    let toRemove = candidates.slice(0, dropCount);
-    if (toRemove.length < dropCount && densityTarget < 0.1) {
-      const anchorCandidates = activeLayers.filter((l) => l.role === 'anchor');
-      toRemove = toRemove.concat(anchorCandidates.slice(0, dropCount - toRemove.length));
-    }
-    toRemove.forEach((l) => deactivateLayer(ctx, l, isBreakdown));
-  } else if (dropCount < 0) {
-    const addCount = -dropCount;
-    const shuffled = [...inactiveLayers].sort(() => Math.random() - 0.5);
-    shuffled.slice(0, addCount).forEach((l) => activateLayer(ctx, l));
-  } else if (Math.random() < 0.25) {
-    // swap a texture/color layer for variety even at stable density
-    const swappable = activeLayers.filter((l) => l.role !== 'anchor');
-    if (swappable.length && inactiveLayers.length) {
-      deactivateLayer(ctx, swappable[Math.floor(Math.random() * swappable.length)]);
-      activateLayer(ctx, inactiveLayers[Math.floor(Math.random() * inactiveLayers.length)]);
-    }
-  }
-
-  // safety net: never let everything go silent for long
-  if (layers.every((l) => !l.active)) {
-    activateLayer(ctx, layers.find((l) => l.role === 'anchor')!);
+  while (nextNoteTime < ctx.currentTime + SCHEDULE_AHEAD_SEC) {
+    scheduleStep(ctx, masterGain, currentStep % currentPattern.length, nextNoteTime);
+    nextNoteTime += 60 / currentBpm;
+    currentStep++;
   }
 }
 
 // ---- Public API ----
 
 /**
- * Lazily creates the `AudioContext` + master gain and starts the engine.
- * Deliberately only ever called from a real live-play entry point
- * (`main.ts`'s `beginPuzzle`/`startBlitzRun`), themselves only ever reached
- * from a button click — constructing an `AudioContext` before any user
- * gesture is what mobile Safari's autoplay policy blocks, same reasoning as
- * `audio/sfx.ts`'s `ensureContext`. A no-op if already running (so a
- * defensive extra call from some other code path can't double-start it) or
- * if Web Audio isn't available at all.
+ * Lazily creates the `AudioContext` + master gain, rolls a fresh random
+ * Euclidean pattern, and starts the scheduler at `bpm` (Blitz's chosen pace
+ * — see `game/blitz.ts`'s `BLITZ_PACE_MUSIC_BPM`; tempo is fixed for the
+ * whole run, only the rhythm itself changes mid-run, via
+ * `regenerateBlitzRhythm`). Deliberately only ever called from a real
+ * live-play entry point (`main.ts`'s `startBlitzRun`), itself only ever
+ * reached from a button click — constructing an `AudioContext` before any
+ * user gesture is what mobile Safari's autoplay policy blocks, same
+ * reasoning as `audio/sfx.ts`'s `ensureContext`. A no-op if already running
+ * (so a defensive extra call from some other code path can't double-start
+ * it) or if Web Audio isn't available at all.
  */
-export function startMusic(): void {
+export function startMusic(bpm: number): void {
   if (running) return;
   const Ctor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctor) return;
   if (stopFadeTimer !== null) {
-    // A stop's fade-out was still pending (a very fast Rematch/Play Again) —
-    // cancel it outright rather than letting it tear down the engine we're
-    // about to (re)build a moment later.
+    // A stop's fade-out was still pending (a very fast Play Again) — cancel
+    // it outright rather than letting it tear down the engine we're about to
+    // (re)build a moment later.
     clearTimeout(stopFadeTimer);
     stopFadeTimer = null;
   }
@@ -495,16 +300,13 @@ export function startMusic(): void {
   masterGain.connect(audioCtx.destination);
   noiseBuffer = makeNoiseBuffer(audioCtx);
 
-  cycleDuration = 2.0;
-  globalStart = audioCtx.currentTime + 0.2;
-  buildLayers(audioCtx);
-
-  // kick anchor off immediately; everything else starts silent and evolves in
-  activateLayer(audioCtx, layers.find((l) => l.role === 'anchor')!);
+  currentBpm = bpm;
+  currentPattern = generateEuclideanPattern();
+  currentStep = 0;
+  nextNoteTime = audioCtx.currentTime + 0.05;
 
   schedulerTimer = setInterval(schedulerLoop, SCHEDULER_INTERVAL_MS);
-  evolveTimer = setInterval(evolve, cycleDuration * 1000 * 2);
-  evolve(); // kick off the first evolution immediately rather than waiting a full interval
+  schedulerLoop(); // schedule the first steps immediately rather than waiting a full interval
 
   running = true;
 }
@@ -520,9 +322,7 @@ export function stopMusic(): void {
   running = false;
   const ctx = audioCtx;
   if (schedulerTimer !== null) clearInterval(schedulerTimer);
-  if (evolveTimer !== null) clearInterval(evolveTimer);
   schedulerTimer = null;
-  evolveTimer = null;
   if (ctx && masterGain) {
     masterGain.gain.cancelScheduledValues(ctx.currentTime);
     masterGain.gain.setTargetAtTime(0, ctx.currentTime, STOP_FADE_SEC / 3);
@@ -534,22 +334,25 @@ export function stopMusic(): void {
       audioCtx = null;
       masterGain = null;
       noiseBuffer = null;
-      layers = [];
     }
   }, STOP_FADE_SEC * 1000);
 }
 
 /**
- * Sets the density input `evolve()` builds each cycle's layer mix around
- * (0 = sparsest, 1 = densest — see this file's doc comment for who decides
- * what this value should be). Cheap and safe to call every frame (Blitz's
- * live countdown does exactly that) — it only ever writes a number; the
- * actual layer add/remove work happens on `evolve()`'s own slower cadence.
- * A no-op before `startMusic()` — the value is simply remembered for the
- * first `evolve()` call to pick up once the engine starts.
+ * Rerolls the current run's rhythm to a brand-new random Euclidean pattern
+ * (fresh `n`/`k`/rotation — see `generateEuclideanPattern`), at the same
+ * tempo the engine already started at. `main.ts`'s `advanceBlitzPuzzle`
+ * calls this every time a new puzzle appears (including the very first one
+ * of a run — though that one's initial pattern already comes from
+ * `startMusic` itself, since it's called before the engine exists yet, so
+ * this is a harmless no-op there). A no-op while the engine isn't running,
+ * so a stray call after `stopMusic()` can't resurrect a pattern nothing is
+ * scheduling any more.
  */
-export function setMusicDensity(target: number): void {
-  externalDensityTarget = clamp01(target);
+export function regenerateBlitzRhythm(): void {
+  if (!running) return;
+  currentPattern = generateEuclideanPattern();
+  currentStep = 0;
 }
 
 /** Sets the global music volume (0-1), applied live via a short ramp — same shape as `sfx.ts`'s `setSfxVolume`. Safe to call before the engine has ever started. */
