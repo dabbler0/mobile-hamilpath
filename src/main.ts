@@ -1,4 +1,4 @@
-import { regenerateBlitzRhythm, setMusicVolume, startMusic, stopMusic } from './audio/music';
+import { regenerateBlitzRhythm, setBassRemainingMs, setMusicVolume, startMusic, stopMusic } from './audio/music';
 import { playSfx, setSfxVolume } from './audio/sfx';
 import { confirmDialog } from './dialog';
 import { BLITZ_PACE_MUSIC_BPM, BLITZ_PACE_OPTIONS, BLITZ_PACE_PARAMS, createBlitzSequence, DEFAULT_BLITZ_PACE, paceForParams, type BlitzEvent, type BlitzPace, type BlitzParams } from './game/blitz';
@@ -1633,6 +1633,13 @@ function blitzTick(): void {
   if (mode !== 'blitz') return;
   const remaining = blitzDeadline - performance.now();
   updateBlitzHeader();
+  // Feeds the live countdown into the bass line's own urgency curve
+  // (`audio/music.ts`'s `bassProbability`) every frame, same cadence the
+  // header readout itself already updates at — see CLAUDE.md's "Live-play
+  // music" for why this is what makes the bass line fade in as time runs low
+  // (and back out again right after a puzzle's own time-back bonus lands)
+  // with no separate per-puzzle reset needed.
+  setBassRemainingMs(remaining);
   if (remaining <= 0) {
     void endBlitzRun();
     return;
