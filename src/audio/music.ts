@@ -24,6 +24,25 @@
  * called from `main.ts`'s `advanceBlitzPuzzle`), and its tempo is fixed for
  * the whole run, set once by `startMusic`'s `bpm` argument (Blitz's pace
  * preset — see `game/blitz.ts`'s `BLITZ_PACE_MUSIC_BPM`).
+ *
+ * **Bass line**: also ported from the same prototype (a separate "Euclidean
+ * Timeline Generator" variant that added a walking bass + chord progression
+ * on top of the percussion) — but only its harmonic engine (the
+ * voice-leading chord walk, see "Chord walk" below) and its "every 4 pulses,
+ * root/5th only" bass strategy, with a chromatic passing tone approaching
+ * each note; the prototype's piano voice, and every *other* bass strategy it
+ * offered, aren't ported at all. Unlike the prototype's bass (which plays
+ * unconditionally, every single 4-pulse cell), this port makes each cell's
+ * note a coin flip (`bassProbability`) driven by how much time is left on
+ * the run's clock (`setBassRemainingMs`, called every frame from `main.ts`'s
+ * `blitzTick`): silent while there's a comfortable cushion of time left,
+ * then increasingly likely to sound as that cushion erodes, reaching
+ * (arbitrarily close to) certain right as the clock would hit zero — a
+ * rising sense of urgency that tracks the actual danger of the run ending,
+ * not just elapsed wall-clock time. See `bassProbability`'s own doc comment
+ * for why a fresh puzzle's own time-back bonus is what makes the bass line
+ * go quiet again immediately after each puzzle starts, with no separate
+ * "reset" of its own needed.
  */
 
 // ---- Pattern generation ----
@@ -104,6 +123,263 @@ function generateEuclideanPattern(): number[] {
   return rotateSteps(base, rotation);
 }
 
+// ---- Chord walk (bass line harmony) ----
+// Ported from the prototype's own voice-leading chord generator, trimmed to
+// only what the bass line needs: each step just wants a chord's root/3rd/
+// 5th/7th in bass register (`byRole`), not a display name or a separate
+// mid-register comping voicing (those existed only for the prototype's
+// piano, which this port drops — see file doc comment).
+//
+// Home key = (tonic, mode). Foreign key = parallel minor if home is major,
+// else relative major (tonic+3) if home is minor. Candidate pool = home ∪
+// foreign diatonic 7ths, minus the current chord. Each candidate's cost is
+// the cheapest of 24 possible voice/note reassignments from the current
+// voicing (`bestVoicing`), weighted toward smooth motion; a candidate that's
+// foreign-only is discounted by `CHORD_PULL`. Landing on a foreign-only
+// chord moves the key there. Whenever the current chord is a dominant 7th,
+// the major triad it would resolve to (a 5th below) gets a strong extra
+// probability boost, so V7→I cadences happen often without being forced
+// every time.
+type ChordQualityId = 'maj7' | 'min7' | 'dom7' | 'm7b5' | 'minMaj7' | 'augMaj7' | 'dim7';
+type KeyMode = 'major' | 'minor';
+
+interface ChordOffset {
+  offset: number;
+  q: ChordQualityId;
+}
+interface KeyOrigin {
+  tonic: number;
+  mode: KeyMode;
+  isHomeKey: boolean;
+}
+interface PoolChord {
+  root: number;
+  q: ChordQualityId;
+  pcs: number[];
+  origins: KeyOrigin[];
+}
+interface ChordCandidate extends PoolChord {
+  cost: number;
+  newVoicing: number[];
+  byRole: number[];
+  home: boolean;
+  raw: number;
+  prob: number;
+}
+interface VoicingResult {
+  cost: number;
+  newVoicing: number[];
+  byRole: number[];
+}
+
+const QUALITY: Record<ChordQualityId, { intervals: number[] }> = {
+  maj7: { intervals: [0, 4, 7, 11] },
+  min7: { intervals: [0, 3, 7, 10] },
+  dom7: { intervals: [0, 4, 7, 10] },
+  m7b5: { intervals: [0, 3, 6, 10] },
+  minMaj7: { intervals: [0, 3, 7, 11] },
+  augMaj7: { intervals: [0, 4, 8, 11] },
+  dim7: { intervals: [0, 3, 6, 9] },
+};
+// Diatonic 7th chords built on each scale degree, byRole-indexed [root, 3rd, 5th, 7th].
+const MAJOR_OFFSETS: ChordOffset[] = [
+  { offset: 0, q: 'maj7' },
+  { offset: 2, q: 'min7' },
+  { offset: 4, q: 'min7' },
+  { offset: 5, q: 'maj7' },
+  { offset: 7, q: 'dom7' },
+  { offset: 9, q: 'min7' },
+  { offset: 11, q: 'm7b5' },
+];
+const MINOR_OFFSETS: ChordOffset[] = [ // harmonic minor
+  { offset: 0, q: 'minMaj7' },
+  { offset: 2, q: 'm7b5' },
+  { offset: 3, q: 'augMaj7' },
+  { offset: 5, q: 'min7' },
+  { offset: 7, q: 'dom7' },
+  { offset: 8, q: 'maj7' },
+  { offset: 11, q: 'dim7' },
+];
+const CHORD_TEMPERATURE = 2.0; // matches the prototype's default "greedy <-> chaotic" slider position
+const CHORD_PULL = 0.2; // matches the prototype's default "rare <-> frequent" key-change slider position
+const DOMINANT_RESOLUTION_BOOST = 40;
+
+// The bass is locked to this fixed 2-octave window (MIDI 24-47, roughly
+// C1-B2) — the voice-leading walk has no register ceiling of its own, so
+// without this a long enough run could drift the bass uncomfortably high or
+// low over many chord changes.
+const BASS_RANGE_LOW = 24;
+const BASS_RANGE_HIGH = 47;
+function wrapToBassRange(midi: number): number {
+  while (midi < BASS_RANGE_LOW) midi += 12;
+  while (midi > BASS_RANGE_HIGH) midi -= 12;
+  return midi;
+}
+
+function buildKeyChords(tonic: number, mode: KeyMode): { root: number; q: ChordQualityId; pcs: number[] }[] {
+  const offsets = mode === 'major' ? MAJOR_OFFSETS : MINOR_OFFSETS;
+  return offsets.map((o) => {
+    const root = (tonic + o.offset + 120) % 12;
+    return { root, q: o.q, pcs: QUALITY[o.q].intervals.map((iv) => (root + iv) % 12) };
+  });
+}
+
+function foreignKeyFor(tonic: number, mode: KeyMode): { tonic: number; mode: KeyMode } {
+  return mode === 'major' ? { tonic, mode: 'minor' } : { tonic: (tonic + 3) % 12, mode: 'major' };
+}
+
+function buildChordPool(tonic: number, mode: KeyMode): PoolChord[] {
+  const foreign = foreignKeyFor(tonic, mode);
+  const keyDefs: { tonic: number; mode: KeyMode; isHomeKey: boolean }[] = [
+    { tonic, mode, isHomeKey: true },
+    { tonic: foreign.tonic, mode: foreign.mode, isHomeKey: false },
+  ];
+  const map = new Map<string, PoolChord>();
+  keyDefs.forEach((k) => {
+    buildKeyChords(k.tonic, k.mode).forEach((ch) => {
+      const key = `${ch.root}|${ch.q}`;
+      if (!map.has(key)) map.set(key, { root: ch.root, q: ch.q, pcs: ch.pcs, origins: [] });
+      map.get(key)!.origins.push({ tonic: k.tonic, mode: k.mode, isHomeKey: k.isHomeKey });
+    });
+  });
+  return [...map.values()];
+}
+
+function isHomeChord(c: PoolChord, tonic: number, mode: KeyMode): boolean {
+  return c.origins.some((o) => o.tonic === tonic && o.mode === mode);
+}
+
+function permutations(arr: number[]): number[][] {
+  if (arr.length <= 1) return [arr];
+  const out: number[][] = [];
+  arr.forEach((item, i) => {
+    const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+    permutations(rest).forEach((p) => out.push([item, ...p]));
+  });
+  return out;
+}
+const PERMS4 = permutations([0, 1, 2, 3]);
+
+function pcDist(a: number, b: number): number {
+  let d = (((b - a) % 12) + 12) % 12;
+  if (d > 6) d -= 12;
+  if (Math.abs(d) === 6 && Math.random() < 0.5) d = -d; // tritone: random direction
+  return d;
+}
+
+/** The cheapest of the 24 ways to reassign the current 4-note voicing onto a target chord's pitch classes, by total semitone movement. */
+function bestVoicing(currentVoicing: number[], targetPCs: number[]): VoicingResult {
+  let best: VoicingResult | null = null;
+  for (const perm of PERMS4) {
+    let cost = 0;
+    const newV: number[] = [0, 0, 0, 0]; // keyed by original voice index (needed for continuity into the next call)
+    const byRole: number[] = [0, 0, 0, 0]; // keyed by chord-tone role: 0=root, 1=3rd, 2=5th, 3=7th
+    perm.forEach((curIdx, targetIdx) => {
+      const curPitch = currentVoicing[curIdx];
+      const d = pcDist(((curPitch % 12) + 12) % 12, targetPCs[targetIdx]);
+      cost += Math.abs(d);
+      const newPitch = curPitch + d;
+      newV[curIdx] = newPitch;
+      byRole[targetIdx] = newPitch;
+    });
+    if (!best || cost < best.cost) best = { cost, newVoicing: newV, byRole };
+  }
+  return best as VoicingResult;
+}
+
+function weightedPick<T extends { prob: number }>(items: T[]): T {
+  const total = items.reduce((s, i) => s + i.prob, 0);
+  let r = Math.random() * total;
+  for (const it of items) {
+    r -= it.prob;
+    if (r <= 0) return it;
+  }
+  return items[items.length - 1];
+}
+
+// Persistent harmonic-walk state (the chord/tonic/mode this all evolves from).
+let chordTonic = 0;
+let chordMode: KeyMode = 'major';
+let chordCurrentChord: { root: number; q: ChordQualityId } = { root: 0, q: 'maj7' };
+let chordCurrentVoicing: number[] = [60, 64, 67, 71];
+
+function initChordWalk(): void {
+  chordTonic = Math.floor(Math.random() * 12);
+  chordMode = 'major';
+  chordCurrentChord = { root: chordTonic, q: 'maj7' };
+  chordCurrentVoicing = QUALITY.maj7.intervals.map((iv) => 60 + chordTonic + iv);
+}
+
+/**
+ * One step of the voice-leading walk: picks the next chord, updates the
+ * persistent tonic/mode/voicing, and returns that chord's 4 tones
+ * (root/3rd/5th/7th) transposed 3 octaves down into the fixed bass register
+ * — everything `maybeScheduleBass` needs. Mirrors the prototype's own
+ * `generateNextChordStep` exactly, minus the piano-register/display-name
+ * outputs this port has no use for.
+ */
+function generateNextChordStep(): { byRole: number[] } {
+  const pool = buildChordPool(chordTonic, chordMode);
+  // V7 → I: if the current chord is a dominant 7th, the major triad a 5th below its root
+  // (i.e. G7's root+5=C, the "I" it resolves to) gets a strong probability boost below.
+  const dominantResolutionRoot = chordCurrentChord.q === 'dom7' ? (chordCurrentChord.root + 5) % 12 : null;
+  const candidates: ChordCandidate[] = pool
+    .filter((c) => !(c.root === chordCurrentChord.root && c.q === chordCurrentChord.q))
+    .map((c) => {
+      const { cost, newVoicing, byRole } = bestVoicing(chordCurrentVoicing, c.pcs);
+      const home = isHomeChord(c, chordTonic, chordMode);
+      let raw = Math.exp(-cost / CHORD_TEMPERATURE) * (home ? 1 : CHORD_PULL);
+      const isDominantResolution = dominantResolutionRoot !== null && c.root === dominantResolutionRoot && c.q === 'maj7';
+      if (isDominantResolution) raw *= DOMINANT_RESOLUTION_BOOST;
+      return { ...c, cost, newVoicing, byRole, home, raw, prob: 0 };
+    });
+  const total = candidates.reduce((s, c) => s + c.raw, 0);
+  candidates.forEach((c) => {
+    c.prob = c.raw / total;
+  });
+  const chosen = weightedPick(candidates);
+
+  chordCurrentVoicing = chosen.newVoicing;
+  chordCurrentChord = { root: chosen.root, q: chosen.q };
+  if (!chosen.home) {
+    // A foreign-only chord was chosen: the walk moves into that key. `chosen.origins`
+    // always has a non-home entry here by construction (that's exactly what "not home"
+    // means), so this is never undefined in practice.
+    const landing = chosen.origins.find((o) => !o.isHomeKey)!;
+    chordTonic = landing.tonic;
+    chordMode = landing.mode;
+  }
+
+  const bassByRole = chosen.byRole.map((p) => wrapToBassRange(p - 36));
+  return { byRole: bassByRole };
+}
+
+function midiToFreq(midi: number): number {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+// ---- Bass line urgency ----
+// How close to the run's clock hitting zero decides how likely the bass
+// line is to actually sound on any given 4-pulse cell — see `maybeScheduleBass`.
+
+/**
+ * Above `BASS_SAFE_MS` of remaining time, the bass line is completely
+ * silent (probability 0); below it, the probability of a given cell
+ * sounding rises linearly, reaching 1 exactly as the remaining time hits 0.
+ * "Whenever a new puzzle is started ... start without bassline" isn't a
+ * separate reset anywhere in this file — it falls out of this one formula
+ * for free, because a fresh puzzle's own time-back bonus
+ * (`advanceBlitzPuzzle`'s `awardMs`) routinely pushes the remaining time
+ * straight back over `BASS_SAFE_MS` the instant it's credited, well before
+ * the bass line's own scheduler next runs.
+ */
+const BASS_SAFE_MS = 20000;
+function bassProbability(remainingMs: number): number {
+  if (remainingMs >= BASS_SAFE_MS) return 0;
+  if (remainingMs <= 0) return 1;
+  return 1 - remainingMs / BASS_SAFE_MS;
+}
+
 // ---- Module state ----
 // One always-at-most-one-running engine, same "single shared context" shape
 // as `audio/sfx.ts` and the earlier version of this file.
@@ -121,6 +397,23 @@ let stopFadeTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Mirrors whatever `setMusicVolume` was last called with, even before `audioCtx` exists — same pattern as `sfx.ts`'s `currentVolume`. */
 let currentVolume = 0.5;
+
+// Bass line playback state (see "Chord walk" and "Bass line urgency" above).
+// `activeChord`/`nextChord` are one chord-change ahead of each other, same
+// lookahead shape the prototype used, so a passing tone that crosses into a
+// new chord always has a real target to approach.
+let activeChord: { byRole: number[] } | null = null;
+let nextChord: { byRole: number[] } | null = null;
+/** True only for the very first `currentStep % chordChangeInterval === 0` after `startMusic` primes `activeChord`/`nextChord` — skips one redundant advance, since those two are already freshly generated. */
+let isFirstChordSegment = true;
+/** 0 = the next main bass note is the chord's root, 1 = its 5th. Only flips when a main note actually plays, so a skipped (probability-rolled-no) cell doesn't throw off the alternation. */
+let bassRootFifthToggle = 0;
+/** Decided one pulse ahead, at each cell's approach slot — whether the upcoming main slot (and the passing tone leading into it, scheduled right now) actually sounds. */
+let bassNextMainWillPlay = false;
+/** The last main bass note actually played — anchors which direction (up or down) the next passing tone approaches its target from. */
+let lastMainBassMidi = 0;
+/** Latest value from `setBassRemainingMs` — how much time is left on the run's clock, fed into `bassProbability`. `Infinity` until Blitz reports a real deadline, which reads as "always safe, never play". */
+let bassRemainingMs = Infinity;
 
 const SCHEDULE_AHEAD_SEC = 0.1;
 const SCHEDULER_INTERVAL_MS = 25;
@@ -244,6 +537,80 @@ function playShaker(ctx: AudioContext, t: number, out: AudioNode): void {
   }
 }
 
+/**
+ * Bass note: sine+triangle blend through a lowpass filter, plus a quiet
+ * triangle doubling an octave up for presence this low, plus a very short
+ * filtered-noise "pluck" transient at the very start — ported verbatim from
+ * the prototype's `playBass`. The amplitude envelope has a proper
+ * plucked-string shape: fast attack, a quick initial decay down to a lower
+ * sustain plateau, then a slower fade toward `dur`.
+ */
+function playBass(ctx: AudioContext, t: number, freq: number, dur: number, out: AudioNode): void {
+  const attack = 0.006;
+  const initialDecayEnd = t + 0.05;
+  const sustainUntil = t + dur * 0.55;
+  const releaseEnd = t + dur;
+  const peak = 0.62;
+  const sustainLevel = peak * 0.62;
+
+  const osc = ctx.createOscillator();
+  const osc2 = ctx.createOscillator();
+  const oscUp = ctx.createOscillator();
+  const filter = ctx.createBiquadFilter();
+  const gain = ctx.createGain();
+  const gainUp = ctx.createGain();
+
+  osc.type = 'sine';
+  osc2.type = 'triangle';
+  oscUp.type = 'triangle';
+  osc.frequency.setValueAtTime(freq, t);
+  osc2.frequency.setValueAtTime(freq, t);
+  oscUp.frequency.setValueAtTime(freq * 2, t);
+
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(1900, t);
+  filter.frequency.exponentialRampToValueAtTime(700, initialDecayEnd);
+  filter.frequency.exponentialRampToValueAtTime(500, sustainUntil);
+  filter.frequency.exponentialRampToValueAtTime(220, releaseEnd);
+  filter.Q.value = 0.8;
+
+  gain.gain.setValueAtTime(0.0001, t);
+  gain.gain.exponentialRampToValueAtTime(peak, t + attack);
+  gain.gain.exponentialRampToValueAtTime(sustainLevel, initialDecayEnd);
+  gain.gain.setValueAtTime(sustainLevel, sustainUntil);
+  gain.gain.exponentialRampToValueAtTime(0.0001, releaseEnd);
+
+  gainUp.gain.setValueAtTime(0.0001, t);
+  gainUp.gain.exponentialRampToValueAtTime(peak * 0.26, t + attack);
+  gainUp.gain.exponentialRampToValueAtTime(sustainLevel * 0.26, initialDecayEnd);
+  gainUp.gain.setValueAtTime(sustainLevel * 0.26, sustainUntil);
+  gainUp.gain.exponentialRampToValueAtTime(0.0001, releaseEnd);
+
+  osc.connect(filter);
+  osc2.connect(filter);
+  filter.connect(gain).connect(out);
+  oscUp.connect(gainUp).connect(out);
+  osc.start(t);
+  osc2.start(t);
+  oscUp.start(t);
+  osc.stop(releaseEnd + 0.05);
+  osc2.stop(releaseEnd + 0.05);
+  oscUp.stop(releaseEnd + 0.05);
+
+  const pluck = noiseSource(ctx);
+  const pluckFilter = ctx.createBiquadFilter();
+  pluckFilter.type = 'bandpass';
+  pluckFilter.frequency.setValueAtTime(1800, t);
+  pluckFilter.Q.value = 0.6;
+  const pluckGain = ctx.createGain();
+  pluckGain.gain.setValueAtTime(0.0001, t);
+  pluckGain.gain.exponentialRampToValueAtTime(0.22, t + 0.002);
+  pluckGain.gain.exponentialRampToValueAtTime(0.0001, t + 0.015);
+  pluck.connect(pluckFilter).connect(pluckGain).connect(out);
+  pluck.start(t);
+  pluck.stop(t + 0.02);
+}
+
 // ---- Scheduler ----
 // A standard lookahead scheduler (schedule everything due within
 // `SCHEDULE_AHEAD_SEC`, on a `setInterval` polling every
@@ -257,12 +624,81 @@ function scheduleStep(ctx: AudioContext, out: AudioNode, step: number, t: number
   else playShaker(ctx, t, out);
 }
 
+/**
+ * Advances the chord walk once per full percussion-pattern loop
+ * (`currentPattern.length` pulses) — the prototype's default "chord changes
+ * every full loop" cadence, the only one this port keeps (its other fixed
+ * cadences, and the UI to pick between them, aren't ported). The very first
+ * time this fires (`isFirstChordSegment`) is a no-op: `startMusic` already
+ * primed both `activeChord` and `nextChord` before the scheduler's first
+ * tick, so advancing here too would skip a chord.
+ */
+function maybeAdvanceChord(): void {
+  const interval = currentPattern.length || 1;
+  if (currentStep % interval !== 0) return;
+  if (isFirstChordSegment) {
+    isFirstChordSegment = false;
+    return;
+  }
+  activeChord = nextChord;
+  nextChord = generateNextChordStep();
+}
+
+/**
+ * The bass line: a chord tone (root, then 5th, alternating) every 4 pulses,
+ * each preceded by a chromatic passing tone one pulse earlier — the
+ * prototype's "every 4 pulses, root/5th only" bass strategy, the only one
+ * this port keeps (see file doc comment). Unlike the prototype, whether a
+ * given 4-pulse cell sounds at all is a coin flip (`bassProbability`,
+ * driven by `setBassRemainingMs`) rather than unconditional.
+ *
+ * The flip happens at the *approach* slot (`posInCell === 3`, one pulse
+ * before the main note) rather than at the main slot itself, because the
+ * passing tone has to be scheduled a pulse ahead of the note it approaches
+ * — so there has to be something to decide before that scheduling call.
+ * `bassNextMainWillPlay` carries the decision forward exactly one pulse to
+ * the main slot. `bassRootFifthToggle` only flips when a main note actually
+ * plays, so a skipped cell doesn't disturb the root/5th alternation — the
+ * next cell that *does* play picks up right where it left off.
+ */
+function maybeScheduleBass(ctx: AudioContext, out: AudioNode, t: number, secondsPerPulse: number): void {
+  if (!activeChord || !nextChord) return;
+  const posInCell = currentStep % 4;
+  if (posInCell === 0) {
+    if (!bassNextMainWillPlay) return;
+    bassNextMainWillPlay = false;
+    const roleIdx = bassRootFifthToggle ? 2 : 0; // byRole: [root, 3rd, 5th, 7th]
+    const note = activeChord.byRole[roleIdx];
+    lastMainBassMidi = note;
+    const dur = Math.min(secondsPerPulse * 3.6, 3.0); // ring for most of the 4-pulse cell
+    playBass(ctx, t, midiToFreq(note), dur, out);
+    bassRootFifthToggle = bassRootFifthToggle ? 0 : 1;
+  } else if (posInCell === 3) {
+    if (Math.random() >= bassProbability(bassRemainingMs)) return;
+    bassNextMainWillPlay = true;
+    // Peek at which chord the *upcoming* main note (one pulse from now) belongs to — it may
+    // already be `nextChord` if that pulse crosses a chord-change boundary.
+    const interval = currentPattern.length || 1;
+    const crossesChord = Math.floor(currentStep / interval) !== Math.floor((currentStep + 1) / interval);
+    const targetChord = crossesChord ? nextChord : activeChord;
+    const peekRoleIdx = bassRootFifthToggle ? 2 : 0; // the toggle hasn't flipped yet, so it already previews the upcoming role
+    const target = targetChord.byRole[peekRoleIdx];
+    const direction = target >= lastMainBassMidi ? 1 : -1;
+    const passingPitch = target - direction;
+    const dur = Math.min(secondsPerPulse * 0.9, 1.0);
+    playBass(ctx, t, midiToFreq(passingPitch), dur, out);
+  }
+}
+
 function schedulerLoop(): void {
   if (!audioCtx || !masterGain) return;
   const ctx = audioCtx;
+  const secondsPerPulse = 60 / currentBpm;
   while (nextNoteTime < ctx.currentTime + SCHEDULE_AHEAD_SEC) {
+    maybeAdvanceChord();
     scheduleStep(ctx, masterGain, currentStep % currentPattern.length, nextNoteTime);
-    nextNoteTime += 60 / currentBpm;
+    maybeScheduleBass(ctx, masterGain, nextNoteTime, secondsPerPulse);
+    nextNoteTime += secondsPerPulse;
     currentStep++;
   }
 }
@@ -304,6 +740,20 @@ export function startMusic(bpm: number): void {
   currentPattern = generateEuclideanPattern();
   currentStep = 0;
   nextNoteTime = audioCtx.currentTime + 0.05;
+
+  // Bass line: a fresh harmonic walk each run, primed one chord-change ahead
+  // (`activeChord`/`nextChord`) the same way the prototype's own
+  // `startPlayback` did — see `maybeAdvanceChord`'s doc comment for why that
+  // makes its first invocation a no-op. Starts silent (`bassNextMainWillPlay
+  // = false`) regardless of `bassRemainingMs`, which is exactly the "start
+  // without bassline" state a run's very first puzzle wants.
+  initChordWalk();
+  isFirstChordSegment = true;
+  activeChord = generateNextChordStep();
+  nextChord = generateNextChordStep();
+  bassRootFifthToggle = 0;
+  bassNextMainWillPlay = false;
+  lastMainBassMidi = activeChord.byRole[0];
 
   schedulerTimer = setInterval(schedulerLoop, SCHEDULER_INTERVAL_MS);
   schedulerLoop(); // schedule the first steps immediately rather than waiting a full interval
@@ -348,11 +798,27 @@ export function stopMusic(): void {
  * this is a harmless no-op there). A no-op while the engine isn't running,
  * so a stray call after `stopMusic()` can't resurrect a pattern nothing is
  * scheduling any more.
+ *
+ * Resets `currentStep` back to 0 so the new pattern (and the bass line's own
+ * 4-pulse cell grid, which shares this same running step count — see
+ * `maybeScheduleBass`) both start fresh from the new puzzle's own downbeat,
+ * and clears any bass note that was mid-decision (`bassNextMainWillPlay`) so
+ * a stale approach-slot decision from the old pattern's phase can't land on
+ * the new one's differently-aligned main slot. The harmonic walk itself
+ * (`activeChord`/`nextChord`/the persistent chord/tonic/mode state) is left
+ * completely untouched — the chord progression keeps evolving across the
+ * whole run, only the rhythm resets per puzzle. One side effect of resetting
+ * `currentStep` to exactly 0: `maybeAdvanceChord`'s own "once per loop"
+ * check (`currentStep % currentPattern.length === 0`) is trivially true on
+ * the very next pulse, so a new puzzle also advances the chord one step —
+ * fitting, since the percussion loop that "once per loop" is counted
+ * against just restarted too.
  */
 export function regenerateBlitzRhythm(): void {
   if (!running) return;
   currentPattern = generateEuclideanPattern();
   currentStep = 0;
+  bassNextMainWillPlay = false;
 }
 
 /** Sets the global music volume (0-1), applied live via a short ramp — same shape as `sfx.ts`'s `setSfxVolume`. Safe to call before the engine has ever started. */
@@ -361,6 +827,21 @@ export function setMusicVolume(volume: number): void {
   if (audioCtx && masterGain && running) {
     masterGain.gain.setTargetAtTime(currentVolume, audioCtx.currentTime, 0.05);
   }
+}
+
+/**
+ * Feeds the run's current remaining-time cushion into the bass line's own
+ * urgency curve (`bassProbability`). `main.ts`'s `blitzTick` calls this
+ * every frame — the same rAF loop that already recomputes "remaining" for
+ * the on-screen countdown — so the bass line always reacts to the live
+ * clock rather than a stale snapshot from whenever the current puzzle
+ * started. Safe to call before the engine has ever started (the value is
+ * just held for whenever `maybeScheduleBass` next reads it); harmless to
+ * keep calling after `stopMusic()` too, since nothing reads it once the
+ * scheduler isn't running.
+ */
+export function setBassRemainingMs(remainingMs: number): void {
+  bassRemainingMs = remainingMs;
 }
 
 /** Whether the engine is currently running — mostly for defensive/idempotency checks at call sites, not for any audible decision. */

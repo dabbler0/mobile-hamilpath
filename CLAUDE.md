@@ -2139,6 +2139,65 @@ node entirely separate from `audio/sfx.ts`'s — turning one down never
 touches the other. Wired exactly like the sfx slider: live on `input`,
 persisted only on `change` so dragging doesn't hammer `localStorage`.
 
+### Bass line
+
+A generative bass, layered underneath the percussion above, is ported from
+a second "Euclidean Timeline Generator" prototype variant — but only its
+harmonic engine and its "every 4 pulses, root/5th only" bass strategy; that
+prototype's piano voice, every *other* bass strategy it offered, and its own
+UI are all left out (this module stays headless — no display name, no
+comping voicing, nothing that would need a screen to show it).
+
+- **The chord progression** is a voice-leading walk: each candidate next
+  chord (drawn from the current home key's diatonic 7ths plus a "foreign"
+  key's — the parallel minor if home is major, the relative major if home
+  is minor) is costed by the cheapest of 24 possible voice/note
+  reassignments from the current 4-note voicing, and picked with probability
+  weighted toward smooth (low-cost) motion; a foreign-only candidate is
+  discounted, and landing on one moves the key there. A dominant 7th gets a
+  strong extra pull toward the major triad a 5th below it (classic V7→I),
+  without making the resolution certain. The chord changes once per full
+  percussion-pattern loop (the prototype's own default cadence, and the only
+  one this port keeps). The walk itself is a run-long thread, not a
+  per-puzzle one: `regenerateBlitzRhythm` (a fresh rhythm every puzzle, see
+  above) leaves the chord/tonic/mode state completely alone — only the
+  rhythm resets per puzzle, the harmony keeps evolving across the whole run.
+- **The bassline** plays a chord tone — root, then 5th, alternating — every
+  4 pulses, each one preceded by a chromatic passing tone one pulse earlier
+  that approaches it from whichever direction (up or down) is a half-step
+  closer. Both are the same plucked, low-register synth voice
+  (`playBass` — sine+triangle through a lowpass filter, a quiet
+  octave-up double for presence, a short noise "pluck" transient at the
+  attack), fixed to a 2-octave register (MIDI 24-47) the voice-leading walk
+  is wrapped back into every time it would otherwise drift out.
+- **Bass notes are not unconditional**, unlike the reference tool's own
+  strategy: whether a given 4-pulse cell actually sounds at all is a coin
+  flip, weighted by how much time is left on the run's clock
+  (`audio/music.ts`'s `bassProbability`, fed by `setBassRemainingMs` — called
+  every frame from `main.ts`'s `blitzTick`, the same rAF loop that already
+  recomputes "remaining" for the on-screen countdown). Above a fixed safety
+  cushion (`BASS_SAFE_MS`, 20s) the probability is exactly 0 — silence;
+  below it, probability ramps linearly up to (arbitrarily close to) 1 right
+  as the clock would hit zero. This is deliberately the *entire* mechanism —
+  there's no separate "new puzzle → reset bass to off" flag anywhere in the
+  code. "Whenever a new puzzle is started in Blitz mode, start without
+  bassline" instead falls out of this one formula for free: a fresh
+  puzzle's own time-back bonus (`advanceBlitzPuzzle`'s `awardMs`) routinely
+  pushes the remaining time straight back over `BASS_SAFE_MS` the instant
+  it's credited, so the bass line naturally goes quiet right when a puzzle
+  begins and only creeps back in as that puzzle drags on and the cushion
+  erodes again — a rising sense of urgency that tracks the actual danger of
+  the run ending, not just elapsed wall-clock time.
+- The coin flip happens at each cell's *approach* slot (one pulse before the
+  main note), not the main slot itself, since the passing tone has to be
+  scheduled a pulse ahead of the note it leads into — there has to be
+  something decided before that scheduling call. The decision
+  (`bassNextMainWillPlay`) carries forward exactly one pulse to the main
+  slot; the root/5th alternation (`bassRootFifthToggle`) only flips when a
+  main note actually plays, so a cell the coin flip skips doesn't throw the
+  alternation off — the next cell that *does* play picks up right where it
+  left off.
+
 ## `main.ts` orchestration
 
 Holds the mutable app state: `screen` (above), `mode: 'playing' |
